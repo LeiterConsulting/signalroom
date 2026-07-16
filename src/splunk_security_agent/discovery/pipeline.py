@@ -1393,6 +1393,26 @@ class DiscoveryPipeline:
                     ],
                 )
             candidates = self.evidence.semantic_search(query_vector, profile_id, limit=16)
+            settings = self.config.load()
+            reranker_id = settings.reranker_model
+            reranked = False
+            if (
+                settings.specialist_runtime == "local"
+                and reranker_id
+                and local_model_installed(self.config.local_model_path(reranker_id))
+            ):
+                try:
+                    reranker = self.router.provider(reranker_id)
+                    scores = await reranker.rerank(
+                        query, [candidate.excerpt for candidate in candidates]
+                    )
+                    if len(scores) == len(candidates):
+                        for candidate, score in zip(candidates, scores, strict=True):
+                            candidate.score = round(float(score), 4)
+                        candidates.sort(key=lambda candidate: candidate.score, reverse=True)
+                        reranked = True
+                except Exception:
+                    reranked = False
             matches = []
             seen_artifacts = set()
             for item in candidates:
@@ -1410,6 +1430,7 @@ class DiscoveryPipeline:
                     "status": "complete",
                     "provider": "local-transformers",
                     "profile": profile_id,
+                    "reranker_profile": reranker_id if reranked else "",
                     "duration_seconds": round((datetime.now(UTC) - started).total_seconds(), 2),
                     "result_count": len(matches),
                 },

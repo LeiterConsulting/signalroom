@@ -173,11 +173,13 @@
 
       <section class="view" id="modelsView">
         <div class="context-toolbar">
-          <div><p class="eyebrow">CAPABILITY ROUTING</p><h2>Specialists, not just model names.</h2><p>Each profile declares what it is trusted to do. Auto-routing sends security reasoning, retrieval, and entity extraction to the right model.</p></div>
-          <button class="button primary" id="configureModels">Configure profiles</button>
+          <div><p class="eyebrow">CAPABILITY ROUTING</p><h2>Specialists, not just model names.</h2><p>Each profile declares what it is trusted to do. Auto-routing sends security reasoning, retrieval, evidence reranking, and entity extraction to the right model.</p></div>
+          <div class="button-row"><button class="button ghost" id="checkModelUpdates">Check for updates</button><button class="button primary" id="configureModels">Configure profiles</button></div>
         </div>
-        <div class="routing-map"><span>Operator question</span><b aria-hidden="true">→</b><span>Task router</span><b aria-hidden="true">→</b><div><em>General agent</em><em>Security reasoning</em><em>Cyber retrieval</em><em>Entity extraction</em></div></div>
+        <section class="model-freshness" id="modelFreshness" aria-live="polite" hidden></section>
+        <div class="routing-map"><span>Operator question</span><b aria-hidden="true">→</b><span>Task router</span><b aria-hidden="true">→</b><div><em>General agent</em><em>Security reasoning</em><em>Cyber retrieval</em><em>Evidence reranking</em><em>Entity extraction</em></div></div>
         <div class="model-grid" id="modelGrid"></div>
+        <section class="candidate-models" id="candidateModels"></section>
       </section>
     </main>
   </div>

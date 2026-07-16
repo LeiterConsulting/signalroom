@@ -32,6 +32,19 @@ DEFAULT_MODELS = [
         provenance="Foundation AI at Cisco / fdtn-ai",
     ),
     ModelProfile(
+        id="foundation-sec-instruct",
+        label="Foundation-Sec 1.1 Instruct",
+        provider="ollama",
+        model="hf.co/fdtn-ai/Foundation-Sec-1.1-8B-Instruct-Q4_K_M-GGUF:Q4_K_M",
+        task="security_reasoning",
+        endpoint="http://localhost:11434",
+        description=(
+            "Faster cybersecurity instruction following for concise analysis, extraction, and "
+            "analyst-facing summaries. Available as an explicit local Ollama profile."
+        ),
+        provenance="Foundation AI at Cisco / fdtn-ai",
+    ),
+    ModelProfile(
         id="securebert-embed",
         label="SecureBERT retrieval",
         provider="huggingface",
@@ -53,7 +66,29 @@ DEFAULT_MODELS = [
         provenance="Cisco AI",
         context_window=1024,
     ),
+    ModelProfile(
+        id="securebert-rerank",
+        label="SecureBERT evidence reranker",
+        provider="huggingface",
+        model="cisco-ai/SecureBERT2.0-cross_encoder",
+        task="reranking",
+        endpoint="https://router.huggingface.co/hf-inference/models",
+        description=(
+            "Second-stage cybersecurity relevance scoring that reranks retrieved Context before "
+            "it reaches discovery or the chat agent."
+        ),
+        provenance="Cisco AI",
+        context_window=1024,
+    ),
 ]
+
+
+def _merge_default_models(models: list[ModelProfile]) -> list[ModelProfile]:
+    """Add newly shipped capabilities without overwriting operator-edited profiles."""
+    merged = list(models)
+    existing = {profile.id for profile in merged}
+    merged.extend(profile.model_copy(deep=True) for profile in DEFAULT_MODELS if profile.id not in existing)
+    return merged
 
 
 class SecretVault:
@@ -99,7 +134,9 @@ class ConfigStore:
             data = json.loads(self.path.read_text(encoding="utf-8"))
             settings = AppSettings.model_validate(data)
             if not settings.models:
-                settings.models = DEFAULT_MODELS
+                settings.models = [profile.model_copy(deep=True) for profile in DEFAULT_MODELS]
+            else:
+                settings.models = _merge_default_models(settings.models)
             return settings
 
     def save(self, settings: AppSettings) -> AppSettings:

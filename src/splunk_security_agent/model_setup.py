@@ -5,6 +5,7 @@ import importlib
 import json
 import os
 import platform
+import re
 import sys
 import uuid
 from datetime import UTC, datetime
@@ -30,6 +31,57 @@ LOCAL_RUNTIME_PACKAGES = (
     "torch>=2.5",
     "transformers>=4.48,<6",
 )
+
+EVALUATED_MODEL_CANDIDATES: tuple[dict[str, str], ...] = (
+    {
+        "id": "securebert-code-vulnerability",
+        "label": "SecureBERT 2.0 code vulnerability detection",
+        "model": "cisco-ai/SecureBERT2.0-code-vuln-detection",
+        "owner": "Cisco AI",
+        "status": "evaluated-next",
+        "runtime": "local-transformers",
+        "purpose": "Assistive binary vulnerability screening for uploaded source-code snippets.",
+        "constraint": (
+            "Not suitable for SPL, event text, dynamic analysis, or autonomous remediation; "
+            "needs a code-artifact workflow and analyst-visible confidence contract first."
+        ),
+        "source_url": "https://huggingface.co/cisco-ai/SecureBERT2.0-code-vuln-detection",
+    },
+    {
+        "id": "cisco-time-series-1",
+        "label": "Cisco Time Series Model 1.0",
+        "model": "cisco-ai/cisco-time-series-model-1.0",
+        "owner": "Cisco AI",
+        "status": "adapter-required",
+        "runtime": "dedicated-time-series",
+        "purpose": "Zero-shot forecasting for event-rate and observability time series.",
+        "constraint": (
+            "Requires numeric series extraction, resampling, evaluation, and its dedicated runtime; "
+            "it is not a chat, embedding, or standard Transformers pipeline."
+        ),
+        "source_url": "https://huggingface.co/cisco-ai/cisco-time-series-model-1.0",
+    },
+    {
+        "id": "splunk-mltk-models",
+        "label": "Splunk MLTK instance models",
+        "model": "Splunk-instance-native",
+        "owner": "Splunk",
+        "status": "instance-inventory-next",
+        "runtime": "splunk-mltk",
+        "purpose": "Inventory and monitor models trained, versioned, and applied inside Splunk.",
+        "constraint": (
+            "These are customer/instance-trained MLTK models rather than downloadable pretrained "
+            "Cisco or Splunk language models."
+        ),
+        "source_url": "https://docs.splunk.com/Documentation/MLApp/latest/User/WelcometoMLTK",
+    },
+)
+
+
+def _huggingface_repo(model: str) -> str:
+    """Return the Hub repo behind an hf.co Ollama model, if one is explicit."""
+    match = re.match(r"^hf\.co/([^/]+/[^:]+)(?::[^:]+)?$", model, flags=re.IGNORECASE)
+    return match.group(1) if match else ""
 
 
 def _ollama_base(profile: ModelProfile) -> str:
@@ -62,6 +114,238 @@ class ModelSetupService:
         self.evidence = evidence
         self.jobs: dict[str, dict[str, Any]] = {}
         self.context_index_job: dict[str, Any] = {"status": "idle"}
+        self.revision_state_path = self.config.root / "model_revisions.json"
+
+    def catalog(self) -> dict[str, Any]:
+        """Describe shipped capabilities and researched candidates without overstating support."""
+        settings = self.config.load()
+        return {
+            "configured": [profile.model_dump(mode="json") for profile in settings.models],
+            "evaluated_candidates": list(EVALUATED_MODEL_CANDIDATES),
+            "policy": (
+                "SignalRoom only promotes first-party model sources. Candidate status means the "
+                "runtime and analyst workflow still need validation before installation is offered."
+            ),
+        }
+
+    def _load_revision_state(self) -> dict[str, Any]:
+        if not self.revision_state_path.exists():
+            return {"profiles": {}}
+        try:
+            value = json.loads(self.revision_state_path.read_text(encoding="utf-8"))
+            return value if isinstance(value, dict) else {"profiles": {}}
+        except (OSError, ValueError):
+            return {"profiles": {}}
+
+    def _save_revision_state(self, value: dict[str, Any]) -> None:
+        self.revision_state_path.write_text(json.dumps(value, indent=2), encoding="utf-8")
+
+    async def _hub_metadata(
+        self, client: httpx.AsyncClient, repo: str
+    ) -> dict[str, Any]:
+        headers = {}
+        token = self.config.secret("huggingface_token")
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        response = await client.get(f"https://huggingface.co/api/models/{repo}", headers=headers)
+        response.raise_for_status()
+        metadata = response.json()
+        return {
+            "revision": str(metadata.get("sha") or ""),
+            "last_modified": metadata.get("lastModified"),
+            "pipeline_tag": metadata.get("pipeline_tag"),
+            "source_url": f"https://huggingface.co/{repo}",
+        }
+
+    async def check_updates(self) -> dict[str, Any]:
+        """Compare immutable local provenance with current first-party source revisions."""
+        settings = self.config.load()
+        tracking = self._load_revision_state().get("profiles", {})
+        ollama_profiles = [profile for profile in settings.models if profile.provider == "ollama"]
+        endpoints = {_ollama_base(profile) for profile in ollama_profiles}
+        tags_by_endpoint: dict[str, dict[str, dict[str, Any]]] = {}
+        endpoint_errors: dict[str, str] = {}
+        repos = {
+            profile.model if profile.provider == "huggingface" else _huggingface_repo(profile.model)
+            for profile in settings.models
+        } - {""}
+        hub_metadata: dict[str, dict[str, Any]] = {}
+        hub_errors: dict[str, str] = {}
+
+        async with httpx.AsyncClient(timeout=12) as client:
+            async def load_tags(endpoint: str) -> None:
+                try:
+                    response = await client.get(f"{endpoint}/api/tags")
+                    response.raise_for_status()
+                    tags_by_endpoint[endpoint] = {
+                        str(item.get("name") or "").lower(): item
+                        for item in response.json().get("models", [])
+                    }
+                except (httpx.HTTPError, ValueError) as exc:
+                    endpoint_errors[endpoint] = str(exc)
+
+            async def load_hub(repo: str) -> None:
+                try:
+                    hub_metadata[repo] = await self._hub_metadata(client, repo)
+                except (httpx.HTTPError, ValueError) as exc:
+                    hub_errors[repo] = str(exc)
+
+            await asyncio.gather(
+                *(load_tags(endpoint) for endpoint in endpoints),
+                *(load_hub(repo) for repo in repos),
+            )
+
+        results: list[dict[str, Any]] = []
+        for profile in settings.models:
+            base = {
+                "profile_id": profile.id,
+                "label": profile.label,
+                "model": profile.model,
+                "provider": profile.provider,
+                "task": profile.task,
+                "checked_at": datetime.now(UTC).isoformat(),
+            }
+            repo = profile.model if profile.provider == "huggingface" else _huggingface_repo(
+                profile.model
+            )
+            remote = hub_metadata.get(repo, {})
+            base.update(remote_revision=remote.get("revision", ""), **remote)
+            if profile.provider == "huggingface":
+                manifest_path = self.config.local_model_path(profile.id) / ".signalroom-model.json"
+                manifest: dict[str, Any] = {}
+                if manifest_path.exists():
+                    try:
+                        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                    except (OSError, ValueError):
+                        manifest = {}
+                installed = local_model_installed(self.config.local_model_path(profile.id))
+                local_revision = str(manifest.get("revision") or "")
+                base.update(installed=installed, local_revision=local_revision)
+                if not installed:
+                    base.update(status="not-installed", detail="Available for an explicit local install.")
+                elif repo in hub_errors:
+                    base.update(status="error", detail=hub_errors[repo])
+                elif not local_revision:
+                    base.update(
+                        status="untracked",
+                        detail=(
+                            "Installed files predate immutable revision tracking; reinstall to "
+                            "establish provenance."
+                        ),
+                    )
+                elif local_revision != remote.get("revision"):
+                    base.update(
+                        status="update-available",
+                        detail="The first-party Hub repository has a newer immutable revision.",
+                    )
+                else:
+                    base.update(status="current", detail="Installed revision matches the Hub.")
+                results.append(base)
+                continue
+
+            endpoint = _ollama_base(profile)
+            tag = tags_by_endpoint.get(endpoint, {}).get(profile.model.lower())
+            if tag is None and ":" not in profile.model:
+                tag = tags_by_endpoint.get(endpoint, {}).get(f"{profile.model.lower()}:latest")
+            installed = tag is not None
+            local_digest = str((tag or {}).get("digest") or "")
+            base.update(installed=installed, local_digest=local_digest)
+            if endpoint in endpoint_errors:
+                base.update(status="error", detail=endpoint_errors[endpoint])
+            elif not installed:
+                base.update(status="not-installed", detail="Available for an explicit Ollama download.")
+            elif not repo:
+                base.update(
+                    status="check-unavailable",
+                    detail=(
+                        "Ollama exposes the local digest but no non-mutating registry freshness API; "
+                        "use an explicit download to refresh."
+                    ),
+                )
+            elif repo in hub_errors:
+                base.update(status="error", detail=hub_errors[repo])
+            else:
+                installed_state = tracking.get(profile.id, {})
+                tracked_revision = str(installed_state.get("source_revision") or "")
+                tracked_digest = str(installed_state.get("local_digest") or "")
+                base["local_revision"] = tracked_revision
+                if (
+                    not tracked_revision
+                    or not tracked_digest
+                    or not local_digest
+                    or tracked_digest != local_digest
+                ):
+                    base.update(
+                        status="untracked",
+                        detail=(
+                            "The model is installed, but SignalRoom did not perform the download that "
+                            "would bind its Ollama digest to a Hub revision. Refresh once to begin tracking."
+                        ),
+                    )
+                elif tracked_revision != remote.get("revision"):
+                    base.update(
+                        status="update-available",
+                        detail="The first-party GGUF repository has a newer immutable revision.",
+                    )
+                else:
+                    base.update(status="current", detail="Tracked Ollama digest matches the Hub revision.")
+            results.append(base)
+
+        counts = {
+            status: sum(1 for item in results if item["status"] == status)
+            for status in {
+                "current",
+                "update-available",
+                "not-installed",
+                "untracked",
+                "check-unavailable",
+                "error",
+            }
+        }
+        return {
+            "checked_at": datetime.now(UTC).isoformat(),
+            "profiles": results,
+            "counts": counts,
+            "downloads_started": 0,
+            "policy": "Read-only check. SignalRoom never downloads, updates, or swaps a model here.",
+        }
+
+    async def _record_ollama_revision(self, profile: ModelProfile) -> dict[str, Any]:
+        """Bind a completed explicit Ollama pull to its immutable Hub source revision."""
+        repo = _huggingface_repo(profile.model)
+        if not repo:
+            return {"tracked": False, "reason": "No explicit Hugging Face source repository."}
+        endpoint = _ollama_base(profile)
+        async with httpx.AsyncClient(timeout=12) as client:
+            tags_response, remote = await asyncio.gather(
+                client.get(f"{endpoint}/api/tags"),
+                self._hub_metadata(client, repo),
+            )
+            tags_response.raise_for_status()
+        tag = next(
+            (
+                item
+                for item in tags_response.json().get("models", [])
+                if _model_installed(profile.model, [str(item.get("name") or "")])
+            ),
+            None,
+        )
+        if not tag:
+            return {"tracked": False, "reason": "Ollama did not report the completed model."}
+        local_digest = str(tag.get("digest") or "")
+        if not local_digest:
+            return {"tracked": False, "reason": "Ollama did not report a content digest."}
+        state = self._load_revision_state()
+        profiles = state.setdefault("profiles", {})
+        profiles[profile.id] = {
+            "model": profile.model,
+            "source_repo": repo,
+            "source_revision": remote["revision"],
+            "local_digest": local_digest,
+            "recorded_at": datetime.now(UTC).isoformat(),
+        }
+        self._save_revision_state(state)
+        return {"tracked": True, **profiles[profile.id]}
 
     async def readiness(self) -> dict[str, Any]:
         settings = self.config.load()
@@ -320,7 +604,12 @@ class ModelSetupService:
         )
         if not profile:
             raise KeyError(f"Enabled model profile not found: {profile_id}")
-        if profile.provider == "huggingface" and profile.task not in {"embedding", "ner"}:
+        if profile.provider == "huggingface" and profile.task not in {
+            "embedding",
+            "ner",
+            "reranking",
+            "classification",
+        }:
             raise KeyError(f"Profile cannot be installed as a local specialist: {profile_id}")
         existing = next(
             (
@@ -387,6 +676,13 @@ class ModelSetupService:
                             total=total,
                             progress=round(completed * 100 / total) if total else job["progress"],
                         )
+            profile = next(
+                item for item in self.config.load().models if item.id == job["profile_id"]
+            )
+            try:
+                job["revision_tracking"] = await self._record_ollama_revision(profile)
+            except Exception as exc:
+                job["revision_tracking"] = {"tracked": False, "reason": str(exc)}
             job.update(status="complete", detail="Model ready", progress=100)
         except (httpx.HTTPError, ValueError, RuntimeError) as exc:
             job.update(status="error", detail=str(exc))
@@ -595,9 +891,10 @@ async def _cli() -> int:
     if args.command == "status":
         print(json.dumps(await service.readiness(), indent=2))
         return 0
-    profile_ids = args.profiles or [
-        profile.id for profile in service.config.load().models if profile.provider == "ollama"
-    ]
+    settings = service.config.load()
+    profile_ids = args.profiles or list(
+        dict.fromkeys([settings.default_chat_model, settings.security_reasoning_model])
+    )
     for profile_id in profile_ids:
         job = service.start_pull(profile_id)
         while job["status"] in {"queued", "pulling"}:

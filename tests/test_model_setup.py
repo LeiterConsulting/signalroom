@@ -8,7 +8,11 @@ from typing import Any
 import pytest
 
 from splunk_security_agent.config import ConfigStore
-from splunk_security_agent.model_setup import ModelSetupService, _model_installed
+from splunk_security_agent.model_setup import (
+    ModelSetupService,
+    _huggingface_repo,
+    _model_installed,
+)
 from splunk_security_agent.rag import EvidenceStore
 from splunk_security_agent.schemas import ArtifactCreate
 
@@ -80,7 +84,59 @@ async def test_readiness_reports_each_ollama_profile(monkeypatch, tmp_path):
     assert {profile["id"] for profile in result["local_transformers"]["profiles"]} == {
         "securebert-embed",
         "securebert-ner",
+        "securebert-rerank",
     }
+
+
+def test_huggingface_repo_extracts_explicit_ollama_hub_source():
+    assert _huggingface_repo(
+        "hf.co/fdtn-ai/Foundation-Sec-1.1-8B-Instruct-Q4_K_M-GGUF:Q4_K_M"
+    ) == "fdtn-ai/Foundation-Sec-1.1-8B-Instruct-Q4_K_M-GGUF"
+    assert _huggingface_repo("llama3.1:8b") == ""
+
+
+@pytest.mark.asyncio
+async def test_update_check_is_read_only_and_does_not_claim_untracked_ollama_is_current(
+    monkeypatch, tmp_path
+):
+    class UpdateClient(FakeClient):
+        async def get(self, url: str, **kwargs: Any) -> FakeResponse:
+            if url.endswith("/api/tags"):
+                return FakeResponse(
+                    {
+                        "models": [
+                            {"name": "llama3.1:8b", "digest": "general-digest"},
+                            {
+                                "name": (
+                                    "hf.co/fdtn-ai/"
+                                    "Foundation-Sec-8B-Reasoning-Q4_K_M-GGUF:Q4_K_M"
+                                ),
+                                "digest": "security-digest",
+                            },
+                        ]
+                    }
+                )
+            if url.startswith("https://huggingface.co/api/models/"):
+                return FakeResponse(
+                    {
+                        "sha": "remote-immutable-sha",
+                        "lastModified": "2026-07-01T00:00:00Z",
+                        "pipeline_tag": "sentence-similarity",
+                    }
+                )
+            return await super().get(url, **kwargs)
+
+    monkeypatch.setattr("splunk_security_agent.model_setup.httpx.AsyncClient", UpdateClient)
+    service = ModelSetupService(ConfigStore(tmp_path))
+
+    result = await service.check_updates()
+    profiles = {item["profile_id"]: item for item in result["profiles"]}
+
+    assert result["downloads_started"] == 0
+    assert profiles["ollama-general"]["status"] == "check-unavailable"
+    assert profiles["foundation-sec"]["status"] == "untracked"
+    assert profiles["securebert-rerank"]["status"] == "not-installed"
+    assert FakeClient.last_instance.posts == []
 
 
 def test_pull_accepts_securebert_as_local_transformers_install(monkeypatch, tmp_path):

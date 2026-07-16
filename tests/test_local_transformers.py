@@ -1,3 +1,5 @@
+import pytest
+
 from splunk_security_agent.config import ConfigStore
 from splunk_security_agent.providers.huggingface import HuggingFaceProvider
 from splunk_security_agent.providers.local_transformers import (
@@ -76,3 +78,25 @@ def test_entity_normalization_recovers_offsets_and_merges_indicator_fragments():
 
     assert [item["word"] for item in result] == ["192.168.1.203", "esp32_temp"]
     assert result[0]["score"] == 0.96
+
+
+@pytest.mark.asyncio
+async def test_local_cross_encoder_reranks_security_evidence(tmp_path, monkeypatch):
+    config = ConfigStore(tmp_path / "data")
+    profile = next(item for item in config.load().models if item.id == "securebert-rerank")
+    provider = LocalTransformersProvider(profile, config.local_model_path(profile.id))
+
+    class FakeCrossEncoder:
+        def predict(self, pairs, **kwargs):
+            assert pairs[0][0] == "Kerberoasting"
+            return [0.91, 0.08]
+
+    monkeypatch.setattr(provider, "_reranker", lambda: FakeCrossEncoder())
+    monkeypatch.setattr(provider, "_device", lambda: "cpu")
+
+    scores = await provider.rerank(
+        "Kerberoasting",
+        ["Anomalous Kerberos service tickets", "Web proxy cache statistics"],
+    )
+
+    assert scores == [0.91, 0.08]

@@ -22,7 +22,9 @@ class ModelProfile(BaseModel):
     label: str
     provider: Literal["ollama", "huggingface"]
     model: str
-    task: Literal["chat", "security_reasoning", "embedding", "ner"] = "chat"
+    task: Literal[
+        "chat", "security_reasoning", "embedding", "ner", "reranking", "classification"
+    ] = "chat"
     endpoint: str = ""
     enabled: bool = True
     description: str = ""
@@ -37,6 +39,7 @@ class AppSettings(BaseModel):
     default_chat_model: str = "ollama-general"
     security_reasoning_model: str = "foundation-sec"
     embedding_model: str = "securebert-embed"
+    reranker_model: str = "securebert-rerank"
     ner_model: str = "securebert-ner"
     specialist_runtime: Literal["local", "cloud"] = "local"
     huggingface_policy: Literal["disabled", "ask", "allow"] = "disabled"

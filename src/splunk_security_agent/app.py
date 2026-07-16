@@ -209,6 +209,19 @@ async def test_connection(request: ConnectionTestRequest) -> dict[str, Any]:
                 "CVE-2026-1234 was exploited by ExampleMalware on edge-gateway-01."
             )
             return {**health, "capability_ok": True, "entities": len(entities)}
+        if profile.task == "reranking":
+            scores = await provider.rerank(
+                "Kerberoasting detection evidence",
+                [
+                    "Monitor anomalous Kerberos service ticket requests.",
+                    "Review web proxy cache hit ratios.",
+                ],
+            )
+            return {
+                **health,
+                "capability_ok": len(scores) == 2 and scores[0] > scores[1],
+                "scores": scores,
+            }
         if profile.provider != "ollama" or not health.get("installed"):
             return health
         result = await provider.chat(
@@ -236,6 +249,16 @@ async def test_connection(request: ConnectionTestRequest) -> dict[str, Any]:
 @app.get("/api/model-setup/readiness")
 async def model_readiness() -> dict[str, Any]:
     return await services.model_setup.readiness()
+
+
+@app.get("/api/model-setup/catalog")
+async def model_catalog() -> dict[str, Any]:
+    return services.model_setup.catalog()
+
+
+@app.get("/api/model-setup/updates")
+async def model_updates() -> dict[str, Any]:
+    return await services.model_setup.check_updates()
 
 
 @app.post("/api/model-setup/pull", status_code=202)

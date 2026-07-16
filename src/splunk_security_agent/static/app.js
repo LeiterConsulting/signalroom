@@ -3,7 +3,8 @@ const state = {
   ledger: [], lastDiscovery: null, promptPath: [], contextKind: 'all', cases: [],
   activeCase: null, pendingCaseItem: null, detailActions: [], contextPage: 1, contextPageSize: 9,
   contextItems: [], editingArtifactId: null, editingCaseItemId: null, demoTourStep: -1,
-  modelRecommendations: {}, validations: [], editingValidationId: null
+  modelRecommendations: {}, validations: [], editingValidationId: null,
+  modelUpdates: null, modelCatalog: null
 };
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => [...document.querySelectorAll(selector)];
@@ -417,6 +418,54 @@ async function loadModelReadiness() {
   catch (error) { readinessBadge($('#ollamaReadiness'), 'Check failed', 'warn'); toast(error.message); }
 }
 
+async function loadModelCatalog() {
+  try {
+    state.modelCatalog = await api('/api/model-setup/catalog');
+    renderModelCatalog();
+  } catch (error) {
+    state.modelCatalog = null;
+  }
+}
+
+async function checkModelUpdates(button) {
+  const original = button?.textContent || 'Check for updates';
+  if (button) { button.disabled = true; button.textContent = 'Checking sources…'; }
+  const panel = $('#modelFreshness');
+  panel.hidden = false;
+  panel.innerHTML = '<div><b>Checking first-party sources</b><span>No downloads or model swaps will be started.</span></div>';
+  try {
+    state.modelUpdates = await api('/api/model-setup/updates');
+    renderModelFreshness();
+    renderModels();
+  } catch (error) {
+    panel.innerHTML = `<div><b>Freshness check failed</b><span>${escapeHtml(error.message)}</span></div>`;
+  } finally {
+    if (button) { button.disabled = false; button.textContent = original; }
+  }
+}
+
+function renderModelFreshness() {
+  const value = state.modelUpdates; const panel = $('#modelFreshness');
+  if (!value) { panel.hidden = true; return; }
+  const counts = value.counts || {};
+  const checked = new Date(value.checked_at).toLocaleString();
+  panel.hidden = false;
+  panel.innerHTML = `<div><b>Model source check complete</b><span>${escapeHtml(value.policy)}</span></div>
+    <div class="freshness-counts"><span class="current"><b>${counts.current || 0}</b> current</span><span class="update"><b>${counts['update-available'] || 0}</b> updates</span><span><b>${counts.untracked || 0}</b> untracked</span><span><b>${counts.error || 0}</b> errors</span></div>
+    <time datetime="${escapeHtml(value.checked_at)}">${escapeHtml(checked)}</time>`;
+}
+
+function renderModelCatalog() {
+  const panel = $('#candidateModels'); const candidates = state.modelCatalog?.evaluated_candidates || [];
+  if (!candidates.length) { panel.innerHTML = ''; return; }
+  panel.innerHTML = `<header><div><span>EVALUATED NEXT</span><h3>Useful models with honest integration boundaries</h3></div><p>${escapeHtml(state.modelCatalog.policy || '')}</p></header>
+    <div class="candidate-model-grid">${candidates.map(item => `<article>
+      <div><span>${escapeHtml(item.owner)} · ${escapeHtml(item.runtime.replaceAll('-', ' '))}</span><b>${escapeHtml(item.status.replaceAll('-', ' '))}</b></div>
+      <h4>${escapeHtml(item.label)}</h4><p>${escapeHtml(item.purpose)}</p><small>${escapeHtml(item.constraint)}</small>
+      <a href="${escapeHtml(item.source_url)}" target="_blank" rel="noopener">Review first-party source ↗</a>
+    </article>`).join('')}</div>`;
+}
+
 async function pullModel(profileId, button) {
   button.disabled = true; button.textContent = 'Starting…';
   try {
@@ -604,15 +653,19 @@ function renderModels() {
     const readiness = (model.provider === 'ollama' ? ollamaProfiles : localProfiles).find(item => item.id === model.id);
     const isLocalSpecialist = model.provider === 'huggingface' && state.settings.specialist_runtime === 'local';
     const providerLabel = model.provider === 'ollama' ? 'ollama' : isLocalSpecialist ? 'local transformers' : 'hugging face cloud';
-    const capabilityLabel = ['embedding','ner'].includes(model.task) ? 'Test capability' : 'Test generation';
+    const capabilityLabel = ['embedding','ner','reranking','classification'].includes(model.task) ? 'Test capability' : 'Test generation';
+    const update = state.modelUpdates?.profiles?.find(item => item.profile_id === model.id);
+    const updateLabels = { current:'CURRENT', 'update-available':'UPDATE AVAILABLE', 'not-installed':'NOT INSTALLED', untracked:'PROVENANCE UNTRACKED', 'check-unavailable':'MANUAL REFRESH', error:'CHECK ERROR' };
     return `
     <article class="model-card">
       <header><span class="provider">${escapeHtml(providerLabel)} · ${escapeHtml(model.task.replace('_',' '))}</span><i class="model-status ${readiness?.loaded ? 'active' : readiness?.installed ? 'ok' : ''}" id="status-${escapeHtml(model.id)}"></i></header>
       <h3>${escapeHtml(model.label)}</h3><div class="model-id">${escapeHtml(model.model)}</div>
       <p>${escapeHtml(model.description)}</p><div class="tags"><span>${escapeHtml(model.provenance || 'Operator supplied')}</span><span>${Number(model.context_window).toLocaleString()} ctx</span>${readiness?.loaded ? '<span class="active-model-tag">LOADED IN OLLAMA</span>' : ''}${isLocalSpecialist && readiness?.installed ? '<span class="active-model-tag">LOCAL · NO CLOUD INFERENCE</span>' : ''}</div>
-      <footer><span>${model.enabled ? 'ENABLED' : 'DISABLED'}</span><div class="model-actions">${model.provider === 'ollama' && readiness?.installed && !readiness?.loaded ? `<button data-activate-model="${escapeHtml(model.id)}">Activate</button>` : ''}${isLocalSpecialist && !readiness?.installed ? `<button data-pull-profile="${escapeHtml(model.id)}">Install locally</button>` : ''}<button data-test-model="${escapeHtml(model.id)}">${capabilityLabel}</button></div></footer>
+      ${update ? `<div class="model-update ${escapeHtml(update.status)}"><b>${escapeHtml(updateLabels[update.status] || update.status)}</b><span>${escapeHtml(update.detail || '')}</span>${update.last_modified ? `<time>Source updated ${escapeHtml(new Date(update.last_modified).toLocaleDateString())}</time>` : ''}</div>` : ''}
+      <footer><span>${model.enabled ? 'ENABLED' : 'DISABLED'}</span><div class="model-actions">${model.provider === 'ollama' && readiness?.installed && !readiness?.loaded ? `<button data-activate-model="${escapeHtml(model.id)}">Activate</button>` : ''}${model.provider === 'ollama' && !readiness?.installed ? `<button data-pull-profile="${escapeHtml(model.id)}">Download</button>` : ''}${isLocalSpecialist && !readiness?.installed ? `<button data-pull-profile="${escapeHtml(model.id)}">Install locally</button>` : ''}${update && ['update-available','untracked','check-unavailable'].includes(update.status) && readiness?.installed ? `<button data-pull-profile="${escapeHtml(model.id)}">Refresh explicitly</button>` : ''}<button data-test-model="${escapeHtml(model.id)}">${capabilityLabel}</button></div></footer>
     </article>`;
   }).join('');
+  renderModelCatalog();
 }
 
 function renderModelRecommendations(items = []) {
@@ -1267,6 +1320,7 @@ document.addEventListener('click', async event => {
   if (pull) pullModel(pull.dataset.pullProfile, pull);
   const activate = event.target.closest('[data-activate-model]');
   if (activate) activateModel(activate.dataset.activateModel, activate);
+  if (event.target.closest('#checkModelUpdates')) checkModelUpdates(event.target.closest('#checkModelUpdates'));
   const contextKind = event.target.closest('[data-context-kind]');
   if (contextKind) {
     state.contextKind = contextKind.dataset.contextKind;
@@ -1392,4 +1446,4 @@ document.addEventListener('keydown', event => {
   else if (!$('#caseModal').hidden) { $('#caseModal').hidden = true; state.pendingCaseItem = null; }
 });
 
-Promise.all([loadSettings(), loadArtifacts(), loadCases(), loadLatestDiscovery(), loadValidations()]).then(() => { renderPromptTree(); renderValidations(); handleDeepLink(); }).catch(error => toast(error.message));
+Promise.all([loadSettings(), loadArtifacts(), loadCases(), loadLatestDiscovery(), loadValidations(), loadModelCatalog()]).then(() => { renderPromptTree(); renderValidations(); handleDeepLink(); }).catch(error => toast(error.message));

@@ -491,9 +491,16 @@ class SecurityAgent:
                 for item in semantic:
                     if item.id not in merged or item.score > merged[item.id].score:
                         merged[item.id] = item
+                ranked, reranked = await self._rerank_evidence(
+                    query, list(merged.values()), settings.reranker_model
+                )
                 result = (
-                    sorted(merged.values(), key=lambda item: item.score, reverse=True)[:6],
-                    f"Hybrid {specialist_label} similarity + SQLite FTS5",
+                    ranked[:6],
+                    (
+                        f"Hybrid {specialist_label} similarity + SecureBERT reranking + SQLite FTS5"
+                        if reranked
+                        else f"Hybrid {specialist_label} similarity + SQLite FTS5"
+                    ),
                 )
                 self._retrieval_cache[cache_key] = (time.monotonic(), *result)
                 return result
@@ -514,9 +521,16 @@ class SecurityAgent:
             for item in semantic:
                 if item.id not in merged or item.score > merged[item.id].score:
                     merged[item.id] = item
+            ranked, reranked = await self._rerank_evidence(
+                query, list(merged.values()), settings.reranker_model
+            )
             result = (
-                sorted(merged.values(), key=lambda item: item.score, reverse=True)[:6],
-                f"Hybrid {specialist_label} semantic + SQLite FTS5",
+                ranked[:6],
+                (
+                    f"Hybrid {specialist_label} semantic + SecureBERT reranking + SQLite FTS5"
+                    if reranked
+                    else f"Hybrid {specialist_label} semantic + SQLite FTS5"
+                ),
             )
             self._retrieval_cache[cache_key] = (time.monotonic(), *result)
             return result
@@ -524,6 +538,30 @@ class SecurityAgent:
             result = (lexical[:6], "SQLite FTS5 (semantic retrieval unavailable)")
             self._retrieval_cache[cache_key] = (time.monotonic(), *result)
             return result
+
+    async def _rerank_evidence(
+        self, query: str, candidates: list[EvidenceRef], profile_id: str
+    ) -> tuple[list[EvidenceRef], bool]:
+        """Apply the optional local cross-encoder after broad candidate retrieval."""
+        ranked = sorted(candidates, key=lambda item: item.score, reverse=True)
+        settings = self.config.load()
+        if (
+            not candidates
+            or settings.specialist_runtime != "local"
+            or not profile_id
+            or not local_model_installed(self.config.local_model_path(profile_id))
+        ):
+            return ranked, False
+        try:
+            provider = self.router.provider(profile_id)
+            scores = await provider.rerank(query, [item.excerpt for item in candidates])
+            if len(scores) != len(candidates):
+                return ranked, False
+            for item, score in zip(candidates, scores, strict=True):
+                item.score = round(float(score), 4)
+            return sorted(candidates, key=lambda item: item.score, reverse=True), True
+        except Exception:
+            return ranked, False
 
     async def _extract_entities(self, text: str, allow_specialist: bool = False) -> list[dict[str, Any]]:
         cached = self._entity_cache.get(text)

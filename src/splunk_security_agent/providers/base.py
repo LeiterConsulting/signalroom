@@ -43,3 +43,6 @@ class BaseModelProvider(ABC):
 
     async def similarities(self, source: str, sentences: list[str]) -> list[float]:
         raise ModelProviderError(f"{self.profile.label} does not support sentence similarity")
+
+    async def rerank(self, query: str, documents: list[str]) -> list[float]:
+        raise ModelProviderError(f"{self.profile.label} does not support evidence reranking")

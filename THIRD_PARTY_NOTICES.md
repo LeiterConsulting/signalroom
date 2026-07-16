@@ -11,8 +11,9 @@ Upstream: <https://github.com/LeiterConsulting/splunk-discovery-tool>
 The default configuration references model repositories but does not redistribute model weights:
 
 - `fdtn-ai/Foundation-Sec-8B-Reasoning`, Foundation AI at Cisco. Consult its model card, NOTICE, Llama license, and release-specific terms.
+- `fdtn-ai/Foundation-Sec-1.1-8B-Instruct-Q4_K_M-GGUF`, Foundation AI at Cisco. Consult its model card, NOTICE, and release-specific terms.
 - `cisco-ai/SecureBERT2.0-biencoder`, Cisco AI, Apache-2.0 according to its model card.
+- `cisco-ai/SecureBERT2.0-cross_encoder`, Cisco AI, Apache-2.0 according to its model card.
 - `cisco-ai/SecureBERT2.0-NER`, Cisco AI, Apache-2.0 according to its model card.
 
 Operators are responsible for model-license review, provenance verification, revision pinning, and compliance with Hugging Face, Ollama, and upstream model terms.
-

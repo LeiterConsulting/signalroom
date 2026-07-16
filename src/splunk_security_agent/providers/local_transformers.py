@@ -92,6 +92,22 @@ class LocalTransformersProvider(BaseModelProvider):
                 )
             return self._models[cache_key]
 
+    def _reranker(self) -> Any:
+        self._require_ready()
+        cache_key = (self.profile.id, "reranking")
+        with self._load_lock:
+            if cache_key not in self._models:
+                from sentence_transformers import CrossEncoder
+
+                self._models[cache_key] = CrossEncoder(
+                    str(self.model_path),
+                    device=self._device(),
+                    max_length=self.profile.context_window,
+                    trust_remote_code=False,
+                    local_files_only=True,
+                )
+            return self._models[cache_key]
+
     async def chat(
         self, messages: list[dict[str, str]], tools: list[dict[str, Any]] | None = None
     ) -> dict[str, Any]:
@@ -145,6 +161,25 @@ class LocalTransformersProvider(BaseModelProvider):
                 score = 0.0
             scores.append(float(score))
         return scores
+
+    async def rerank(self, query: str, documents: list[str]) -> list[float]:
+        """Score query/document pairs with a local cybersecurity cross-encoder."""
+        if not documents:
+            return []
+
+        def score() -> list[float]:
+            values = self._reranker().predict(
+                [(query, document) for document in documents],
+                batch_size=16 if self._device() == "cuda" else 4,
+                show_progress_bar=False,
+            )
+            scores: list[float] = []
+            for value in values:
+                scalar = float(value.item()) if hasattr(value, "item") else float(value)
+                scores.append(scalar if math.isfinite(scalar) else 0.0)
+            return scores
+
+        return await asyncio.to_thread(score)
 
     async def entities(self, text: str) -> list[dict[str, Any]]:
         def extract() -> list[dict[str, Any]]:

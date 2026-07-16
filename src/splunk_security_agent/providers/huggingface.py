@@ -98,6 +98,9 @@ class HuggingFaceProvider(BaseModelProvider):
         except (httpx.HTTPError, TypeError, ValueError) as exc:
             raise ModelProviderError(f"Hugging Face similarity request failed: {exc}") from exc
 
+    async def rerank(self, query: str, documents: list[str]) -> list[float]:
+        return await self.similarities(query, documents)
+
     async def health(self) -> dict[str, Any]:
         if not self.token:
             return {"ok": False, "error": "No Hugging Face token configured", "model": self.profile.model}

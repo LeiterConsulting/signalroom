@@ -58,7 +58,12 @@ class ModelRouter:
                 if candidate.provider == "ollama" and candidate.enabled
             ]
             return OllamaProvider(profile, managed_models=managed_models)
-        if settings.specialist_runtime == "local" and profile.task in {"embedding", "ner"}:
+        if settings.specialist_runtime == "local" and profile.task in {
+            "embedding",
+            "ner",
+            "reranking",
+            "classification",
+        }:
             return LocalTransformersProvider(profile, self.config.local_model_path(profile.id))
         return HuggingFaceProvider(profile, self.config.secret("huggingface_token"))
 

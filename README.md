@@ -17,7 +17,7 @@ This is a focused reimplementation inspired by [LeiterConsulting/splunk-discover
 - Ollama chat and tool-capable model support
 - Hugging Face chat, embedding, and token-classification adapters
 - Capability profiles for Foundation-Sec and SecureBERT 2.0
-- Hybrid SQLite FTS5 and SecureBERT similarity RAG with stable artifact/chunk references
+- Hybrid SQLite FTS5, SecureBERT bi-encoder retrieval, and optional cross-encoder reranking with stable artifact/chunk references
 - Conditional specialist inference, short-lived inventory caches, and warm Ollama model retention
 - Encrypted Splunk and Hugging Face tokens at rest
 - A safe demo workspace that runs without Splunk, Ollama, or Hugging Face
@@ -77,18 +77,28 @@ HF_TOKEN=...
 
 ## Model setup
 
-The default registry describes four roles:
+The default registry describes six local-first profiles. The installer downloads only the selected
+general and security-reasoning defaults; the additional profiles remain explicit installs:
 
 | Profile | Default | Purpose |
 |---|---|---|
 | General agent | `llama3.1:8b` through Ollama | Fast orchestration and ordinary chat |
 | Security reasoning | `fdtn-ai/Foundation-Sec-8B-Reasoning-Q4_K_M-GGUF` through Ollama | Triage, hypotheses, ATT&CK reasoning, risk discussion |
+| Security instruct | `fdtn-ai/Foundation-Sec-1.1-8B-Instruct-Q4_K_M-GGUF` through Ollama | Optional instruction-focused security summaries and extraction |
 | Cyber retrieval | `cisco-ai/SecureBERT2.0-biencoder` through local Transformers by default | Security-domain semantic retrieval |
+| Evidence reranking | `cisco-ai/SecureBERT2.0-cross_encoder` through local Transformers by default | Second-stage ranking of retrieved security evidence |
 | Entity extraction | `cisco-ai/SecureBERT2.0-NER` through local Transformers by default | Cybersecurity entity extraction |
 
 Model identifiers are configuration, not hard-coded trust decisions. Review each model card and license, pin an approved revision, and use your organization’s model intake process before production deployment. The app works with lexical FTS retrieval when the optional embedding model is unavailable.
 
 The easiest path is **Setup → Model services**. SignalRoom detects Ollama and the local Transformers runtime, shows every profile as ready or missing, and downloads only after an explicit click. Installing a SecureBERT profile adds the local runtime when necessary, resolves an immutable publisher revision, downloads safetensor assets into `data/models`, and records a local manifest. Opening Setup never starts a model download.
+
+The **Models → Check for updates** action is also read-only. Local Transformers snapshots are compared
+to their recorded immutable Hub revision. Hugging Face-backed Ollama models become trackable after an
+explicit SignalRoom pull binds the resulting local digest to the Hub revision. Older/pre-existing Ollama
+installs are reported as untracked until explicitly refreshed; generic Ollama registry models are labeled
+manual refresh because Ollama does not expose a non-mutating remote freshness API. The check never pulls,
+updates, loads, unloads, or swaps a model.
 
 For scripted setup, install SignalRoom and then explicitly install Ollama and download the configured profiles:
 
@@ -107,6 +117,8 @@ The equivalent manual commands are:
 ```powershell
 ollama pull llama3.1:8b
 ollama pull hf.co/fdtn-ai/Foundation-Sec-8B-Reasoning-Q4_K_M-GGUF:Q4_K_M
+# Optional instruction-focused profile:
+ollama pull hf.co/fdtn-ai/Foundation-Sec-1.1-8B-Instruct-Q4_K_M-GGUF:Q4_K_M
 ```
 
 Public SecureBERT snapshots can normally be installed locally without a token. A Hugging Face token is optional for downloads and encrypted locally when provided. Cloud inference is a separate, explicit runtime choice; it requires a fine-grained token that can **Make calls to Inference Providers**. A model being present on the Hub does not guarantee serverless inference, so the readiness panel distinguishes Hub access from hosted availability.
