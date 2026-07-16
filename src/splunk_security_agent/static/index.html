@@ -103,7 +103,7 @@
             <ol class="operation-steps" id="discoveryProgressSteps"></ol>
           </article>
           <article class="wide-card assurance-workspace" aria-labelledby="assuranceTitle">
-            <div class="panel-heading"><div><p class="eyebrow">CONTINUOUS ASSURANCE</p><h3 id="assuranceTitle">Re-run discovery safely—and know what changed</h3><p class="panel-intro">Opt in to a durable local schedule. Every run uses one worker, a hard Splunk-call ceiling, restart recovery, and analyst-visible drift notifications.</p></div><span id="assuranceWorker" class="subtle-pill">Loading worker</span></div>
+            <div class="panel-heading"><div><p class="eyebrow">CONTINUOUS ASSURANCE</p><h3 id="assuranceTitle">Re-run discovery safely—and know what persists</h3><p class="panel-intro">Opt in to a durable local schedule. SignalRoom separates transient changes from recurring drift, then packages bounded response work without approving or running SPL.</p></div><span id="assuranceWorker" class="subtle-pill">Loading worker</span></div>
             <form id="assuranceForm" class="assurance-policy-form">
               <label class="switch-line assurance-enable"><span><b>Enable scheduled assurance</b><small>Disabled by default; enabling schedules the first run after the selected interval</small></span><input type="checkbox" id="assuranceEnabled"><i></i></label>
               <div class="assurance-policy-grid">
@@ -123,6 +123,11 @@
               <div class="operation-metrics"></div><ol class="operation-steps"></ol>
               <footer><span id="assuranceRunContract"></span><button class="button danger small" id="cancelAssuranceRun" type="button">Cancel run</button></footer>
             </article>
+            <section class="assurance-response" aria-labelledby="assuranceResponseTitle">
+              <div class="validation-section-heading"><div><span>ASSURANCE → RESPONSE</span><h4 id="assuranceResponseTitle">Reviewable response packages</h4></div><small>Local drafts · single execution · seven-day expiry</small></div>
+              <div class="assurance-signal-counts" id="assuranceSignalCounts"></div>
+              <div class="assurance-packages" id="assurancePackages"><div class="empty-inline compact-empty">Repeated drift or a high-severity signal will create a deduplicated review package here.</div></div>
+            </section>
             <div class="assurance-results-grid">
               <section aria-labelledby="assuranceNotificationsTitle"><div class="validation-section-heading"><div><span>DRIFT &amp; CONTROL NOTICES</span><h4 id="assuranceNotificationsTitle">Needs analyst attention</h4></div></div><div id="assuranceNotifications" class="assurance-notifications"></div></section>
               <section aria-labelledby="assuranceRunsTitle"><div class="validation-section-heading"><div><span>RECENT DURABLE RUNS</span><h4 id="assuranceRunsTitle">Execution history</h4></div></div><div id="assuranceRuns" class="assurance-runs"></div></section>

@@ -1,3 +1,5 @@
+from datetime import UTC, datetime, timedelta
+
 import pytest
 
 from splunk_security_agent.cases import CaseStore
@@ -118,3 +120,23 @@ def test_validation_service_rejects_unsafe_or_unbounded_contracts(tmp_path):
         service.create(task_value(earliest_time="-31d"))
     with pytest.raises(ValueError, match="latest_time=now"):
         service.create(task_value(latest_time="+1h"))
+
+
+def test_assurance_validation_drafts_expire_before_approval(tmp_path):
+    store = ValidationStore(tmp_path / "validations.db")
+    expired_at = (datetime.now(UTC) - timedelta(minutes=1)).isoformat()
+    created = store.create(
+        task_value(
+            expires_at=expired_at,
+            assurance_package_id="package-1",
+            approval_scope="single-execution",
+        )
+    )
+
+    expired = store.get(created.id)
+
+    assert expired is not None and expired.status == "expired"
+    assert expired.assurance_package_id == "package-1"
+    assert expired.approval_scope == "single-execution"
+    with pytest.raises(ValueError, match="expired"):
+        store.approve(created.id)

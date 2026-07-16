@@ -21,6 +21,7 @@ class ValidationStore:
         self._lock = RLock()
         self._initialize()
         self.recover_interrupted()
+        self.expire_due()
 
     def connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.path)
@@ -36,7 +37,9 @@ class ValidationStore:
                     spl TEXT NOT NULL, earliest_time TEXT NOT NULL, latest_time TEXT NOT NULL,
                     row_limit INTEGER NOT NULL, evidence_refs TEXT NOT NULL,
                     source_run_id TEXT NOT NULL, source_finding_ref TEXT NOT NULL,
-                    case_id TEXT, status TEXT NOT NULL, query_fingerprint TEXT NOT NULL,
+                    case_id TEXT, expires_at TEXT, assurance_package_id TEXT NOT NULL DEFAULT '',
+                    approval_scope TEXT NOT NULL DEFAULT 'single-execution',
+                    status TEXT NOT NULL, query_fingerprint TEXT NOT NULL,
                     result_count INTEGER NOT NULL DEFAULT 0, result_preview TEXT NOT NULL,
                     artifact_id TEXT NOT NULL, error TEXT NOT NULL,
                     approved_at TEXT, started_at TEXT, completed_at TEXT,
@@ -47,6 +50,28 @@ class ValidationStore:
                 CREATE INDEX IF NOT EXISTS idx_validation_source
                     ON validation_tasks(source_run_id, source_finding_ref);
                 """
+            )
+            columns = {
+                str(row["name"])
+                for row in db.execute("PRAGMA table_info(validation_tasks)").fetchall()
+            }
+            migrations = {
+                "expires_at": "ALTER TABLE validation_tasks ADD COLUMN expires_at TEXT",
+                "assurance_package_id": (
+                    "ALTER TABLE validation_tasks ADD COLUMN assurance_package_id "
+                    "TEXT NOT NULL DEFAULT ''"
+                ),
+                "approval_scope": (
+                    "ALTER TABLE validation_tasks ADD COLUMN approval_scope "
+                    "TEXT NOT NULL DEFAULT 'single-execution'"
+                ),
+            }
+            for name, statement in migrations.items():
+                if name not in columns:
+                    db.execute(statement)
+            db.execute(
+                """CREATE INDEX IF NOT EXISTS idx_validation_package
+                ON validation_tasks(assurance_package_id, status)"""
             )
 
     def recover_interrupted(self) -> int:
@@ -68,9 +93,10 @@ class ValidationStore:
             db.execute(
                 """INSERT INTO validation_tasks
                 (id,title,rationale,spl,earliest_time,latest_time,row_limit,evidence_refs,
-                source_run_id,source_finding_ref,case_id,status,query_fingerprint,result_count,
-                result_preview,artifact_id,error,approved_at,started_at,completed_at,created_at,updated_at)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                source_run_id,source_finding_ref,case_id,expires_at,assurance_package_id,
+                approval_scope,status,query_fingerprint,result_count,result_preview,artifact_id,error,
+                approved_at,started_at,completed_at,created_at,updated_at)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     task_id,
                     value.title.strip(),
@@ -83,6 +109,9 @@ class ValidationStore:
                     value.source_run_id,
                     value.source_finding_ref,
                     value.case_id,
+                    value.expires_at,
+                    value.assurance_package_id,
+                    value.approval_scope,
                     "draft",
                     fingerprint,
                     0,
@@ -101,16 +130,19 @@ class ValidationStore:
         return result
 
     def list(self, limit: int = 100) -> list[ValidationTaskRecord]:
+        self.expire_due()
         with self.connect() as db:
             rows = db.execute(
                 """SELECT * FROM validation_tasks
                 ORDER BY CASE status WHEN 'running' THEN 0 WHEN 'approved' THEN 1
-                WHEN 'draft' THEN 2 WHEN 'error' THEN 3 ELSE 4 END, updated_at DESC LIMIT ?""",
+                WHEN 'draft' THEN 2 WHEN 'error' THEN 3 WHEN 'expired' THEN 4 ELSE 5 END,
+                updated_at DESC LIMIT ?""",
                 (limit,),
             ).fetchall()
         return [self._record(row) for row in rows]
 
     def get(self, task_id: str) -> ValidationTaskRecord | None:
+        self.expire_due()
         with self.connect() as db:
             row = db.execute(
                 "SELECT * FROM validation_tasks WHERE id = ?", (task_id,)
@@ -161,6 +193,8 @@ class ValidationStore:
         current = self.get(task_id)
         if current is None:
             return None
+        if current.status == "expired":
+            raise ValueError("This validation draft expired and cannot be approved")
         if current.status not in {"draft", "error", "approved"}:
             raise ValueError("Only draft or failed validation tasks can be approved")
         now = datetime.now(UTC).isoformat()
@@ -173,6 +207,7 @@ class ValidationStore:
         return self.get(task_id)
 
     def mark_running(self, task_id: str) -> ValidationTaskRecord | None:
+        self.expire_due()
         now = datetime.now(UTC).isoformat()
         with self._lock, self.connect() as db:
             result = db.execute(
@@ -230,6 +265,31 @@ class ValidationStore:
             )
         return bool(result.rowcount)
 
+    def expire_due(self) -> int:
+        """Expire unexecuted assurance drafts without changing completed evidence."""
+        now = datetime.now(UTC).isoformat()
+        with self._lock, self.connect() as db:
+            result = db.execute(
+                """UPDATE validation_tasks SET status='expired',
+                error='The assurance response window expired before execution.', updated_at=?
+                WHERE expires_at IS NOT NULL AND expires_at<=?
+                AND status IN ('draft','approved','error')""",
+                (now, now),
+            )
+        return int(result.rowcount)
+
+    def find_reusable(self, query_fingerprint: str) -> ValidationTaskRecord | None:
+        """Reuse only live, unexecuted work so recurring assurance cannot spam drafts."""
+        self.expire_due()
+        with self.connect() as db:
+            row = db.execute(
+                """SELECT * FROM validation_tasks WHERE query_fingerprint=?
+                AND status IN ('draft','approved','running')
+                ORDER BY updated_at DESC LIMIT 1""",
+                (query_fingerprint,),
+            ).fetchone()
+        return self._record(row) if row else None
+
     @staticmethod
     def fingerprint(spl: str, earliest_time: str, latest_time: str, row_limit: int) -> str:
         payload = json.dumps(
@@ -258,6 +318,9 @@ class ValidationStore:
             source_run_id=row["source_run_id"],
             source_finding_ref=row["source_finding_ref"],
             case_id=row["case_id"],
+            expires_at=row["expires_at"],
+            assurance_package_id=row["assurance_package_id"],
+            approval_scope=row["approval_scope"],
             status=row["status"],
             query_fingerprint=row["query_fingerprint"],
             result_count=int(row["result_count"]),

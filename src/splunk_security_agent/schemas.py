@@ -258,7 +258,7 @@ class AssuranceRunRecord(BaseModel):
     updated_at: str
 
 
-ValidationStatus = Literal["draft", "approved", "running", "complete", "error"]
+ValidationStatus = Literal["draft", "approved", "running", "complete", "error", "expired"]
 
 
 class ValidationTaskCreate(BaseModel):
@@ -272,6 +272,9 @@ class ValidationTaskCreate(BaseModel):
     source_run_id: str = Field(default="", max_length=120)
     source_finding_ref: str = Field(default="", max_length=40)
     case_id: str | None = Field(default=None, max_length=120)
+    expires_at: str | None = None
+    assurance_package_id: str = Field(default="", max_length=120)
+    approval_scope: Literal["single-execution"] = "single-execution"
 
 
 class ValidationTaskUpdate(BaseModel):

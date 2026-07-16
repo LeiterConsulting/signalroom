@@ -12,8 +12,8 @@ This is a focused reimplementation inspired by [LeiterConsulting/splunk-discover
 - First-class security discovery across telemetry freshness, detection health, data-model readiness, and reusable RAG knowledge
 - Delta-aware model-team reuse with exact input fingerprints and visible cache provenance
 - Read-only Splunk MLTK model inventory with definition drift and endpoint-scoped dependency checks
-- Opt-in continuous assurance with durable schedules, restart recovery, cancellation, drift notices, and hard Splunk-call budgets
-- A restart-safe validation queue with bounded SPL preview, explicit analyst approval, live progress, and preserved results
+- Opt-in continuous assurance with durable schedules, cross-run signal correlation, response packages, and hard Splunk-call budgets
+- A restart-safe validation queue with bounded SPL preview, explicit analyst approval, expiring assurance drafts, live progress, and preserved results
 - An evidence-first agent with bounded multi-tool plans, investigation modes, and a structured ledger
 - Durable local investigation cases with ownership, lifecycle, severity, chronological timelines, and handoff exports
 - Ollama chat and tool-capable model support
@@ -178,7 +178,7 @@ Invoke-RestMethod -Method Post -Uri http://localhost:8003/mcp -ContentType appli
 ```text
 src/splunk_security_agent/
   agents/          evidence-first chat orchestration and SPL guardrails
-  assurance/       durable scheduling, budgets, recovery, and drift notices
+  assurance/       durable scheduling, drift correlation, budgets, recovery, and response packages
   discovery/       inventory, coverage analysis, and artifact packaging
   cases/           durable local case records, timelines, and handoff exports
   providers/       Ollama, local Transformers, Hugging Face cloud, and capability routing
@@ -252,7 +252,10 @@ and one per-instance execution lane with interactive Discovery and MLTK inventor
 Run state and progress events are stored in `data/assurance.db`. A restart re-queues an interrupted read-only
 run as a fresh collection; an operator cancellation persists across restart. Completed runs classify inventory,
 coverage, MLTK, high-severity finding, collection-failure, dependency, and budget events into acknowledgeable
-local notices. Continuous assurance never approves or executes proposed validation SPL automatically.
+local notices. Deterministic signals are correlated across runs as transient, repeated, severity-elevated, or
+resolved. Repeated medium/low signals and first-seen high/critical signals create deduplicated response packages.
+Each package can pivot into Investigate, a case, or the validation queue. Continuous assurance never approves or
+executes proposed validation SPL automatically.
 
 Ollama model switching is serialized to avoid local accelerator contention. Generative passes use deterministic,
 token-bounded structured output, strict local validation, and one visible repair/fallback attempt when necessary.
@@ -289,12 +292,15 @@ fingerprint before granting approval; approval and execution are deliberately se
 shared read-only guardrail at draft, approval, and execution boundaries, allows at most a 30-day window and 500 rows,
 streams execution and preservation progress, and stores a bounded result preview as a local `validation` artifact.
 Approved work survives restarts, while an interrupted running task returns to the approved state for an intentional retry.
+Assurance-generated drafts carry a seven-day expiry, a package reference, and a single-execution approval scope.
+Expiry invalidates an unexecuted draft or approval without modifying completed evidence. A recurring package reuses
+an existing live fingerprint instead of creating duplicate validation work.
 
-### Recommended next discovery increment
+### Recommended next assurance increment
 
-Turn assurance drift into reviewable response packages: correlate repeated changes across runs, rank persistent versus
-transient gaps, and create deduplicated validation drafts with explicit expiry and approval scopes. Outbound notification
-delivery should remain separately opt-in and redact environment details by default.
+Add separately opt-in outbound delivery for response-package summaries, with destination-specific redaction previews,
+retry state, and a durable audit event for every attempted delivery. Delivery must not grant recurring SPL authority;
+validation approval remains a per-contract analyst action.
 
 ### Context
 

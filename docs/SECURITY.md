@@ -17,6 +17,8 @@ The local prototype defaults to localhost, opt-in demo mode, local specialist ex
 - Splunk MLTK scans use only `listmodels`, retain local definition fingerprints, and perform zero model writes. Dependency comparisons are explicitly scoped to SignalRoom's configured Ollama endpoint.
 - Continuous assurance is opt-in, single-concurrency, and protected by hard per-run MCP call and UTC daily run ceilings. It stores local notifications but never sends them externally or auto-approves validation SPL.
 - Interrupted assurance runs restart as fresh read-only collections; explicit cancellation is persisted and prevents recovery from silently resuming work.
+- Assurance packages are local-only. Generated validation work is deduplicated, expires after seven days, and remains scoped to one explicitly approved execution.
+- Partial discovery cannot resolve an existing correlated signal; absence is treated as unknown until an authoritative collection covers that signal class.
 - Hugging Face cloud inference has a separate disabled/ask/allow policy and is never implied by local model installation.
 
 ## Known limitations
@@ -27,6 +29,7 @@ The local prototype defaults to localhost, opt-in demo mode, local specialist ex
 - Model output can contain incorrect or unsafe recommendations. Human verification remains required.
 - Hugging Face model loading remains a supply-chain decision. Production deployments should add publisher/revision allowlists and artifact signatures around the recorded immutable revision.
 - The application does not yet emit a durable audit trail.
+- Outbound assurance notification delivery is not implemented; notices and response packages remain on the SignalRoom host.
 
 ## Recommended Splunk role
 

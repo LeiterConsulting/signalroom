@@ -896,6 +896,52 @@ function assuranceTime(value) {
   return new Date(value).toLocaleString();
 }
 
+function assurancePackage(packageId) {
+  return (state.assurance?.response_packages || []).find(item => item.id === packageId);
+}
+
+function renderAssurancePackages(value) {
+  const counts = value.signal_counts || {};
+  $('#assuranceSignalCounts').innerHTML = `<span class="persistent"><b>${counts.actionable || 0}</b> actionable</span><span class="repeated"><b>${counts.repeated || 0}</b> repeated</span><span class="elevated"><b>${counts.severity_elevated || 0}</b> severity-elevated</span><span class="watching"><b>${counts.watching || 0}</b> transient · watching</span><span class="resolved"><b>${counts.resolved || 0}</b> resolved</span>`;
+  const packages = value.response_packages || [];
+  $('#assurancePackages').innerHTML = packages.length ? packages.map(item => {
+    const signals = item.signals || []; const taskCount = (item.validation_task_ids || []).length;
+    const signalRows = signals.slice(0,4).map(signal => `<li><span class="severity ${escapeHtml(signal.severity)}">${escapeHtml(signal.severity)}</span><div><b>${escapeHtml(signal.title)}</b><small>${signal.consecutive_count >= 2 ? `${signal.consecutive_count} consecutive runs` : 'elevated immediately by severity'} · ${escapeHtml(signal.kind)}</small></div></li>`).join('');
+    const actions = item.status === 'review' ? `<button class="button primary small" data-review-assurance-package="${escapeHtml(item.id)}" ${taskCount ? '' : 'disabled'}>Review ${taskCount} draft${taskCount === 1 ? '' : 's'}</button><button class="button ghost small" data-investigate-assurance-package="${escapeHtml(item.id)}">Investigate</button><button class="button ghost small" data-case-assurance-package="${escapeHtml(item.id)}">Add to case</button><button class="button ghost small" data-close-assurance-package="${escapeHtml(item.id)}">Close package</button>` : `<button class="button ghost small" data-investigate-assurance-package="${escapeHtml(item.id)}">Revisit in Investigate</button>`;
+    return `<article class="assurance-package ${escapeHtml(item.status)} ${escapeHtml(item.severity)}"><header><div><span>${escapeHtml(item.status)} · ${escapeHtml(item.severity)}</span><h5>${escapeHtml(item.title)}</h5></div><b>${taskCount} draft${taskCount === 1 ? '' : 's'}</b></header><p>${escapeHtml(item.summary)}</p><ul>${signalRows}</ul><footer><time>${item.status === 'review' ? `Expires ${escapeHtml(assuranceTime(item.expires_at))}` : `${escapeHtml(item.status)} · ${escapeHtml(assuranceTime(item.closed_at || item.expires_at))}`}</time><div>${actions}</div></footer></article>`;
+  }).join('') : '<div class="empty-inline compact-empty">No response package is open. Medium and low signals must repeat; high-severity signals package immediately.</div>';
+}
+
+async function reviewAssurancePackage(packageId) {
+  const item = assurancePackage(packageId); if (!item) return;
+  await loadValidations();
+  setView('discovery'); history.replaceState(null, '', `${location.pathname}#discovery`);
+  $('#validationWorkspace').scrollIntoView({ behavior:'smooth', block:'start' });
+  setTimeout(() => {
+    (item.validation_task_ids || []).forEach(id => {
+      const card = document.querySelector(`[data-validation-id="${CSS.escape(id)}"]`);
+      if (card) { card.classList.add('package-focus'); setTimeout(() => card.classList.remove('package-focus'), 3500); }
+    });
+  }, 450);
+}
+
+function investigateAssurancePackage(packageId) {
+  const item = assurancePackage(packageId); if (!item) return;
+  const signals = (item.signals || []).map(signal => `- ${signal.title}: ${signal.detail} (${signal.consecutive_count} consecutive run(s))`).join('\n');
+  openInvestigation('discovery', `Investigate this continuous-assurance response package. Separate deterministic observations from hypotheses, use existing context before issuing new SPL, and recommend the smallest bounded next check.\n\nPackage: ${item.title}\nSummary: ${item.summary}\nSignals:\n${signals}`, false);
+}
+
+function caseAssurancePackage(packageId) {
+  const item = assurancePackage(packageId); if (!item) return;
+  const signals = (item.signals || []).map(signal => `${signal.title} — ${signal.detail} [${signal.status}; ${signal.consecutive_count} consecutive run(s)]`).join('\n');
+  openCasePicker({ kind:'action', title:item.title, content:`${item.summary}\n\nCorrelated signals:\n${signals}\n\nValidation drafts: ${(item.validation_task_ids || []).length}\nExpires: ${item.expires_at}`, source:'SignalRoom continuous assurance', confidence:'high', status:'needs-validation', metadata:{ assurance_package_id:item.id, source_run_id:item.source_run_id, signal_fingerprints:item.signal_fingerprints, validation_task_ids:item.validation_task_ids, expires_at:item.expires_at } });
+}
+
+async function closeAssurancePackage(packageId) {
+  try { await api(`/api/assurance/packages/${encodeURIComponent(packageId)}/close`, {method:'POST'}); await loadAssurance(); toast('Assurance response package closed'); }
+  catch (error) { toast(error.message); }
+}
+
 function hydrateAssurancePolicy(policy) {
   if (!policy || state.assurancePolicyDirty) return;
   $('#assuranceEnabled').checked = Boolean(policy.enabled);
@@ -922,6 +968,7 @@ function renderAssurance() {
   $('#assuranceWorker').className = `subtle-pill ${value.worker?.online ? 'ok' : 'warn'}`;
   $('#assuranceScheduleStatus').textContent = policy.enabled ? `Next scheduled run · ${assuranceTime(policy.next_run_at)}` : 'Scheduling is off · manual runs remain available';
   $('#assuranceUsage').innerHTML = `<span><b>${usage.runs || 0}/${policy.max_runs_per_day || 0}</b> runs today</span><span><b>${usage.splunk_calls || 0}</b> Splunk calls today</span><span><b>${policy.max_splunk_calls_per_run || 0}</b> call ceiling</span><span><b>${escapeHtml(value.worker?.restart_recovery || 'unknown')}</b> restart policy</span>`;
+  renderAssurancePackages(value);
   const panel = $('#assuranceProgress'); panel.hidden = !active;
   if (active) {
     panel.querySelector('.operation-label').textContent = active.label || 'Working';
@@ -1014,7 +1061,7 @@ function validationContract(task) {
 }
 
 function validationStatusLabel(status) {
-  return ({ draft:'Draft · not approved', approved:'Approved · ready to run', running:'Running read-only check', complete:'Evidence preserved', error:'Failed · review required' })[status] || status;
+  return ({ draft:'Draft · not approved', approved:'Approved · ready to run', running:'Running read-only check', complete:'Evidence preserved', error:'Failed · review required', expired:'Expired · no longer executable' })[status] || status;
 }
 
 function renderValidationCandidates(result = state.lastDiscovery) {
@@ -1056,11 +1103,12 @@ function renderValidations() {
     if (task.status === 'approved') actions.push(`<button class="button primary small" data-run-validation="${escapeHtml(task.id)}">Run approved validation</button>`);
     if (task.status === 'complete') actions.push(`<button class="button primary small" data-inspect-validation="${escapeHtml(task.id)}">Inspect preserved result</button>`);
     if (task.status !== 'running') actions.push(`<button class="button ghost small validation-delete" data-delete-validation="${escapeHtml(task.id)}">Delete</button>`);
-    return `<article class="validation-task ${escapeHtml(task.status)}">
+    const assuranceMeta = task.assurance_package_id ? `<span>Assurance package <code>${escapeHtml(task.assurance_package_id.slice(0, 8))}</code></span><span>${escapeHtml(task.approval_scope.replaceAll('-', ' '))}</span>${task.expires_at ? `<span>Expires ${escapeHtml(assuranceTime(task.expires_at))}</span>` : ''}` : '';
+    return `<article class="validation-task ${escapeHtml(task.status)}" data-validation-id="${escapeHtml(task.id)}">
       <header><div><span>${escapeHtml(task.source_finding_ref || 'ANALYST')}</span><h4>${escapeHtml(task.title)}</h4></div><b class="validation-status ${escapeHtml(task.status)}">${escapeHtml(validationStatusLabel(task.status))}</b></header>
       <p>${escapeHtml(task.rationale)}</p>
       <details><summary>Review exact SPL contract</summary><pre><code>${escapeHtml(task.spl)}</code></pre></details>
-      <div class="validation-contract"><span>${escapeHtml(validationContract(task))}</span><span>Fingerprint <code>${escapeHtml(task.query_fingerprint.slice(0, 12))}</code></span><span>${refs || 'No evidence reference'}</span></div>
+      <div class="validation-contract"><span>${escapeHtml(validationContract(task))}</span><span>Fingerprint <code>${escapeHtml(task.query_fingerprint.slice(0, 12))}</code></span><span>${refs || 'No evidence reference'}</span>${assuranceMeta}</div>
       ${preview}<footer>${actions.join('')}</footer>
     </article>`;
   }).join('');
@@ -1332,6 +1380,14 @@ function navigateView(name) {
 document.addEventListener('click', async event => {
   const assuranceNotice = event.target.closest('[data-ack-assurance]');
   if (assuranceNotice) { await acknowledgeAssurance(assuranceNotice.dataset.ackAssurance); return; }
+  const reviewAssurance = event.target.closest('[data-review-assurance-package]');
+  if (reviewAssurance) { await reviewAssurancePackage(reviewAssurance.dataset.reviewAssurancePackage); return; }
+  const investigateAssurance = event.target.closest('[data-investigate-assurance-package]');
+  if (investigateAssurance) { investigateAssurancePackage(investigateAssurance.dataset.investigateAssurancePackage); return; }
+  const caseAssurance = event.target.closest('[data-case-assurance-package]');
+  if (caseAssurance) { caseAssurancePackage(caseAssurance.dataset.caseAssurancePackage); return; }
+  const closeAssurance = event.target.closest('[data-close-assurance-package]');
+  if (closeAssurance) { await closeAssurancePackage(closeAssurance.dataset.closeAssurancePackage); return; }
   const copyToggle = event.target.closest('[data-toggle-copy]');
   if (copyToggle) {
     const card = copyToggle.closest('.evidence-card,.ledger-item');

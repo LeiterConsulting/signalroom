@@ -25,7 +25,11 @@ FastAPI application ───── outward MCP tools
 AssuranceService ── SQLite policy + runs + events + notices
         ├── one restart-safe background worker
         ├── shared per-instance discovery/MLTK execution lane
-        └── hard MCP call ceiling + UTC daily run budget
+        ├── hard MCP call ceiling + UTC daily run budget
+        └── AssuranceResponseService
+                ├── transient / repeated / severity-elevated / resolved correlation
+                ├── deduplicated seven-day response packages
+                └── ValidationService drafts (never approval or execution)
 ```
 
 ## Design decisions
@@ -76,9 +80,16 @@ lock; no second scheduled run is queued while one is active. A `BudgetedSplunkCl
 refuses calls beyond the configured ceiling, including calls launched concurrently. On shutdown, active work is
 re-queued for a fresh read-only collection; an explicit cancellation is terminal and persists across restart.
 
-The scheduler creates local notifications from deterministic result fields. It does not let an LLM send messages,
-approve SPL, or mutate Splunk. A run that observes drift can inform an analyst, but recurring validation remains a
-separate approval boundary.
+The scheduler creates local notifications from deterministic result fields. `AssuranceResponseService` fingerprints
+findings, inventory changes, coverage changes, MLTK drift, and named collection failures. Medium and low signals stay
+transient until two consecutive observations; high and critical signals are actionable immediately. An authoritative
+collection resolves an absent signal only for the signal classes covered by that discovery depth. Partial collection
+never converts absence into resolution.
+
+Actionable signals not already represented by an open package create one local response package with a seven-day
+expiry. Evidence-linked discovery proposals become validation drafts; live query fingerprints are reused instead of
+duplicated. The scheduler does not let an LLM send messages, approve SPL, or mutate Splunk. Investigate and case pivots
+remain analyst actions, and validation approval remains a separate per-contract boundary.
 
 ### Discovery validation is an explicit state machine
 
@@ -90,12 +101,13 @@ Validation proposals enter a SQLite-backed state machine as `draft`. Only draft 
 resets prior approval and results. An analyst separately transitions an exact fingerprinted contract to `approved`, and
 only an approved task can transition atomically to `running`. SPL safety, a relative window of at most 30 days, and a row
 cap of 500 are enforced at creation, edit, approval, and execution. Successful results become evidence artifacts; an
-interrupted run returns to `approved` after restart, preserving intent without silently rerunning Splunk.
+interrupted run returns to `approved` after restart, preserving intent without silently rerunning Splunk. Assurance
+drafts add a package ID, single-execution scope, and expiry; an expired unexecuted task cannot be approved or run.
 
-## Next discovery increment
+## Next assurance increment
 
-Correlate recurring drift across multiple assurance runs and generate deduplicated, expiring validation drafts.
-Keep outbound notification channels and any recurring validation authority separately configured and auditable.
+Add opt-in outbound response-package delivery with a redacted preview, destination-specific policy, retry state, and
+durable delivery audit events. Keep delivery authority separate from validation authority.
 
 ### MCP exists on both sides
 

@@ -13,7 +13,7 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from .agents import SecurityAgent
-from .assurance import AssuranceService, AssuranceStore
+from .assurance import AssuranceResponseService, AssuranceService, AssuranceStore
 from .cases import CaseStore
 from .config import ConfigStore
 from .discovery import DiscoveryPipeline
@@ -64,6 +64,9 @@ class Services:
         self._discovery: DiscoveryPipeline | None = None
         self._splunk_models: SplunkModelInventoryService | None = None
         self._validations: ValidationService | None = None
+        self.assurance_response = AssuranceResponseService(
+            self.assurance_store, lambda: self.validations
+        )
         self.assurance = AssuranceService(
             self.assurance_store,
             lambda: self.splunk,
@@ -82,7 +85,8 @@ class Services:
             model_inventory,
         )
 
-    async def _assurance_complete(self, _result: dict[str, Any]) -> None:
+    async def _assurance_complete(self, run_id: str, result: dict[str, Any]) -> None:
+        self.assurance_response.process(run_id, result)
         if self._agent is not None:
             self._agent.invalidate_context_cache()
         self.model_setup.schedule_context_index()
@@ -526,6 +530,14 @@ async def acknowledge_assurance_notification(notification_id: str) -> dict[str, 
     if notification is None:
         raise HTTPException(404, "Continuous assurance notification not found")
     return notification
+
+
+@app.post("/api/assurance/packages/{package_id}/close")
+async def close_assurance_package(package_id: str) -> dict[str, Any]:
+    package = services.assurance_store.close_package(package_id)
+    if package is None:
+        raise HTTPException(404, "Assurance response package not found")
+    return package
 
 
 @app.get("/api/validations")

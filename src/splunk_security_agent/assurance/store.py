@@ -69,6 +69,25 @@ class AssuranceStore:
                 );
                 CREATE INDEX IF NOT EXISTS idx_assurance_notifications_state
                     ON assurance_notifications(acknowledged, created_at DESC);
+                CREATE TABLE IF NOT EXISTS assurance_signals (
+                    fingerprint TEXT PRIMARY KEY, kind TEXT NOT NULL, severity TEXT NOT NULL,
+                    title TEXT NOT NULL, detail TEXT NOT NULL, subject TEXT NOT NULL,
+                    source_ref TEXT NOT NULL, status TEXT NOT NULL,
+                    occurrence_count INTEGER NOT NULL, consecutive_count INTEGER NOT NULL,
+                    first_run_id TEXT NOT NULL, last_run_id TEXT NOT NULL,
+                    first_seen_at TEXT NOT NULL, last_seen_at TEXT NOT NULL, resolved_at TEXT
+                );
+                CREATE INDEX IF NOT EXISTS idx_assurance_signals_state
+                    ON assurance_signals(status, last_seen_at DESC);
+                CREATE TABLE IF NOT EXISTS assurance_packages (
+                    id TEXT PRIMARY KEY, source_run_id TEXT NOT NULL, severity TEXT NOT NULL,
+                    status TEXT NOT NULL, title TEXT NOT NULL, summary TEXT NOT NULL,
+                    signal_fingerprints TEXT NOT NULL, validation_task_ids TEXT NOT NULL,
+                    expires_at TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+                    closed_at TEXT
+                );
+                CREATE INDEX IF NOT EXISTS idx_assurance_packages_state
+                    ON assurance_packages(status, created_at DESC);
                 """
             )
             db.execute(
@@ -77,6 +96,19 @@ class AssuranceStore:
                 max_runs_per_day,notify_on_drift,notify_on_high_findings,next_run_at,
                 last_scheduled_at,updated_at) VALUES (1,0,360,'standard',12,4,1,1,NULL,NULL,?)""",
                 (now,),
+            )
+            db.execute(
+                """UPDATE assurance_packages
+                SET title=REPLACE(title, ' persistent signal', ' actionable signal'),
+                    updated_at=?
+                WHERE title LIKE 'Assurance response · % persistent signal%'""",
+                (now,),
+            )
+            db.execute(
+                """UPDATE assurance_notifications
+                SET title=REPLACE(title, ' persistent signal', ' actionable signal')
+                WHERE category='response-package'
+                AND title LIKE 'Assurance response · % persistent signal%'"""
             )
 
     def policy(self) -> dict[str, Any]:
@@ -426,6 +458,245 @@ class AssuranceStore:
             )
         return self.get_notification(notification_id)
 
+    def correlate_signals(
+        self,
+        run_id: str,
+        signals: list[dict[str, str]],
+        *,
+        authoritative: bool,
+        authoritative_kinds: set[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Correlate deterministic signals while protecting partial reads from false resolution."""
+        now = _now().isoformat()
+        seen = {item["fingerprint"] for item in signals if item.get("fingerprint")}
+        with self._lock, self.connect() as db:
+            active_rows = db.execute(
+                "SELECT * FROM assurance_signals WHERE status!='resolved'"
+            ).fetchall()
+            for item in signals:
+                fingerprint = item.get("fingerprint", "")
+                if not fingerprint:
+                    continue
+                existing = db.execute(
+                    "SELECT * FROM assurance_signals WHERE fingerprint=?", (fingerprint,)
+                ).fetchone()
+                if existing and existing["last_run_id"] == run_id:
+                    continue
+                observation_authoritative = (
+                    str(item.get("authoritative", "true")).lower() != "false"
+                )
+                occurrence_count = int(existing["occurrence_count"]) + 1 if existing else 1
+                if observation_authoritative:
+                    consecutive_count = (
+                        int(existing["consecutive_count"]) + 1
+                        if existing and existing["status"] != "resolved"
+                        else 1
+                    )
+                else:
+                    consecutive_count = int(existing["consecutive_count"]) if existing else 0
+                severity = str(item.get("severity") or "medium")
+                if observation_authoritative:
+                    status = (
+                        "persistent"
+                        if severity in {"critical", "high"} or consecutive_count >= 2
+                        else "watching"
+                    )
+                else:
+                    status = str(existing["status"]) if existing else "watching"
+                if existing:
+                    db.execute(
+                        """UPDATE assurance_signals SET kind=?, severity=?, title=?, detail=?,
+                        subject=?, source_ref=?, status=?, occurrence_count=?, consecutive_count=?,
+                        last_run_id=?, last_seen_at=?, resolved_at=NULL WHERE fingerprint=?""",
+                        (
+                            item.get("kind", "finding"),
+                            severity,
+                            str(item.get("title") or "Assurance signal")[:240],
+                            str(item.get("detail") or "")[:4000],
+                            str(item.get("subject") or "")[:500],
+                            str(item.get("source_ref") or "")[:40],
+                            status,
+                            occurrence_count,
+                            consecutive_count,
+                            run_id,
+                            now,
+                            fingerprint,
+                        ),
+                    )
+                else:
+                    db.execute(
+                        """INSERT INTO assurance_signals
+                        (fingerprint,kind,severity,title,detail,subject,source_ref,status,
+                        occurrence_count,consecutive_count,first_run_id,last_run_id,
+                        first_seen_at,last_seen_at,resolved_at)
+                        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL)""",
+                        (
+                            fingerprint,
+                            item.get("kind", "finding"),
+                            severity,
+                            str(item.get("title") or "Assurance signal")[:240],
+                            str(item.get("detail") or "")[:4000],
+                            str(item.get("subject") or "")[:500],
+                            str(item.get("source_ref") or "")[:40],
+                            status,
+                            occurrence_count,
+                            consecutive_count,
+                            run_id,
+                            run_id,
+                            now,
+                            now,
+                        ),
+                    )
+            if authoritative:
+                for row in active_rows:
+                    if row["fingerprint"] not in seen and (
+                        authoritative_kinds is None or row["kind"] in authoritative_kinds
+                    ):
+                        db.execute(
+                            """UPDATE assurance_signals SET status='resolved',
+                            consecutive_count=0, resolved_at=? WHERE fingerprint=?""",
+                            (now, row["fingerprint"]),
+                        )
+        return [
+            item
+            for fingerprint in seen
+            if (item := self.get_signal(fingerprint)) is not None
+        ]
+
+    def get_signal(self, fingerprint: str) -> dict[str, Any] | None:
+        with self.connect() as db:
+            row = db.execute(
+                "SELECT * FROM assurance_signals WHERE fingerprint=?", (fingerprint,)
+            ).fetchone()
+        return self._signal(row) if row else None
+
+    def signals(self, limit: int = 50) -> list[dict[str, Any]]:
+        with self.connect() as db:
+            rows = db.execute(
+                """SELECT * FROM assurance_signals ORDER BY
+                CASE status WHEN 'persistent' THEN 0 WHEN 'watching' THEN 1 ELSE 2 END,
+                CASE severity WHEN 'critical' THEN 0 WHEN 'high' THEN 1
+                WHEN 'medium' THEN 2 ELSE 3 END, last_seen_at DESC LIMIT ?""",
+                (limit,),
+            ).fetchall()
+        return [self._signal(row) for row in rows]
+
+    def signal_counts(self) -> dict[str, int]:
+        signals = self.signals(limit=10000)
+        counts = {
+            "actionable": sum(item["status"] == "persistent" for item in signals),
+            "repeated": sum(
+                item["status"] == "persistent" and item["consecutive_count"] >= 2
+                for item in signals
+            ),
+            "severity_elevated": sum(
+                item["status"] == "persistent" and item["consecutive_count"] < 2
+                for item in signals
+            ),
+            "watching": sum(item["status"] == "watching" for item in signals),
+            "resolved": sum(item["status"] == "resolved" for item in signals),
+        }
+        return counts
+
+    def create_package(
+        self,
+        source_run_id: str,
+        severity: str,
+        title: str,
+        summary: str,
+        signal_fingerprints: list[str],
+        expires_at: str,
+    ) -> dict[str, Any]:
+        package_id = str(uuid4())
+        now = _now().isoformat()
+        with self._lock, self.connect() as db:
+            db.execute(
+                """INSERT INTO assurance_packages
+                (id,source_run_id,severity,status,title,summary,signal_fingerprints,
+                validation_task_ids,expires_at,created_at,updated_at,closed_at)
+                VALUES (?,?,?,'review',?,?,?,?,?,?,?,NULL)""",
+                (
+                    package_id,
+                    source_run_id,
+                    severity,
+                    title[:240],
+                    summary[:4000],
+                    json.dumps(sorted(set(signal_fingerprints))),
+                    "[]",
+                    expires_at,
+                    now,
+                    now,
+                ),
+            )
+        result = self.get_package(package_id)
+        assert result is not None
+        return result
+
+    def update_package_validations(
+        self, package_id: str, validation_task_ids: list[str]
+    ) -> dict[str, Any] | None:
+        now = _now().isoformat()
+        with self._lock, self.connect() as db:
+            db.execute(
+                """UPDATE assurance_packages SET validation_task_ids=?, updated_at=?
+                WHERE id=?""",
+                (json.dumps(sorted(set(validation_task_ids))), now, package_id),
+            )
+        return self.get_package(package_id)
+
+    def expire_packages(self) -> int:
+        now = _now().isoformat()
+        with self._lock, self.connect() as db:
+            result = db.execute(
+                """UPDATE assurance_packages SET status='expired', updated_at=?
+                WHERE status='review' AND expires_at<=?""",
+                (now, now),
+            )
+        return int(result.rowcount)
+
+    def get_package(self, package_id: str) -> dict[str, Any] | None:
+        self.expire_packages()
+        with self.connect() as db:
+            row = db.execute(
+                "SELECT * FROM assurance_packages WHERE id=?", (package_id,)
+            ).fetchone()
+        return self._package_with_signals(row) if row else None
+
+    def packages(self, limit: int = 20) -> list[dict[str, Any]]:
+        self.expire_packages()
+        with self.connect() as db:
+            rows = db.execute(
+                """SELECT * FROM assurance_packages ORDER BY
+                CASE status WHEN 'review' THEN 0 WHEN 'expired' THEN 1 ELSE 2 END,
+                created_at DESC LIMIT ?""",
+                (limit,),
+            ).fetchall()
+        return [self._package_with_signals(row) for row in rows]
+
+    def covered_signal_fingerprints(self) -> set[str]:
+        self.expire_packages()
+        with self.connect() as db:
+            rows = db.execute(
+                """SELECT signal_fingerprints FROM assurance_packages
+                WHERE status='review'"""
+            ).fetchall()
+        return {
+            fingerprint
+            for row in rows
+            for fingerprint in json.loads(row["signal_fingerprints"])
+        }
+
+    def close_package(self, package_id: str) -> dict[str, Any] | None:
+        self.expire_packages()
+        now = _now().isoformat()
+        with self._lock, self.connect() as db:
+            db.execute(
+                """UPDATE assurance_packages SET status='closed', closed_at=?, updated_at=?
+                WHERE id=? AND status='review'""",
+                (now, now, package_id),
+            )
+        return self.get_package(package_id)
+
     def usage_today(self) -> dict[str, int]:
         start = _now().replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
         with self.connect() as db:
@@ -488,4 +759,50 @@ class AssuranceStore:
             "detail": row["detail"],
             "acknowledged": bool(row["acknowledged"]),
             "created_at": row["created_at"],
+        }
+
+    @staticmethod
+    def _signal(row: sqlite3.Row) -> dict[str, Any]:
+        return {
+            "fingerprint": row["fingerprint"],
+            "kind": row["kind"],
+            "severity": row["severity"],
+            "title": row["title"],
+            "detail": row["detail"],
+            "subject": row["subject"],
+            "source_ref": row["source_ref"],
+            "status": row["status"],
+            "occurrence_count": int(row["occurrence_count"]),
+            "consecutive_count": int(row["consecutive_count"]),
+            "first_run_id": row["first_run_id"],
+            "last_run_id": row["last_run_id"],
+            "first_seen_at": row["first_seen_at"],
+            "last_seen_at": row["last_seen_at"],
+            "resolved_at": row["resolved_at"],
+        }
+
+    def _package_with_signals(self, row: sqlite3.Row) -> dict[str, Any]:
+        value = self._package(row)
+        value["signals"] = [
+            signal
+            for fingerprint in value["signal_fingerprints"]
+            if (signal := self.get_signal(fingerprint)) is not None
+        ]
+        return value
+
+    @staticmethod
+    def _package(row: sqlite3.Row) -> dict[str, Any]:
+        return {
+            "id": row["id"],
+            "source_run_id": row["source_run_id"],
+            "severity": row["severity"],
+            "status": row["status"],
+            "title": row["title"],
+            "summary": row["summary"],
+            "signal_fingerprints": json.loads(row["signal_fingerprints"]),
+            "validation_task_ids": json.loads(row["validation_task_ids"]),
+            "expires_at": row["expires_at"],
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+            "closed_at": row["closed_at"],
         }

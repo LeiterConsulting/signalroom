@@ -45,7 +45,7 @@ class AssuranceService:
         store: AssuranceStore,
         client_factory: Callable[[], Any],
         pipeline_factory: Callable[[Any], Any],
-        on_complete: Callable[[dict[str, Any]], Awaitable[None] | None] | None = None,
+        on_complete: Callable[[str, dict[str, Any]], Awaitable[None] | None] | None = None,
         run_lock: asyncio.Lock | None = None,
         poll_seconds: float = 2.0,
     ):
@@ -123,6 +123,9 @@ class AssuranceService:
             "active_events": self.store.events(active.id) if active else [],
             "runs": [item.model_dump(mode="json") for item in self.store.list_runs()],
             "notifications": self.store.notifications(),
+            "signals": self.store.signals(),
+            "signal_counts": self.store.signal_counts(),
+            "response_packages": self.store.packages(),
             "worker": {
                 "online": bool(self._worker and not self._worker.done()),
                 "single_run_concurrency": 1,
@@ -242,9 +245,18 @@ class AssuranceService:
             self.store.complete_run(run_id, status, summary, client.calls_used)
             self._create_notifications(run_id, result, summary, client.exceeded)
             if self.on_complete:
-                completed = self.on_complete(result)
-                if inspect.isawaitable(completed):
-                    await completed
+                try:
+                    completed = self.on_complete(run_id, result)
+                    if inspect.isawaitable(completed):
+                        await completed
+                except Exception as exc:
+                    self.store.add_notification(
+                        run_id,
+                        "high",
+                        "response-package",
+                        "Assurance response packaging failed",
+                        str(exc),
+                    )
         except asyncio.CancelledError:
             current = self.store.get_run(run_id)
             if current and current.cancel_requested:

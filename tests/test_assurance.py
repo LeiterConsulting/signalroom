@@ -1,16 +1,21 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
 
 from splunk_security_agent.assurance import (
+    AssuranceResponseService,
     AssuranceService,
     AssuranceStore,
     BudgetedSplunkClient,
 )
+from splunk_security_agent.cases import CaseStore
+from splunk_security_agent.rag import EvidenceStore
 from splunk_security_agent.schemas import AssurancePolicyUpdate
+from splunk_security_agent.validation import ValidationService, ValidationStore
 
 
 class FakeSplunk:
@@ -207,3 +212,177 @@ async def test_active_assurance_cancellation_is_terminal(tmp_path):
     assert cancelled.status == "cancelled"
     assert store.get_run(run.id).status == "cancelled"
     assert store.usage_today()["runs"] == 0
+
+
+def test_assurance_correlates_transient_persistent_and_resolved_signals(tmp_path):
+    store = AssuranceStore(tmp_path / "assurance.db")
+    signal = {
+        "fingerprint": "telemetry-index-added",
+        "kind": "inventory",
+        "severity": "medium",
+        "title": "Telemetry index added",
+        "detail": "index=identity",
+        "subject": "identity",
+        "source_ref": "",
+    }
+
+    first = store.correlate_signals(
+        "run-1", [signal], authoritative=True, authoritative_kinds={"inventory"}
+    )[0]
+    second = store.correlate_signals(
+        "run-2", [signal], authoritative=True, authoritative_kinds={"inventory"}
+    )[0]
+    duplicate = store.correlate_signals(
+        "run-2", [signal], authoritative=True, authoritative_kinds={"inventory"}
+    )[0]
+    store.correlate_signals(
+        "run-partial", [], authoritative=False, authoritative_kinds={"inventory"}
+    )
+    unresolved = store.get_signal(signal["fingerprint"])
+    store.correlate_signals(
+        "run-3", [], authoritative=True, authoritative_kinds={"inventory"}
+    )
+    resolved = store.get_signal(signal["fingerprint"])
+
+    assert first["status"] == "watching"
+    assert second["status"] == "persistent" and second["consecutive_count"] == 2
+    assert duplicate["occurrence_count"] == 2
+    assert unresolved is not None and unresolved["status"] == "persistent"
+    assert resolved is not None and resolved["status"] == "resolved"
+
+
+def test_partial_observations_do_not_accumulate_recurrence(tmp_path):
+    store = AssuranceStore(tmp_path / "assurance.db")
+    signal = {
+        "fingerprint": "absence-derived-from-partial-read",
+        "kind": "finding",
+        "severity": "high",
+        "title": "Telemetry absent",
+        "detail": "Collection was incomplete.",
+        "subject": "telemetry",
+        "source_ref": "D1",
+        "authoritative": "false",
+    }
+
+    first = store.correlate_signals("run-1", [signal], authoritative=False)[0]
+    second = store.correlate_signals("run-2", [signal], authoritative=False)[0]
+    signal["authoritative"] = "true"
+    authoritative = store.correlate_signals("run-3", [signal], authoritative=True)[0]
+
+    assert first["status"] == "watching" and first["consecutive_count"] == 0
+    assert second["status"] == "watching" and second["consecutive_count"] == 0
+    assert authoritative["status"] == "persistent"
+    assert authoritative["consecutive_count"] == 1
+
+
+def test_response_service_creates_one_local_expiring_draft_and_deduplicates(tmp_path):
+    assurance_store = AssuranceStore(tmp_path / "assurance.db")
+    validation_store = ValidationStore(tmp_path / "validations.db")
+    validation_service = ValidationService(
+        validation_store,
+        FakeSplunk(),
+        EvidenceStore(tmp_path / "evidence.db"),
+        CaseStore(tmp_path / "cases.db", tmp_path / "exports"),
+    )
+    response = AssuranceResponseService(assurance_store, lambda: validation_service)
+    result = {
+        "run_id": "discovery-1",
+        "depth": "standard",
+        "findings": [
+            {
+                "severity": "high",
+                "domain": "telemetry-coverage",
+                "title": "Identity telemetry is missing",
+                "evidence": "No identity sourcetypes were observed.",
+            }
+        ],
+        "changes": {"inventory": {}, "coverage": {}},
+        "collection_status": {"failed_calls": 0},
+        "splunk_models": {"summary": {}},
+        "validation_candidates": [
+            {
+                "id": "D1",
+                "title": "Validate identity telemetry",
+                "rationale": "Observe current identity activity.",
+                "spl": "| tstats count where earliest=-24h by index sourcetype | head 100",
+                "earliest_time": "-24h",
+                "latest_time": "now",
+                "row_limit": 100,
+                "evidence_refs": ["D1"],
+                "source_run_id": "discovery-1",
+                "source_finding_ref": "D1",
+            }
+        ],
+    }
+
+    package = response.process("assurance-1", result)
+    duplicate = response.process("assurance-2", result)
+    tasks = validation_store.list()
+
+    assert package is not None and package["status"] == "review"
+    assert package["validation_task_ids"] == [tasks[0].id]
+    assert duplicate is None
+    assert len(tasks) == 1
+    assert tasks[0].status == "draft"
+    assert tasks[0].expires_at
+    assert tasks[0].assurance_package_id == package["id"]
+    assert tasks[0].approval_scope == "single-execution"
+    assert assurance_store.signal_counts() == {
+        "actionable": 1,
+        "repeated": 1,
+        "severity_elevated": 0,
+        "watching": 0,
+        "resolved": 0,
+    }
+
+
+def test_response_service_names_failed_collection_paths():
+    signals = AssuranceResponseService._signals(
+        {
+            "findings": [
+                {
+                    "severity": "high",
+                    "domain": "telemetry-coverage",
+                    "title": "Telemetry was not observed",
+                    "evidence": "No sourcetypes were returned.",
+                }
+            ],
+            "changes": {"inventory": {}, "coverage": {}},
+            "splunk_models": {"summary": {}},
+            "collection_status": {
+                "failed_calls": 2,
+                "errors": {
+                    "indexes": "Connection refused",
+                    "sourcetypes": "Connection refused",
+                },
+            },
+        }
+    )
+
+    collection_signals = [item for item in signals if item["kind"] == "collection"]
+    finding = next(item for item in signals if item["kind"] == "finding")
+    assert {item["subject"] for item in collection_signals} == {"indexes", "sourcetypes"}
+    assert all("Connection refused" in item["detail"] for item in collection_signals)
+    assert finding["severity"] == "medium"
+    assert finding["authoritative"] == "false"
+    assert "treat this derived finding as unverified" in finding["detail"]
+
+
+def test_assurance_response_package_lifecycle_is_durable(tmp_path):
+    store = AssuranceStore(tmp_path / "assurance.db")
+    future = (datetime.now(UTC) + timedelta(days=1)).isoformat()
+    package = store.create_package(
+        "run-1", "medium", "Review drift", "Needs analyst review.", [], future
+    )
+    closed = store.close_package(package["id"])
+    expired = store.create_package(
+        "run-2",
+        "medium",
+        "Expired drift",
+        "Window elapsed.",
+        [],
+        (datetime.now(UTC) - timedelta(minutes=1)).isoformat(),
+    )
+
+    assert closed is not None and closed["status"] == "closed"
+    assert store.get_package(expired["id"])["status"] == "expired"
