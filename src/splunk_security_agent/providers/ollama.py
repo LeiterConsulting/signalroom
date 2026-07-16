@@ -32,7 +32,11 @@ class OllamaProvider(BaseModelProvider):
     async def chat(
         self, messages: list[dict[str, str]], tools: list[dict[str, Any]] | None = None
     ) -> dict[str, Any]:
-        return await self._request(messages, tools=tools)
+        return await self._request(
+            messages,
+            tools=tools,
+            max_output_tokens=self.profile.max_output_tokens,
+        )
 
     async def structured_chat(
         self,

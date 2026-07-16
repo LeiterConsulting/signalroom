@@ -19,6 +19,7 @@ This is a focused reimplementation inspired by [LeiterConsulting/splunk-discover
 - Durable local investigation cases with an evidence-health cockpit, next-best actions, case-scoped context packets, chronological timelines, and handoff exports
 - Deterministic SPL cost and reuse intelligence before approval, including safer staged contracts and exact-result reuse
 - Local analyst feedback and model/task outcome scorecards with no telemetry export
+- Versioned local golden investigations with isolated evidence, instrumented tool selection, durable baselines, and explicit promotion gates
 - Ollama chat and tool-capable model support
 - Hugging Face chat, embedding, and token-classification adapters
 - Capability profiles for Foundation-Sec and SecureBERT 2.0
@@ -117,6 +118,26 @@ definitions and identifies declared Ollama dependencies. A backing model that is
 for endpoint validation because the MLTK connection may intentionally use a different Ollama service.
 This scan performs no Splunk writes and does not claim to measure model accuracy or training-data freshness.
 
+### Golden investigation promotion gate
+
+**Models → Promotion gate for models and prompts** runs five versioned synthetic investigations through the
+real agent and selected Ollama profile. The runner creates a temporary evidence library, disables hosted
+specialists, and replaces the Splunk connection with an instrumented demo client. The configured Splunk URL and
+token are never passed to the harness, and the interface reports a hard contract of zero external Splunk calls.
+A benchmark-only 640-token response ceiling keeps candidate timing comparable without limiting normal
+investigations.
+
+Each scenario scores routing, exact tool choice, expected evidence retrieval, required answer concepts, and
+safety discipline separately. Unexpected live-query behavior, a missed modifying-SPL block, prohibited certainty,
+or failure to execute the candidate model is a critical failure regardless of the aggregate score. Promotion
+requires an overall score of 80, an 80% scenario pass rate, no scenario below 70, no critical failures, and no
+material regression from the accepted baseline. Once a profile has at least five analyst ratings, a positive
+outcome rate below 60% also blocks promotion; smaller samples remain visible but directional.
+
+Runs, prompt and suite versions, per-control scores, synthetic responses, and baseline comparisons are stored in
+`data/benchmarks.db`. Passing a gate does not automatically change any configured model or prompt. **Accept as
+baseline** is a separate analyst action so quality policy remains explicit and reviewable.
+
 For scripted setup, install SignalRoom and then explicitly install Ollama and download the configured profiles:
 
 ```powershell
@@ -188,6 +209,7 @@ Invoke-RestMethod -Method Post -Uri http://localhost:8003/mcp -ContentType appli
 src/splunk_security_agent/
   agents/          evidence-first chat orchestration and SPL guardrails
   assurance/       durable scheduling, drift correlation, budgets, recovery, and response packages
+  benchmarks/      isolated golden investigations, scoring, history, and promotion gates
   discovery/       inventory, coverage analysis, and artifact packaging
   cases/           durable case records, evidence cockpit, timelines, and handoff exports
   providers/       Ollama, local Transformers, Hugging Face cloud, and capability routing

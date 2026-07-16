@@ -215,6 +215,19 @@
         <section class="model-freshness" id="modelFreshness" aria-live="polite" hidden></section>
         <div class="routing-map"><span>Operator question</span><b aria-hidden="true">→</b><span>Task router</span><b aria-hidden="true">→</b><div><em>General agent</em><em>Security reasoning</em><em>Cyber retrieval</em><em>Evidence reranking</em><em>Entity extraction</em></div></div>
         <div class="model-grid" id="modelGrid"></div>
+        <section class="golden-benchmarks" aria-labelledby="goldenBenchmarksTitle">
+          <header><div><span>LOCAL GOLDEN INVESTIGATIONS</span><h3 id="goldenBenchmarksTitle">Promotion gate for models and prompts</h3><p>Run versioned synthetic investigations through the real agent, local model, evidence retrieval, and instrumented tool planner. Configured Splunk is never contacted.</p></div><span id="goldenSuiteVersion" class="subtle-pill">Loading suite</span></header>
+          <div class="golden-controls"><label><span>Candidate profile</span><select id="goldenProfile"></select></label><div><button class="button primary" id="runGoldenBenchmark" type="button">Run five-scenario gate</button><small>Sequential local inference · 640-token comparison ceiling · zero external Splunk calls</small></div></div>
+          <article class="operation-card golden-operation" id="goldenProgress" aria-live="polite" hidden>
+            <header><div><span class="operation-kicker">ISOLATED BENCHMARK RUN</span><h3 class="operation-label">Preparing golden investigations</h3></div><span class="operation-elapsed">0s</span></header>
+            <p class="operation-detail">Checking the selected local model.</p>
+            <div class="operation-progress" role="progressbar" aria-label="Golden benchmark progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><i></i></div>
+            <div class="operation-metrics"></div><ol class="operation-steps"></ol>
+          </article>
+          <div id="goldenBenchmarkLatest" class="golden-latest"><div class="empty-inline compact-empty">Run the suite to create a candidate promotion decision.</div></div>
+          <details class="golden-suite-contract"><summary>Review the five golden contracts</summary><div id="goldenScenarioCatalog" class="golden-scenario-catalog"></div></details>
+          <section class="golden-history"><div class="validation-section-heading"><div><span>DURABLE COMPARISON HISTORY</span><h4>Candidate runs and accepted baseline</h4></div></div><div id="goldenRunHistory"></div></section>
+        </section>
         <section class="model-benchmarks" aria-labelledby="modelBenchmarksTitle"><header><div><span>ANALYST OUTCOME SCOREBOARD</span><h3 id="modelBenchmarksTitle">Local model value by task</h3><p>Direct analyst feedback is stored locally and separated by model profile and investigation mode. Small samples are marked directional.</p></div><span id="feedbackTotal" class="subtle-pill">0 ratings</span></header><div id="modelBenchmarkGrid" class="model-benchmark-grid"><div class="empty-inline compact-empty">Rate an Investigate response to start a local quality baseline.</div></div></section>
         <section class="splunk-models-panel" aria-labelledby="splunkModelsTitle">
           <header>

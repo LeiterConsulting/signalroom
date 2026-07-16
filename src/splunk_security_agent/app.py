@@ -14,6 +14,7 @@ from fastapi.staticfiles import StaticFiles
 
 from .agents import SecurityAgent
 from .assurance import AssuranceResponseService, AssuranceService, AssuranceStore
+from .benchmarks import GoldenBenchmarkService, GoldenBenchmarkStore
 from .cases import CaseCockpitService, CaseStore
 from .config import ConfigStore
 from .discovery import DiscoveryPipeline
@@ -36,6 +37,7 @@ from .schemas import (
     ChatRequest,
     ConnectionTestRequest,
     DiscoveryRequest,
+    GoldenBenchmarkRunCreate,
     ModelActivateRequest,
     ModelPullRequest,
     QueryIntelligenceRequest,
@@ -62,6 +64,13 @@ class Services:
         self.config = ConfigStore(DATA)
         self.evidence = EvidenceStore(DATA / "evidence.db")
         self.feedback = AnalystFeedbackStore(DATA / "feedback.db")
+        self.benchmark_store = GoldenBenchmarkStore(DATA / "benchmarks.db")
+        self.benchmarks = GoldenBenchmarkService(
+            self.config,
+            self.feedback,
+            self.benchmark_store,
+            DATA / "benchmark_runtime",
+        )
         self.cases = CaseStore(DATA / "cases.db", DATA / "case_exports")
         self.validation_store = ValidationStore(DATA / "validations.db")
         self.query_intelligence = QueryIntelligenceService(self.validation_store)
@@ -76,6 +85,7 @@ class Services:
             self.connection_diagnostics_store
         )
         self.discovery_lock = asyncio.Lock()
+        self.benchmark_lock = asyncio.Lock()
         self.model_setup = ModelSetupService(self.config, self.evidence)
         self._fingerprint = ""
         self._splunk: Any = None
@@ -482,6 +492,31 @@ async def run_connection_diagnostics() -> StreamingResponse:
         )
 
     return _stream_response(run)
+
+
+@app.get("/api/benchmarks")
+async def benchmark_overview() -> dict[str, Any]:
+    return services.benchmarks.overview()
+
+
+@app.post("/api/benchmarks/run/stream")
+async def run_golden_benchmark(request: GoldenBenchmarkRunCreate) -> StreamingResponse:
+    if services.benchmark_lock.locked():
+        raise HTTPException(409, "A golden benchmark run is already in progress")
+
+    async def run(progress: Any) -> dict[str, Any]:
+        async with services.benchmark_lock:
+            return await services.benchmarks.run(request.profile_id, progress)
+
+    return _stream_response(run)
+
+
+@app.post("/api/benchmarks/runs/{run_id}/baseline")
+async def accept_benchmark_baseline(run_id: str) -> dict[str, Any]:
+    result = services.benchmark_store.accept_baseline(run_id)
+    if result is None:
+        raise HTTPException(409, "Only a completed, promotion-ready run can become the baseline")
+    return result
 
 
 @app.get("/api/splunk-models/latest")

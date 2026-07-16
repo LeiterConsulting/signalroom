@@ -30,6 +30,7 @@ class ModelProfile(BaseModel):
     description: str = ""
     provenance: str = ""
     context_window: int = 8192
+    max_output_tokens: int | None = Field(default=None, ge=64, le=8192)
 
 
 class AppSettings(BaseModel):
@@ -192,6 +193,10 @@ class AnalystFeedbackCreate(BaseModel):
     note: str = Field(default="", max_length=4000)
     correction: str = Field(default="", max_length=10000)
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class GoldenBenchmarkRunCreate(BaseModel):
+    profile_id: str = Field(min_length=1, max_length=160)
 
 
 class ArtifactCreate(BaseModel):

@@ -6,7 +6,7 @@ const state = {
   modelRecommendations: {}, validations: [], editingValidationId: null,
   modelUpdates: null, modelCatalog: null, splunkModels: null,
   assurance: null, assurancePolicyDirty: false, connectionDiagnostics: null, queryIntelligence: null,
-  feedbackBenchmarks: null
+  feedbackBenchmarks: null, goldenBenchmarks: null
 };
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => [...document.querySelectorAll(selector)];
@@ -269,7 +269,7 @@ function setView(name) {
   $('#newConversation').hidden = name !== 'chat';
   if (name === 'context') loadArtifacts();
   if (name === 'cases') loadCases();
-  if (name === 'models') { renderModels(); loadFeedbackBenchmarks(); }
+  if (name === 'models') { renderModels(); loadFeedbackBenchmarks(); loadGoldenBenchmarks(); }
   if (name === 'discovery') loadValidations();
 }
 
@@ -794,6 +794,62 @@ function renderModels() {
     </article>`;
   }).join('');
   renderModelCatalog();
+}
+
+function benchmarkTime(value) {
+  return value ? new Date(value).toLocaleString() : 'not completed';
+}
+
+function renderGoldenRun(run) {
+  if (!run) return '<div class="empty-inline compact-empty">Run the suite to create a candidate promotion decision.</div>';
+  const gate = run.gate || {}; const comparison = run.comparison || {}; const feedback = run.feedback || {};
+  const decision = run.status === 'error' ? 'RUN ERROR' : gate.ready ? 'READY TO PROMOTE' : 'HOLD';
+  const blockers = (gate.blockers || []).map(item => `<li>${escapeHtml(item)}</li>`).join('');
+  const warnings = (gate.warnings || []).map(item => `<li>${escapeHtml(item)}</li>`).join('');
+  const scenarios = (run.results || []).map(item => `<article class="golden-result ${item.passed ? 'passed' : 'failed'} ${item.critical ? 'critical' : ''}"><header><div><span>${escapeHtml(item.task_type)} · ${item.duration_ms ? `${(item.duration_ms/1000).toFixed(1)}s` : 'not run'}</span><h5>${escapeHtml(item.title)}</h5></div><b>${Math.round(item.score)}/100</b></header><div class="golden-checks">${(item.checks || []).map(check => `<span class="${check.passed ? 'passed' : check.critical ? 'critical' : 'failed'}"><i></i>${escapeHtml(check.label)} <b>${Number(check.earned).toFixed(0)}/${Number(check.possible).toFixed(0)}</b></span>`).join('')}</div><details><summary>Inspect response and controls</summary>${item.error ? `<p class="validation-error">${escapeHtml(item.error)}</p>` : ''}<p>${escapeHtml(item.response || 'No response was produced.')}</p><small>Tools: ${escapeHtml((item.tools || []).map(call => call.name).join(', ') || 'none')} · Model: ${escapeHtml(item.model || 'not executed')}</small></details></article>`).join('');
+  const comparisonText = comparison.has_baseline ? `${comparison.score_delta >= 0 ? '+' : ''}${comparison.score_delta} score · ${comparison.pass_rate_delta >= 0 ? '+' : ''}${Math.round(comparison.pass_rate_delta*100)} pass-rate points vs baseline` : 'No accepted baseline · eligible run can establish it';
+  const feedbackText = feedback.total ? `${Math.round(Number(feedback.positive_rate || 0)*100)}% positive across ${feedback.total} analyst ratings` : 'No analyst ratings for this profile yet';
+  return `<article class="golden-decision ${gate.ready ? 'ready' : 'hold'} ${run.status === 'error' ? 'error' : ''}"><header><div><span>${decision}</span><h4>${escapeHtml(run.profile_id)} · ${escapeHtml(run.model)}</h4></div><b>${Math.round(run.score)}/100</b></header><p>${escapeHtml(run.error || gate.label || 'Benchmark is still running.')}</p><div class="golden-metrics"><span><b>${Math.round(Number(run.pass_rate || 0)*100)}%</b>scenario pass rate</span><span><b>${run.critical_failures || 0}</b>critical failures</span><span><b>${escapeHtml(run.suite_version)}</b>suite version</span><span><b>${escapeHtml(run.prompt_version)}</b>prompt version</span></div><div class="golden-comparison"><span>${escapeHtml(comparisonText)}</span><span>${escapeHtml(feedbackText)}</span></div>${blockers ? `<div class="golden-reasons blockers"><b>Promotion blockers</b><ul>${blockers}</ul></div>` : ''}${warnings ? `<div class="golden-reasons warnings"><b>Decision context</b><ul>${warnings}</ul></div>` : ''}<div class="golden-results">${scenarios}</div><footer><time>${escapeHtml(benchmarkTime(run.completed_at || run.created_at))}</time>${gate.ready && !run.is_baseline ? `<button class="button primary small" data-accept-golden-baseline="${escapeHtml(run.id)}">Accept as baseline</button>` : run.is_baseline ? '<span class="baseline-badge">Accepted baseline</span>' : ''}</footer></article>`;
+}
+
+function renderGoldenBenchmarks() {
+  const value = state.goldenBenchmarks; if (!value) return;
+  $('#goldenSuiteVersion').textContent = `Suite ${value.suite_version} · ${value.scenario_count} scenarios`;
+  const select = $('#goldenProfile'); const selected = select.value || state.settings?.security_reasoning_model || '';
+  select.innerHTML = (value.profiles || []).map(profile => `<option value="${escapeHtml(profile.id)}" ${!profile.enabled ? 'disabled' : ''}>${escapeHtml(profile.label)} · ${escapeHtml(profile.model)}</option>`).join('');
+  if ([...select.options].some(option => option.value === selected)) select.value = selected;
+  $('#goldenScenarioCatalog').innerHTML = (value.scenarios || []).map(item => `<article><header><span>${escapeHtml(item.task_type)}</span><b>${escapeHtml(item.title)}</b></header><p>${item.expected_evidence_controls} evidence controls · ${item.expected_conclusion_controls} conclusion controls · tools: ${escapeHtml((item.expected_tools || []).join(', ') || 'none')}</p>${item.guardrail_control ? '<em>Critical guardrail control</em>' : ''}</article>`).join('');
+  const latest = (value.runs || [])[0];
+  $('#goldenBenchmarkLatest').innerHTML = renderGoldenRun(latest);
+  $('#goldenRunHistory').innerHTML = (value.runs || []).length ? value.runs.slice(0,8).map(run => `<button data-show-golden-run="${escapeHtml(run.id)}"><span><b>${escapeHtml(run.profile_id)}</b><small>${escapeHtml(benchmarkTime(run.completed_at || run.created_at))}</small></span><em class="${run.is_baseline ? 'baseline' : run.gate?.ready ? 'ready' : 'hold'}">${run.is_baseline ? 'BASELINE' : run.status === 'error' ? 'ERROR' : `${Math.round(run.score)} · ${run.gate?.decision || run.status}`}</em></button>`).join('') : '<div class="empty-inline compact-empty">No golden benchmark runs have been recorded.</div>';
+}
+
+async function loadGoldenBenchmarks() {
+  try { state.goldenBenchmarks = await api('/api/benchmarks'); renderGoldenBenchmarks(); }
+  catch (error) { $('#goldenBenchmarkLatest').innerHTML = `<div class="empty-inline compact-empty">${escapeHtml(error.message)}</div>`; }
+}
+
+async function runGoldenBenchmark() {
+  const profileId = $('#goldenProfile').value; if (!profileId) return;
+  const button = $('#runGoldenBenchmark'); button.disabled = true; button.textContent = 'Running gate…';
+  const progress = $('#goldenProgress'); progress.hidden = false;
+  progress.querySelector('.operation-label').textContent = 'Preparing golden investigations';
+  progress.querySelector('.operation-detail').textContent = 'Checking the selected local model.';
+  progress.querySelector('.operation-progress i').style.width = '0%'; progress.querySelector('.operation-steps').innerHTML = '';
+  progress.scrollIntoView({behavior:'smooth',block:'center'});
+  try {
+    const result = await streamApi('/api/benchmarks/run/stream', {profile_id:profileId}, event => updateOperation(progress,event));
+    await loadGoldenBenchmarks();
+    toast(result.gate?.ready ? 'Golden gate passed · review before accepting baseline' : 'Golden gate completed with promotion blockers');
+  } catch (error) { toast(error.message); await loadGoldenBenchmarks(); }
+  finally { button.disabled = false; button.textContent = 'Run five-scenario gate'; }
+}
+
+async function acceptGoldenBaseline(runId) {
+  try {
+    await api(`/api/benchmarks/runs/${encodeURIComponent(runId)}/baseline`, {method:'POST',body:'{}'});
+    await loadGoldenBenchmarks(); toast('Golden run accepted as the local baseline');
+  } catch (error) { toast(error.message); }
 }
 
 function renderFeedbackBenchmarks() {
@@ -1533,6 +1589,14 @@ function navigateView(name) {
 }
 
 document.addEventListener('click', async event => {
+  const acceptGolden = event.target.closest('[data-accept-golden-baseline]');
+  if (acceptGolden) { await acceptGoldenBaseline(acceptGolden.dataset.acceptGoldenBaseline); return; }
+  const showGolden = event.target.closest('[data-show-golden-run]');
+  if (showGolden && state.goldenBenchmarks) {
+    const run = state.goldenBenchmarks.runs.find(item => item.id === showGolden.dataset.showGoldenRun);
+    if (run) { $('#goldenBenchmarkLatest').innerHTML = renderGoldenRun(run); $('#goldenBenchmarkLatest').scrollIntoView({behavior:'smooth',block:'start'}); }
+    return;
+  }
   const feedback = event.target.closest('[data-feedback-rating]');
   if (feedback) { await recordAnalystFeedback(feedback); return; }
   const assuranceNotice = event.target.closest('[data-ack-assurance]');
@@ -1760,6 +1824,7 @@ $('#cancelAssuranceRun').addEventListener('click', cancelAssuranceRun);
 $('#assuranceDepth').addEventListener('change', updateAssuranceBudgetHelp);
 $$('#assuranceForm input,#assuranceForm select').forEach(node => node.addEventListener('change', () => { state.assurancePolicyDirty = true; }));
 $('#scanSplunkModels').addEventListener('click', scanSplunkModels);
+$('#runGoldenBenchmark').addEventListener('click', runGoldenBenchmark);
 $('#contextPrevious').addEventListener('click', () => { state.contextPage -= 1; renderArtifacts(state.contextItems); $('#contextView').scrollIntoView({ behavior:'smooth', block:'start' }); });
 $('#contextNext').addEventListener('click', () => { state.contextPage += 1; renderArtifacts(state.contextItems); $('#contextView').scrollIntoView({ behavior:'smooth', block:'start' }); });
 $('#settingsForm').addEventListener('submit', saveSettings);
@@ -1835,4 +1900,4 @@ document.addEventListener('keydown', event => {
   else if (!$('#caseModal').hidden) { $('#caseModal').hidden = true; state.pendingCaseItem = null; }
 });
 
-Promise.all([loadSettings(), loadArtifacts(), loadCases(), loadLatestDiscovery(), loadValidations(), loadModelCatalog(), loadSplunkModels(), loadAssurance(), loadConnectionDiagnostics(), loadFeedbackBenchmarks()]).then(() => { renderPromptTree(); renderValidations(); handleDeepLink(); setInterval(loadAssurance, 3000); }).catch(error => toast(error.message));
+Promise.all([loadSettings(), loadArtifacts(), loadCases(), loadLatestDiscovery(), loadValidations(), loadModelCatalog(), loadSplunkModels(), loadAssurance(), loadConnectionDiagnostics(), loadFeedbackBenchmarks(), loadGoldenBenchmarks()]).then(() => { renderPromptTree(); renderValidations(); handleDeepLink(); setInterval(loadAssurance, 3000); }).catch(error => toast(error.message));

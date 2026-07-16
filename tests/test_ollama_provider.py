@@ -60,6 +60,7 @@ async def test_chat_swaps_managed_ollama_model_and_proves_executed_identity(monk
             model=foundation,
             task="security_reasoning",
             endpoint="http://localhost:11434",
+            max_output_tokens=640,
         ),
         managed_models=["llama3.1:8b", foundation],
     )
@@ -73,6 +74,7 @@ async def test_chat_swaps_managed_ollama_model_and_proves_executed_identity(monk
     assert client.posts[0][1]["keep_alive"] == 0
     assert client.posts[1][1]["keep_alive"] == "15m"
     assert client.posts[2][0].endswith("/api/chat")
+    assert client.posts[2][1]["options"]["num_predict"] == 640
 
 
 async def test_structured_chat_sends_json_schema_and_deterministic_runtime_options(monkeypatch):
