@@ -1,0 +1,316 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Local-first Splunk security agent with model routing, discovery, and evidence-backed chat.">
+  <title>SignalRoom · Splunk Security Agent</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 64 64%22><rect width=%2264%22 height=%2264%22 rx=%2214%22 fill=%22%2314251d%22/><path d=%22M17 40l10-10 8 8 13-15%22 fill=%22none%22 stroke=%22%233ed387%22 stroke-width=%226%22 stroke-linecap=%22round%22 stroke-linejoin=%22round%22/></svg>">
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="rail">
+      <div class="brand" aria-label="SignalRoom home">
+        <div class="brand-mark"><span></span><span></span><span></span></div>
+        <div><strong>SignalRoom</strong><small>Splunk security agent</small></div>
+      </div>
+      <nav class="nav" aria-label="Primary navigation">
+        <button class="nav-item active" data-view="chat"><span class="nav-icon">⌁</span><span>Investigate</span></button>
+        <button class="nav-item" data-view="discovery"><span class="nav-icon">◎</span><span>Discovery</span></button>
+        <button class="nav-item" data-view="cases"><span class="nav-icon">▰</span><span>Cases</span><em id="caseCount">0</em></button>
+        <button class="nav-item" data-view="context"><span class="nav-icon">▱</span><span>Context</span><em id="artifactCount">0</em></button>
+        <button class="nav-item" data-view="models"><span class="nav-icon">◇</span><span>Models</span></button>
+      </nav>
+      <div class="rail-footer">
+        <div class="connection-card">
+          <span class="status-dot" id="connectionDot"></span>
+          <div><strong id="connectionLabel">Primary Splunk</strong><small id="connectionDetail">Endpoint missing</small></div>
+        </div>
+        <button class="nav-item" id="openSettings"><span class="nav-icon">⚙</span><span>Setup</span></button>
+      </div>
+    </aside>
+
+    <main class="workspace">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow" id="viewEyebrow">INVESTIGATION WORKSPACE</p>
+          <h1 id="viewTitle">Ask, inspect, verify.</h1>
+        </div>
+        <div class="top-actions">
+          <button class="button demo-tour-launch" id="startDemoTour" hidden>Guided demo</button>
+          <span class="mode-pill" id="modePill"><i></i> Live Splunk</span>
+          <button class="button ghost" id="newConversation">New investigation</button>
+        </div>
+      </header>
+
+      <section class="view active" id="chatView">
+        <div class="chat-layout">
+          <section class="conversation-panel">
+            <div class="messages" id="messages" aria-live="polite">
+              <article class="welcome-card">
+                <p class="eyebrow">EVIDENCE-FIRST SECURITY ANALYSIS</p>
+                <h2>What are we looking for?</h2>
+                <p>Explore the Splunk environment, pressure-test a detection hypothesis, explain SPL, or turn an observation into a defensible investigation track.</p>
+                <div class="prompt-explorer" id="promptExplorer" aria-live="polite"></div>
+              </article>
+            </div>
+            <form class="composer" id="chatForm">
+              <div class="composer-tools">
+                <label class="toggle"><input type="checkbox" id="includeContext" checked><span></span>Use local context</label>
+                <label class="toggle hf-query-approval" id="hfQueryApproval" hidden><input type="checkbox" id="approveHf"><span></span>Approve HF cloud for this question</label>
+                <select id="investigationMode" aria-label="Investigation mode">
+                  <option value="auto">Auto mode</option><option value="general">General analysis</option>
+                  <option value="discovery">Environment discovery</option><option value="detection">Detection validation</option>
+                  <option value="hunt">Threat hunting</option><option value="triage">Incident triage</option>
+                  <option value="spl">SPL review</option><option value="brief">Incident briefing</option>
+                </select>
+                <select id="modelSelect" aria-label="Model route"><option value="">Auto-route model</option></select>
+                <button class="evidence-toggle" id="toggleEvidence" type="button">Evidence <span id="mobileEvidenceCount">0</span></button>
+                <span class="read-only">Read-only tools</span>
+              </div>
+              <div class="composer-row">
+                <textarea id="chatInput" rows="1" placeholder="Ask about the environment, paste SPL, or describe a security hypothesis…" required></textarea>
+                <button class="send-button" type="submit" aria-label="Send message">↗</button>
+              </div>
+              <small>Models can be wrong. Verify material findings in Splunk and preserve the search time range.</small>
+            </form>
+          </section>
+          <aside class="evidence-panel">
+            <div class="panel-heading"><div><p class="eyebrow">CONTEXT WINDOW</p><h3>Evidence in play</h3></div><div class="panel-heading-actions"><span class="count-badge" id="evidenceCount">0</span><button class="close-evidence" id="closeEvidence" aria-label="Close evidence panel">×</button></div></div>
+            <div class="empty-state" id="evidenceEmpty"><div class="empty-glyph">⌁</div><b>No evidence selected yet</b><p>Retrieved artifacts and Splunk tool results will appear here with stable references.</p></div>
+            <div id="evidenceList" class="evidence-list"></div>
+            <div class="ledger-wrap" id="ledgerWrap" hidden><p class="eyebrow">EVIDENCE LEDGER</p><div id="ledgerList" class="ledger-list"></div></div>
+            <div class="trace-wrap" id="traceWrap" hidden>
+              <p class="eyebrow">AGENT TRACE</p>
+              <div id="traceList" class="trace-list"></div>
+            </div>
+          </aside>
+        </div>
+      </section>
+
+      <section class="view" id="discoveryView">
+        <div class="section-grid discovery-grid">
+          <article class="hero-panel">
+            <div><p class="eyebrow">READ-ONLY SECURITY INTELLIGENCE</p><h2>Build knowledge once. Investigate from it repeatedly.</h2><p>Profile telemetry, detections, data models, and collection health through Splunk MCP; reason locally with Ollama; then index focused evidence that later conversations can reuse without another search.</p></div>
+            <div class="run-controls"><select id="discoveryDepth" aria-label="Discovery depth"><option value="quick">Quick · inventory baseline</option><option value="standard" selected>Standard · detection intelligence</option><option value="deep">Deep · CIM and content readiness</option></select><button class="button primary" id="runDiscovery">Run discovery</button></div>
+          </article>
+          <article class="operation-card discovery-operation" id="discoveryProgress" hidden aria-live="polite">
+            <header><div><p class="eyebrow">LIVE DISCOVERY ACTIVITY</p><h3 id="discoveryProgressLabel">Preparing discovery</h3></div><span id="discoveryElapsed">0s</span></header>
+            <p id="discoveryProgressDetail">SignalRoom is preparing the read-only collection plan.</p>
+            <div class="operation-progress" role="progressbar" aria-label="Discovery progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><i id="discoveryProgressBar"></i></div>
+            <div class="operation-metrics" id="discoveryLiveMetrics"></div>
+            <ol class="operation-steps" id="discoveryProgressSteps"></ol>
+          </article>
+          <div class="purpose-grid" aria-label="Discovery purpose">
+            <article><span>1 · Observe</span><h3>Map what is actually connected</h3><p>Read indexes, sourcetypes, hosts, sources, and knowledge objects without modifying Splunk.</p></article>
+            <article><span>2 · Compare</span><h3>Spot posture changes</h3><p>Compare each run with the prior baseline so additions, removals, and collection gaps are visible.</p></article>
+            <article><span>3 · Act</span><h3>Create defensible next steps</h3><p>Turn findings into evidence artifacts, validation searches, hunts, and leadership-ready briefs.</p></article>
+          </div>
+          <div class="metrics" id="discoveryMetrics">
+            <article class="metric"><span>INDEXES</span><strong>—</strong><small>Awaiting discovery</small></article>
+            <article class="metric"><span>SOURCETYPES</span><strong>—</strong><small>Awaiting discovery</small></article>
+            <article class="metric"><span>HOSTS</span><strong>—</strong><small>Awaiting discovery</small></article>
+            <article class="metric accent"><span>COVERAGE</span><strong>—</strong><small>Five security domains</small></article>
+          </div>
+          <div class="security-posture-grid" id="securityPosture" hidden></div>
+          <article class="wide-card model-assessment" id="discoveryAssessment" hidden>
+            <div class="panel-heading"><div><p class="eyebrow">LOCAL MODEL TEAM</p><h3>What each specialist found—and what survived reconciliation</h3></div><span id="assessmentModel" class="subtle-pill"></span></div>
+            <div id="assessmentContent"></div>
+          </article>
+          <article class="wide-card validation-workspace" id="validationWorkspace">
+            <div class="panel-heading"><div><p class="eyebrow">VALIDATION QUEUE</p><h3>Preview, approve, execute, preserve</h3><p class="panel-intro">Discovery proposes bounded read-only checks. Review the exact SPL contract before approval; SignalRoom preserves completed results as evidence.</p></div><span id="validationCount" class="subtle-pill">0 tasks</span></div>
+            <section class="validation-candidates-section" aria-labelledby="validationCandidatesTitle">
+              <div class="validation-section-heading"><div><span>DISCOVERY PROPOSALS</span><h4 id="validationCandidatesTitle">Checks that can turn findings into observed evidence</h4></div><small>Queueing creates an editable draft. It does not run Splunk.</small></div>
+              <div id="validationCandidates" class="validation-candidates"><div class="empty-inline compact-empty">Run discovery to generate evidence-linked validation proposals.</div></div>
+            </section>
+            <article class="operation-card validation-operation" id="validationProgress" hidden aria-live="polite">
+              <header><div><span class="operation-kicker">LIVE VALIDATION ACTIVITY</span><h3 class="operation-label">Preparing validation</h3></div><span class="operation-elapsed">0s</span></header>
+              <p class="operation-detail">SignalRoom is rechecking the approved read-only contract.</p>
+              <div class="operation-progress" role="progressbar" aria-label="Validation progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><i></i></div>
+              <div class="operation-metrics"></div><ol class="operation-steps"></ol>
+            </article>
+            <section class="validation-queue-section" aria-labelledby="validationQueueTitle">
+              <div class="validation-section-heading"><div><span>DURABLE WORK QUEUE</span><h4 id="validationQueueTitle">Analyst-controlled validation state</h4></div><small>Draft → Approved → Running → Evidence preserved</small></div>
+              <div id="validationQueue" class="validation-queue"><div class="empty-inline compact-empty">No validations queued yet.</div></div>
+            </section>
+          </article>
+          <article class="wide-card"><div class="panel-heading"><div><p class="eyebrow">FINDING LEDGER</p><h3>Prioritized observations</h3></div><span id="discoveryStatus" class="subtle-pill">Not run</span></div><div id="findingLedger" class="empty-inline">Run discovery to build the finding ledger.</div></article>
+          <div class="discovery-followup" id="discoveryFollowup" hidden>
+            <article class="wide-card"><div class="panel-heading"><div><p class="eyebrow">POSTURE CHANGE</p><h3>Since the previous discovery</h3></div></div><div id="changeLedger"></div></article>
+            <article class="wide-card"><div class="panel-heading"><div><p class="eyebrow">INVESTIGATION TRACKS</p><h3>Questions worth validating</h3></div></div><div id="investigationTracks"></div></article>
+          </div>
+        </div>
+      </section>
+
+      <section class="view" id="casesView">
+        <div class="case-toolbar">
+          <div><p class="eyebrow">DURABLE INVESTIGATION RECORDS</p><h2>Investigation cases</h2><p>Preserve observations, hypotheses, decisions, and analyst notes as a chronological record that can survive shift changes and support review.</p></div>
+          <button class="button primary" id="newCase">New case</button>
+        </div>
+        <div class="case-workspace">
+          <aside class="case-list-panel" aria-label="Saved cases">
+            <div class="case-list-heading"><b>Saved cases</b><span id="caseListCount">0</span></div>
+            <div class="case-list" id="caseList"></div>
+          </aside>
+          <section class="case-detail" id="caseDetail">
+            <div class="case-empty"><div class="empty-glyph">▰</div><h3>Select or create a case</h3><p>Cases connect SignalRoom evidence to ownership, decisions, and a reviewable handoff timeline.</p></div>
+          </section>
+        </div>
+      </section>
+
+      <section class="view" id="contextView">
+        <div class="context-toolbar">
+          <div><p class="eyebrow">MANAGED KNOWLEDGE</p><h2>Evidence library</h2><p>Context gives SignalRoom the local facts, runbooks, threat intelligence, and known-good SPL it can retrieve. Stored items are reusable investigation assets—not automatically trusted conclusions.</p></div>
+          <div class="button-row"><button class="button ghost" id="uploadArtifact">Upload text</button><button class="button primary" id="addArtifact">Add artifact</button><input type="file" id="fileInput" hidden accept=".txt,.md,.json,.csv,.log,.spl"></div>
+        </div>
+        <div class="context-purpose"><b>What can I do here?</b><span>Open an item to inspect its full content and provenance.</span><span>Use it to start an investigation or validation search.</span><span>Search and filter the evidence available to RAG.</span></div>
+        <div class="context-filters" id="contextFilters"><button class="active" data-context-kind="all">All</button><button data-context-kind="discovery">Discoveries</button><button data-context-kind="runbook">Runbooks</button><button data-context-kind="threat-intel">Threat intel</button><button data-context-kind="spl">SPL library</button><button data-context-kind="reference">References</button></div>
+        <div class="search-row"><input id="contextSearch" type="search" placeholder="Search artifacts, indicators, techniques, or SPL…"><span id="contextResultCount">0 artifacts</span></div>
+        <div class="artifact-grid" id="artifactGrid"></div>
+        <nav class="pagination" id="contextPagination" aria-label="Evidence library pages" hidden><button class="button ghost small" id="contextPrevious">Previous</button><span id="contextPageStatus">Page 1 of 1</span><button class="button ghost small" id="contextNext">Next</button></nav>
+      </section>
+
+      <section class="view" id="modelsView">
+        <div class="context-toolbar">
+          <div><p class="eyebrow">CAPABILITY ROUTING</p><h2>Specialists, not just model names.</h2><p>Each profile declares what it is trusted to do. Auto-routing sends security reasoning, retrieval, and entity extraction to the right model.</p></div>
+          <button class="button primary" id="configureModels">Configure profiles</button>
+        </div>
+        <div class="routing-map"><span>Operator question</span><b aria-hidden="true">→</b><span>Task router</span><b aria-hidden="true">→</b><div><em>General agent</em><em>Security reasoning</em><em>Cyber retrieval</em><em>Entity extraction</em></div></div>
+        <div class="model-grid" id="modelGrid"></div>
+      </section>
+    </main>
+  </div>
+
+  <div class="modal-backdrop" id="settingsModal" hidden>
+    <section class="modal" role="dialog" aria-modal="true" aria-labelledby="settingsTitle">
+      <header><div><p class="eyebrow">LOCAL-FIRST SETUP</p><h2 id="settingsTitle">Connect the workspace</h2></div><button class="icon-button" id="closeSettings" aria-label="Close">×</button></header>
+      <div class="setup-progress"><span class="active">1</span><i></i><span>2</span><i></i><span>3</span><div><b>Splunk</b><b>Models</b><b>Policy</b></div></div>
+      <form id="settingsForm">
+        <div class="form-section"><h3>Splunk MCP</h3><p>Connect a compatible Splunk MCP endpoint. The optional guided demo uses isolated sample responses and never searches Splunk.</p>
+          <label class="switch-line"><span><b>Enable guided demo workspace</b><small>Opt in to sample inventory plus an interactive product tour; searches are never executed</small></span><input type="checkbox" id="demoMode"><i></i></label>
+          <div class="form-grid">
+            <label><span>Connection name</span><input id="splunkName" placeholder="Production search head"></label>
+            <label class="full"><span>MCP endpoint URL</span><input id="splunkUrl" type="url" placeholder="https://splunk.example:8089/services/mcp"><small class="field-help">Copy this from the Splunk MCP Server app. The standard path is <code>/services/mcp</code> (plural).</small></label>
+            <label class="full"><span>Encrypted MCP token</span><input id="splunkToken" type="password" placeholder="Leave blank to keep existing token"><small class="field-help">Use the encrypted token created in the Splunk MCP Server app—not a normal Splunk REST token.</small></label>
+            <label class="full switch-line nested-switch"><span><b>Verify TLS certificates</b><small>Recommended. Disable only for a trusted self-signed development endpoint.</small></span><input type="checkbox" id="verifySplunkTls" checked><i></i></label>
+            <div class="tls-warning full" id="tlsWarning" hidden><b>TLS verification is disabled</b><span>The connection remains encrypted, but SignalRoom will not validate the server certificate or identity.</span></div>
+            <label class="full" id="caBundleLabel"><span>Private CA bundle path <em>optional</em></span><input id="splunkCaBundle" placeholder="C:\certs\organization-ca.pem or /etc/ssl/org-ca.pem"></label>
+          </div>
+          <div class="connection-test-row"><button class="button ghost small" type="button" id="testSplunk">Test connection</button><span class="test-result" id="splunkTestResult"></span></div>
+        </div>
+        <div class="form-section"><h3>Model services</h3><p>Run chat and security reasoning through Ollama. SecureBERT specialists default to local Transformers after a one-time Hugging Face download; cloud inference remains optional.</p>
+          <div class="model-onboarding">
+            <article class="setup-provider-card">
+              <header><div><span class="provider-mark local">O</span><b>Local Ollama</b></div><span class="readiness-badge" id="ollamaReadiness">Checking…</span></header>
+              <p id="ollamaReadinessDetail">Detecting the local service and installed models.</p>
+              <div class="setup-actions"><a class="button ghost small" href="https://ollama.com/download" target="_blank" rel="noopener">Install Ollama</a><button class="button ghost small" type="button" id="checkModels">Check again</button></div>
+              <div class="profile-readiness" id="ollamaProfileReadiness"></div>
+            </article>
+            <article class="setup-provider-card">
+              <header><div><span class="provider-mark transformers">T</span><b>Local specialists</b></div><span class="readiness-badge" id="localReadiness">Checking…</span></header>
+              <p id="localReadinessDetail">Checking the local Transformers runtime and SecureBERT model cache.</p>
+              <div class="setup-actions"><button class="button ghost small" type="button" id="checkLocalModels">Check again</button></div>
+              <div class="profile-readiness" id="localProfileReadiness"></div>
+            </article>
+            <article class="setup-provider-card">
+              <header><div><span class="provider-mark hosted">HF</span><b>HF cloud · optional</b></div><span class="readiness-badge" id="hfReadiness">Not configured</span></header>
+              <p id="hfReadinessDetail">Hosted inference is available when explicitly selected and permitted by policy.</p>
+              <div class="setup-actions"><a class="button ghost small" href="https://huggingface.co/settings/tokens" target="_blank" rel="noopener">Create token</a></div>
+              <div class="profile-readiness" id="hfProfileReadiness"></div>
+            </article>
+          </div>
+          <div class="form-grid">
+            <label class="full"><span>Ollama endpoint</span><input id="ollamaEndpoint" type="url" placeholder="http://localhost:11434"></label>
+            <label><span>General Ollama model</span><input id="generalModelId" list="ollamaInstalledModels" placeholder="llama3.1:8b"></label>
+            <label><span>Security Ollama model</span><input id="securityModelId" placeholder="hf.co/fdtn-ai/Foundation-Sec-8B-Reasoning-Q4_K_M-GGUF:Q4_K_M"></label>
+            <datalist id="ollamaInstalledModels"></datalist>
+            <label class="full"><span>Security specialist runtime</span><select id="specialistRuntime"><option value="local">Local Transformers · recommended</option><option value="cloud">Hugging Face cloud · optional external inference</option></select><small class="field-help">Local mode uses Hugging Face only for deliberate model installation. Questions and evidence are processed on this host.</small></label>
+            <label class="full"><span>Hugging Face token <em>optional for public downloads; required for cloud</em></span><input id="hfToken" type="password" placeholder="Leave blank to keep existing token"></label>
+            <label><span>Cloud embedding endpoint</span><input id="hfEmbeddingEndpoint" type="url" placeholder="HF router or dedicated endpoint URL"></label>
+            <label><span>Cloud NER endpoint</span><input id="hfNerEndpoint" type="url" placeholder="HF router or dedicated endpoint URL"></label>
+            <label><span>Default chat profile</span><select id="defaultModel"></select></label><label><span>Security reasoning profile</span><select id="securityModel"></select></label>
+            <label class="full"><span>Hugging Face cloud usage policy</span><select id="hfPolicy"><option value="disabled">Disabled · never send evidence to hosted inference</option><option value="ask">Ask · require approval for every cloud question</option><option value="allow">Allowed · use hosted specialists automatically</option></select><small class="field-help">This policy applies only when the cloud runtime is selected. Local SecureBERT inference does not require cloud approval.</small></label>
+          </div>
+        </div>
+        <div class="form-section"><h3>Execution policy</h3><label class="switch-line"><span><b>Allow write-capable tools</b><small>Keep disabled for analyst workspaces; not implemented in this release</small></span><input type="checkbox" id="allowWrites" disabled><i></i></label></div>
+        <footer><span><i class="lock-icon">◆</i> Tokens are encrypted at rest and never returned by the API.</span><button class="button primary" type="submit">Save workspace</button></footer>
+      </form>
+    </section>
+  </div>
+
+  <div class="modal-backdrop" id="artifactModal" hidden>
+    <section class="modal compact" role="dialog" aria-modal="true" aria-labelledby="artifactTitle"><header><div><p class="eyebrow" id="artifactModalEyebrow">ADD TO CONTEXT</p><h2 id="artifactTitle">New evidence artifact</h2></div><button class="icon-button close-artifact" aria-label="Close">×</button></header><form id="artifactForm"><div class="form-grid"><label class="full"><span>Title</span><input id="newArtifactTitle" required></label><label><span>Type</span><select id="newArtifactKind"><option value="runbook">Runbook</option><option value="threat-intel">Threat intelligence</option><option value="spl">SPL library</option><option value="reference">Reference</option></select></label><label><span>Tags</span><input id="newArtifactTags" placeholder="identity, triage, windows"></label><label class="full"><span>Content</span><textarea id="newArtifactContent" rows="10" required></textarea></label></div><footer><button type="button" class="button ghost close-artifact">Cancel</button><button class="button primary" id="artifactSubmit" type="submit">Index artifact</button></footer></form></section>
+  </div>
+  <div class="modal-backdrop" id="validationModal" hidden>
+    <section class="modal compact" role="dialog" aria-modal="true" aria-labelledby="validationModalTitle">
+      <header><div><p class="eyebrow">READ-ONLY SPL CONTRACT</p><h2 id="validationModalTitle">Review validation draft</h2></div><button class="icon-button close-validation" aria-label="Close">×</button></header>
+      <form id="validationForm">
+        <div class="form-section"><div class="validation-safety-note"><b>Editing invalidates approval</b><span>The query, time window, row cap, and fingerprint are revalidated before approval and again immediately before execution.</span></div><div class="form-grid">
+          <label class="full"><span>Validation title</span><input id="validationTitle" required maxlength="240"></label>
+          <label class="full"><span>Why this check matters</span><textarea id="validationRationale" rows="4" required maxlength="4000"></textarea></label>
+          <label class="full"><span>Read-only SPL</span><textarea id="validationSpl" class="spl-editor" rows="8" required maxlength="20000" spellcheck="false"></textarea></label>
+          <label><span>Earliest time</span><input id="validationEarliest" required maxlength="64" placeholder="-24h"></label>
+          <label><span>Latest time</span><input id="validationLatest" required maxlength="64" value="now"></label>
+          <label><span>Maximum rows</span><input id="validationRowLimit" type="number" required min="1" max="500" value="100"></label>
+          <label><span>Evidence references</span><input id="validationEvidenceRefs" readonly></label>
+        </div></div>
+        <footer><button type="button" class="button ghost close-validation">Cancel</button><button class="button primary" type="submit">Save draft</button></footer>
+      </form>
+    </section>
+  </div>
+  <div class="modal-backdrop" id="caseModal" hidden>
+    <section class="modal compact" role="dialog" aria-modal="true" aria-labelledby="caseModalTitle">
+      <header><div><p class="eyebrow">OPEN AN INVESTIGATION RECORD</p><h2 id="caseModalTitle">New case</h2></div><button class="icon-button close-case-modal" aria-label="Close">×</button></header>
+      <form id="caseForm"><div class="form-section"><div class="form-grid">
+        <label class="full"><span>Case title</span><input id="newCaseTitle" required maxlength="240" placeholder="Suspicious identity activity · 16 July"></label>
+        <label><span>Owner</span><input id="newCaseOwner" maxlength="160" placeholder="Unassigned"></label>
+        <label><span>Severity</span><select id="newCaseSeverity"><option value="informational">Informational</option><option value="low">Low</option><option value="medium" selected>Medium</option><option value="high">High</option><option value="critical">Critical</option></select></label>
+        <label class="full"><span>Executive summary</span><textarea id="newCaseSummary" rows="4" maxlength="10000" placeholder="What prompted this case, what is known, and what decision is pending?"></textarea></label>
+        <label class="full"><span>Tags</span><input id="newCaseTags" placeholder="identity, triage, shift-handoff"></label>
+      </div></div><footer><button type="button" class="button ghost close-case-modal">Cancel</button><button class="button primary" type="submit">Create case</button></footer></form>
+    </section>
+  </div>
+  <div class="modal-backdrop" id="caseItemModal" hidden>
+    <section class="modal compact" role="dialog" aria-modal="true" aria-labelledby="caseItemTitle">
+      <header><div><p class="eyebrow">CASE TIMELINE</p><h2 id="caseItemTitle">Add timeline item</h2></div><button class="icon-button close-case-item" aria-label="Close">×</button></header>
+      <form id="caseItemForm"><div class="form-section"><div class="form-grid">
+        <label><span>Item type</span><select id="caseItemKind"><option value="note">Analyst note</option><option value="observation">Observation</option><option value="hypothesis">Hypothesis</option><option value="action">Action</option><option value="decision">Decision</option><option value="evidence">Evidence</option><option value="context">Context</option></select></label>
+        <label><span>Evidence status</span><select id="caseItemStatus"><option value="unverified">Unverified</option><option value="observed">Observed</option><option value="needs-validation">Needs validation</option><option value="complete">Complete</option></select></label>
+        <label class="full"><span>Title</span><input id="caseItemName" required maxlength="240"></label>
+        <label class="full"><span>Details</span><textarea id="caseItemContent" rows="7" required maxlength="50000"></textarea></label>
+        <label><span>Source</span><input id="caseItemSource" maxlength="240" value="analyst"></label>
+        <label><span>Confidence</span><select id="caseItemConfidence"><option value="unknown">Unknown</option><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option></select></label>
+        <label class="full"><span>Occurred at <em>optional</em></span><input id="caseItemOccurred" type="datetime-local"></label>
+      </div></div><footer><button type="button" class="button ghost close-case-item">Cancel</button><button class="button primary" id="caseItemSubmit" type="submit">Add to timeline</button></footer></form>
+    </section>
+  </div>
+  <div class="modal-backdrop" id="casePickerModal" hidden>
+    <section class="modal compact" role="dialog" aria-modal="true" aria-labelledby="casePickerTitle">
+      <header><div><p class="eyebrow">PRESERVE THE EVIDENCE</p><h2 id="casePickerTitle">Add to a case</h2></div><button class="icon-button close-case-picker" aria-label="Close">×</button></header>
+      <div class="case-picker-body"><p id="casePickerSummary"></p><div id="casePickerList" class="case-picker-list"></div></div>
+      <footer class="detail-actions"><button class="button ghost" id="pickerNewCase">Create a new case</button></footer>
+    </section>
+  </div>
+  <div class="modal-backdrop" id="detailModal" hidden>
+    <section class="modal detail-modal" role="dialog" aria-modal="true" aria-labelledby="detailTitle">
+      <header><div><p class="eyebrow" id="detailEyebrow">EVIDENCE DETAIL</p><h2 id="detailTitle">Why this is here</h2></div><button class="icon-button close-detail" aria-label="Close">×</button></header>
+      <div class="detail-body"><div class="detail-summary" id="detailSummary"></div><div class="detail-content" id="detailContent"></div><div class="detail-provenance" id="detailProvenance"></div></div>
+      <footer class="detail-actions" id="detailActions"></footer>
+    </section>
+  </div>
+  <div class="demo-tour" id="demoTour" hidden>
+    <div class="demo-tour-scrim"></div>
+    <aside class="demo-tour-card" role="dialog" aria-modal="true" aria-labelledby="demoTourTitle">
+      <header><span id="demoTourProgress">STEP 1 OF 7</span><button id="demoTourClose" aria-label="Exit guided demo">×</button></header>
+      <p class="eyebrow" id="demoTourEyebrow">GUIDED DEMO</p>
+      <h2 id="demoTourTitle">Welcome to SignalRoom</h2>
+      <p id="demoTourBody"></p>
+      <div class="demo-tour-value" id="demoTourValue"></div>
+      <footer><button class="button ghost" id="demoTourBack">Back</button><button class="button primary" id="demoTourNext">Next</button></footer>
+    </aside>
+  </div>
+  <div class="toast" id="toast" role="status"></div>
+  <script src="/static/app.js" defer></script>
+</body>
+</html>

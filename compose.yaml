@@ -1,0 +1,13 @@
+services:
+  signalroom:
+    build: .
+    ports:
+      - "127.0.0.1:8003:8003"
+    environment:
+      SPLUNK_MCP_TOKEN: ${SPLUNK_MCP_TOKEN:-}
+      HF_TOKEN: ${HF_TOKEN:-}
+    volumes:
+      - ./data:/app/data
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
