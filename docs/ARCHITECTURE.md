@@ -14,6 +14,7 @@ FastAPI application ───── outward MCP tools
         │        └── bounded read-only Splunk tool plans
         │
         └── DiscoveryPipeline ── Splunk MCP ── deterministic evidence map + fingerprints
+                   ├── read-only MLTK inventory + definition drift
                    │                         ├── SecureBERT NER + correlation (parallel)
                    │                         ├── general Ollama synthesis
                    │                         ├── Foundation-Sec assessment
@@ -50,6 +51,12 @@ collection failures. Standard and deep runs add two parallel local SecureBERT sp
 general Ollama environment synthesis, a Foundation-Sec assessment, and deterministic evidence-reference
 reconciliation. The brief is indexed back into RAG for subsequent conversations, while a compact latest-run
 projection restores the Discovery UI without loading the raw inventory catalogs.
+
+Standard and deep discovery also run Splunk's read-only `listmodels` search. `SplunkModelInventoryService`
+normalizes MLTK definitions, fingerprints their owner/app/type/options contract, and compares each scan with the
+previous local snapshot. Declared Ollama dependencies are compared only with SignalRoom's configured Ollama
+endpoint and carry that scope as an explicit caveat. The resulting catalog becomes local RAG context; it never
+loads, updates, deletes, or retrains a Splunk model.
 
 Ollama receives a flattened generation schema limited to grammar-safe structural keywords. SignalRoom then
 enforces the complete Pydantic contract locally, including length and collection limits. Generation is seeded,

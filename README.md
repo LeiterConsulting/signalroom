@@ -11,6 +11,7 @@ This is a focused reimplementation inspired by [LeiterConsulting/splunk-discover
 - Parallel read-only quick, standard, and deep discovery with change detection, JSON blueprints, and briefs
 - First-class security discovery across telemetry freshness, detection health, data-model readiness, and reusable RAG knowledge
 - Delta-aware model-team reuse with exact input fingerprints and visible cache provenance
+- Read-only Splunk MLTK model inventory with definition drift and endpoint-scoped dependency checks
 - A restart-safe validation queue with bounded SPL preview, explicit analyst approval, live progress, and preserved results
 - An evidence-first agent with bounded multi-tool plans, investigation modes, and a structured ledger
 - Durable local investigation cases with ownership, lifecycle, severity, chronological timelines, and handoff exports
@@ -99,6 +100,12 @@ explicit SignalRoom pull binds the resulting local digest to the Hub revision. O
 installs are reported as untracked until explicitly refreshed; generic Ollama registry models are labeled
 manual refresh because Ollama does not expose a non-mutating remote freshness API. The check never pulls,
 updates, loads, unloads, or swaps a model.
+
+The **Models → Scan MLTK models** action inventories models stored inside the connected Splunk instance
+using `| listmodels | head 500`. It records new, changed, unchanged, and previously observed-but-missing
+definitions and identifies declared Ollama dependencies. A backing model that is not observed is labeled
+for endpoint validation because the MLTK connection may intentionally use a different Ollama service.
+This scan performs no Splunk writes and does not claim to measure model accuracy or training-data freshness.
 
 For scripted setup, install SignalRoom and then explicitly install Ollama and download the configured profiles:
 
@@ -242,8 +249,8 @@ evidence, context revision, model profile, and output contract are unchanged, Si
 role result and labels it as `reused` with its source run and zero new inference. Changed inputs invalidate only the
 dependent roles.
 
-Standard and deep runs maintain three focused `discovery-knowledge` artifacts: the latest telemetry catalog,
-detection/data-model catalog, and security-posture assessment. Older latest-state documents are replaced so RAG
+Standard and deep runs maintain focused `discovery-knowledge` artifacts: the latest telemetry catalog,
+detection/data-model catalog, security-posture assessment, and—when available—the Splunk MLTK model catalog. Older latest-state documents are replaced so RAG
 does not mix obsolete posture with current posture. Chat retrieves these locally before planning Splunk tools;
 inventory and posture questions reuse the discovery record unless the operator explicitly asks for live events,
 a refresh, or SPL execution. The agent trace states when a Splunk call was avoided.

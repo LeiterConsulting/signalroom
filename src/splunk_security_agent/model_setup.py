@@ -61,20 +61,6 @@ EVALUATED_MODEL_CANDIDATES: tuple[dict[str, str], ...] = (
         ),
         "source_url": "https://huggingface.co/cisco-ai/cisco-time-series-model-1.0",
     },
-    {
-        "id": "splunk-mltk-models",
-        "label": "Splunk MLTK instance models",
-        "model": "Splunk-instance-native",
-        "owner": "Splunk",
-        "status": "instance-inventory-next",
-        "runtime": "splunk-mltk",
-        "purpose": "Inventory and monitor models trained, versioned, and applied inside Splunk.",
-        "constraint": (
-            "These are customer/instance-trained MLTK models rather than downloadable pretrained "
-            "Cisco or Splunk language models."
-        ),
-        "source_url": "https://docs.splunk.com/Documentation/MLApp/latest/User/WelcometoMLTK",
-    },
 )
 
 

@@ -179,6 +179,20 @@
         <section class="model-freshness" id="modelFreshness" aria-live="polite" hidden></section>
         <div class="routing-map"><span>Operator question</span><b aria-hidden="true">→</b><span>Task router</span><b aria-hidden="true">→</b><div><em>General agent</em><em>Security reasoning</em><em>Cyber retrieval</em><em>Evidence reranking</em><em>Entity extraction</em></div></div>
         <div class="model-grid" id="modelGrid"></div>
+        <section class="splunk-models-panel" aria-labelledby="splunkModelsTitle">
+          <header>
+            <div><span>SPLUNK-NATIVE MODELS</span><h3 id="splunkModelsTitle">MLTK inventory and dependency drift</h3><p>Inspect model definitions stored in Splunk with the read-only <code>listmodels</code> command. SignalRoom records definition drift and compares declared Ollama dependencies without changing Splunk.</p></div>
+            <button class="button ghost" id="scanSplunkModels">Scan MLTK models</button>
+          </header>
+          <article class="operation-card splunk-model-operation" id="splunkModelProgress" aria-live="polite" hidden>
+            <header><div><span class="operation-kicker">READ-ONLY MODEL INVENTORY</span><h3 class="operation-label">Preparing MLTK scan</h3></div><span class="operation-elapsed">0s</span></header>
+            <p class="operation-detail">SignalRoom will run listmodels through the configured Splunk MCP connection.</p>
+            <div class="operation-progress" role="progressbar" aria-label="Splunk MLTK scan progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><i></i></div>
+            <div class="operation-metrics"></div><ol class="operation-steps"></ol>
+          </article>
+          <div class="splunk-model-summary" id="splunkModelSummary" aria-live="polite"></div>
+          <div class="splunk-model-grid" id="splunkModelGrid"></div>
+        </section>
         <section class="candidate-models" id="candidateModels"></section>
       </section>
     </main>

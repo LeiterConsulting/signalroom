@@ -38,6 +38,7 @@ from .schemas import (
     ValidationTaskUpdate,
 )
 from .splunk import DemoSplunkClient, SplunkMCPClient
+from .splunk_models import SplunkModelInventoryService
 from .validation import ValidationService, ValidationStore
 
 ROOT = Path(os.getenv("SIGNALROOM_ROOT", Path.cwd())).resolve()
@@ -56,6 +57,7 @@ class Services:
         self._splunk: Any = None
         self._agent: SecurityAgent | None = None
         self._discovery: DiscoveryPipeline | None = None
+        self._splunk_models: SplunkModelInventoryService | None = None
         self._validations: ValidationService | None = None
 
     def refresh(self, force: bool = False) -> None:
@@ -73,8 +75,13 @@ class Services:
                 settings.splunk.ca_bundle,
             )
         self._agent = SecurityAgent(self.config, self.evidence, self._splunk)
+        self._splunk_models = SplunkModelInventoryService(self.config, self._splunk)
         self._discovery = DiscoveryPipeline(
-            self._splunk, self.evidence, DATA / "artifacts", self.config
+            self._splunk,
+            self.evidence,
+            DATA / "artifacts",
+            self.config,
+            self._splunk_models,
         )
         self._validations = ValidationService(
             self.validation_store, self._splunk, self.evidence, self.cases
@@ -97,6 +104,12 @@ class Services:
         self.refresh()
         assert self._discovery is not None
         return self._discovery
+
+    @property
+    def splunk_models(self) -> SplunkModelInventoryService:
+        self.refresh()
+        assert self._splunk_models is not None
+        return self._splunk_models
 
     @property
     def validations(self) -> ValidationService:
@@ -370,6 +383,19 @@ def _stream_response(runner: Any) -> StreamingResponse:
         media_type="application/x-ndjson",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+@app.get("/api/splunk-models/latest")
+async def latest_splunk_models() -> dict[str, Any]:
+    return services.splunk_models.latest()
+
+
+@app.post("/api/splunk-models/scan/stream")
+async def scan_splunk_models() -> StreamingResponse:
+    async def run(progress: Any) -> dict[str, Any]:
+        return await services.splunk_models.scan(progress=progress)
+
+    return _stream_response(run)
 
 
 @app.post("/api/chat/stream")

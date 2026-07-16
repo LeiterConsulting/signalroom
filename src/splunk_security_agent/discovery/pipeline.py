@@ -82,6 +82,7 @@ class DiscoveryPipeline:
         evidence: EvidenceStore,
         output_dir: Path | str = "data/artifacts",
         config: ConfigStore | None = None,
+        model_inventory: Any | None = None,
     ):
         self.client = client
         self.evidence = evidence
@@ -89,6 +90,7 @@ class DiscoveryPipeline:
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.config = config
         self.router = ModelRouter(config) if config else None
+        self.model_inventory = model_inventory
 
     KNOWLEDGE_ROW_LIMIT = 1000
     KNOWLEDGE_PAGE_SIZE = 100
@@ -172,6 +174,12 @@ class DiscoveryPipeline:
         sources = []
         telemetry_activity: Any = []
         knowledge: Any = {}
+        splunk_models: dict[str, Any] = {
+            "available": False,
+            "status": "not-collected",
+            "models": [],
+            "summary": {},
+        }
         knowledge_pagination: dict[str, Any] = {}
         collection_results = {
             "info": info_result,
@@ -236,6 +244,32 @@ class DiscoveryPipeline:
                     "knowledge_objects": sum(len(items) for items in knowledge.values()),
                 },
             )
+            if self.model_inventory is not None:
+                await report_progress(
+                    progress,
+                    "mltk-models",
+                    "Inspecting Splunk-native models",
+                    (
+                        "Running listmodels read-only and comparing model definitions with the "
+                        "previous SignalRoom inventory."
+                    ),
+                    progress=61,
+                    metrics={"splunk_writes": 0},
+                )
+                splunk_models = await self.model_inventory.scan()
+                await report_progress(
+                    progress,
+                    "mltk-models",
+                    "Splunk model inventory collected",
+                    (
+                        f"{splunk_models.get('summary', {}).get('observed', 0)} observed · "
+                        f"{splunk_models.get('summary', {}).get('changed', 0)} changed · "
+                        f"{splunk_models.get('summary', {}).get('missing', 0)} missing."
+                    ),
+                    progress=65,
+                    status="complete" if splunk_models.get("available") else "error",
+                    metrics=splunk_models.get("summary", {}),
+                )
 
         inventory = {
             "indexes": indexes,
@@ -244,8 +278,11 @@ class DiscoveryPipeline:
             "sources": sources,
             "telemetry_activity": telemetry_activity,
             "knowledge_objects": knowledge,
+            "splunk_mltk_models": splunk_models.get("models", []),
         }
         analysis = SecurityDiscoveryAnalyzer.analyze(inventory)
+        analysis["posture"]["mltk_models"] = splunk_models.get("summary", {})
+        analysis["findings"].extend(self._mltk_findings(splunk_models))
         await report_progress(
             progress,
             "analysis",
@@ -284,12 +321,18 @@ class DiscoveryPipeline:
             "findings": findings,
             "coverage": coverage,
             "security_posture": analysis["posture"],
+            "splunk_models": splunk_models,
             "investigation_tracks": analysis["tracks"],
             "validation_candidates": self._validation_candidates(findings, run_id),
             "changes": {},
             "collection_status": {
                 **self._collection_status(collection_results),
                 "pagination": knowledge_pagination,
+                "mltk_models": {
+                    "available": splunk_models.get("available", False),
+                    "status": splunk_models.get("status", "not-collected"),
+                    "error": splunk_models.get("error", ""),
+                },
             },
             "provenance": {
                 "source": "Splunk MCP tools",
@@ -627,6 +670,14 @@ class DiscoveryPipeline:
                 }
             },
             "data_models": data_models,
+            "mltk_models": [
+                {
+                    key: item.get(key)
+                    for key in ("id", "name", "fingerprint", "status", "dependency")
+                }
+                for item in blueprint.get("splunk_models", {}).get("models", [])
+                if isinstance(item, dict)
+            ],
             "knowledge": {
                 name: cls._canonical_knowledge(items)
                 for name, items in inventory.get("knowledge_objects", {}).items()
@@ -648,6 +699,52 @@ class DiscoveryPipeline:
             }
         )
         return fingerprints
+
+    @staticmethod
+    def _mltk_findings(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
+        if not snapshot.get("available"):
+            return []
+        summary = snapshot.get("summary", {})
+        findings: list[dict[str, Any]] = []
+        drift = int(summary.get("changed", 0)) + int(summary.get("missing", 0))
+        if drift:
+            findings.append(
+                {
+                    "severity": "medium",
+                    "domain": "ml-model-drift",
+                    "title": "Splunk MLTK model definitions changed",
+                    "evidence": (
+                        f"{summary.get('changed', 0)} model definition(s) changed and "
+                        f"{summary.get('missing', 0)} previously observed model(s) are missing."
+                    ),
+                    "next_step": (
+                        "Review owner, app, algorithm, and dependency changes before relying on "
+                        "the affected model in detections or automated analysis."
+                    ),
+                    "confidence": "high",
+                    "basis": "deterministic-analysis",
+                }
+            )
+        not_observed = int(summary.get("dependencies_not_observed", 0))
+        if not_observed:
+            findings.append(
+                {
+                    "severity": "low",
+                    "domain": "ml-model-dependency",
+                    "title": "MLTK Ollama dependencies need endpoint validation",
+                    "evidence": (
+                        f"{not_observed} declared Ollama model dependency/dependencies were not "
+                        "observed on SignalRoom's configured Ollama endpoint."
+                    ),
+                    "next_step": (
+                        "Confirm whether MLTK intentionally uses a different Ollama endpoint; if "
+                        "not, install or correct the declared backing model."
+                    ),
+                    "confidence": "medium",
+                    "basis": "deterministic-analysis",
+                }
+            )
+        return findings
 
     @staticmethod
     def _validation_candidates(
@@ -1157,6 +1254,7 @@ class DiscoveryPipeline:
                     for key, value in detections.items()
                 },
                 "data_models": compact.get("data_models", {}),
+                "mltk_models": compact.get("mltk_models", {}),
                 "findings": compact.get("findings", []),
                 "detection_review_sample": [
                     {
@@ -1549,6 +1647,28 @@ class DiscoveryPipeline:
             "data_models": {
                 key: value for key, value in data_models.items() if key != "catalog"
             },
+            "mltk_models": {
+                "summary": blueprint.get("splunk_models", {}).get("summary", {}),
+                "models": [
+                    {
+                        key: item.get(key)
+                        for key in (
+                            "name",
+                            "type",
+                            "owner",
+                            "app",
+                            "algorithm",
+                            "status",
+                            "dependency",
+                        )
+                    }
+                    for item in blueprint.get("splunk_models", {}).get("models", [])[:12]
+                    if isinstance(item, dict)
+                ],
+                "freshness_contract": blueprint.get("splunk_models", {}).get(
+                    "freshness_contract", ""
+                ),
+            },
             "findings": [
                 {"evidence_ref": f"D{index}", **finding}
                 for index, finding in enumerate(blueprint["findings"], 1)
@@ -1910,6 +2030,17 @@ class DiscoveryPipeline:
                 content=self._posture_document(blueprint),
             ),
         ]
+        splunk_models = blueprint.get("splunk_models", {})
+        if splunk_models.get("available"):
+            documents.append(
+                ArtifactCreate(
+                    title="Latest Splunk MLTK model catalog",
+                    kind="discovery-knowledge",
+                    source="Splunk MLTK discovery knowledge",
+                    tags=["splunk", "discovery", "mltk", "models", "latest"],
+                    content=self._mltk_document(splunk_models),
+                )
+            )
         return [
             self.evidence.add(
                 document, metadata={"run_id": blueprint["run_id"], "generated_at": generated}
@@ -1965,6 +2096,46 @@ class DiscoveryPipeline:
             f"disabled={item['disabled']} | acceleration={item['acceleration'] or 'not reported'}"
             for item in models["catalog"]
         )
+        return "\n".join(lines)
+
+    @staticmethod
+    def _mltk_document(snapshot: dict[str, Any]) -> str:
+        summary = snapshot.get("summary", {})
+        lines = [
+            "# Latest Splunk MLTK model catalog",
+            f"Collected: {snapshot.get('checked_at', 'unknown')}",
+            (
+                f"Observed {summary.get('observed', 0)} model definitions; "
+                f"{summary.get('new', 0)} new, {summary.get('changed', 0)} changed, and "
+                f"{summary.get('missing', 0)} missing since the previous SignalRoom scan."
+            ),
+            str(snapshot.get("freshness_contract", "")),
+            "## Models",
+        ]
+        for item in snapshot.get("models", []):
+            if not isinstance(item, dict):
+                continue
+            dependency = item.get("dependency", {})
+            dependency_text = "not declared"
+            if dependency.get("service"):
+                dependency_text = (
+                    f"{dependency.get('service')} / {dependency.get('model') or 'model not declared'}; "
+                    f"observation={dependency.get('observation', 'unknown')}"
+                )
+            lines.append(
+                f"- {item.get('name', 'unnamed')} | status={item.get('status', 'unknown')} | "
+                f"type={item.get('type') or 'unknown'} | algorithm={item.get('algorithm') or 'unknown'} | "
+                f"app={item.get('app') or 'unknown'} | owner={item.get('owner') or 'unknown'} | "
+                f"dependency={dependency_text}"
+            )
+        caveats = {
+            str(item.get("dependency", {}).get("caveat", ""))
+            for item in snapshot.get("models", [])
+            if isinstance(item, dict) and item.get("dependency", {}).get("caveat")
+        }
+        if caveats:
+            lines.append("## Dependency comparison caveat")
+            lines.extend(f"- {value}" for value in sorted(caveats))
         return "\n".join(lines)
 
     @staticmethod

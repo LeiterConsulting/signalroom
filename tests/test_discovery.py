@@ -35,6 +35,58 @@ async def test_demo_discovery_emits_and_indexes_artifacts(tmp_path):
     assert {item.kind for item in evidence.list()} == {"discovery", "discovery-knowledge"}
 
 
+async def test_standard_discovery_indexes_splunk_mltk_models_as_rag_context(tmp_path):
+    class ModelInventory:
+        async def scan(self):
+            return {
+                "available": True,
+                "status": "complete",
+                "checked_at": "2026-07-16T12:00:00+00:00",
+                "summary": {
+                    "observed": 1,
+                    "new": 1,
+                    "changed": 0,
+                    "missing": 0,
+                    "dependencies_not_observed": 1,
+                },
+                "freshness_contract": "Definition drift only; training freshness is not reported.",
+                "models": [
+                    {
+                        "id": "model-1",
+                        "name": "ollama_text_processing",
+                        "type": "MLTKContainer",
+                        "algorithm": "MLTKContainer",
+                        "owner": "analyst",
+                        "app": "mltk-container",
+                        "status": "new",
+                        "fingerprint": "abc123",
+                        "dependency": {
+                            "service": "ollama",
+                            "model": "llama3.2:1b",
+                            "observation": "not-observed",
+                            "caveat": "Comparison covers only the configured endpoint.",
+                        },
+                    }
+                ],
+            }
+
+    evidence = EvidenceStore(tmp_path / "evidence.db")
+    pipeline = DiscoveryPipeline(
+        DemoSplunkClient(),
+        evidence,
+        tmp_path / "artifacts",
+        model_inventory=ModelInventory(),
+    )
+
+    result = await pipeline.run("standard")
+    documents = [item for item in evidence.list() if item.kind == "discovery-knowledge"]
+
+    assert result["security_posture"]["mltk_models"]["observed"] == 1
+    assert len(result["knowledge_artifacts"]) == 4
+    assert any(item.title == "Latest Splunk MLTK model catalog" for item in documents)
+    assert any(item["domain"] == "ml-model-dependency" for item in result["findings"])
+
+
 async def test_discovery_supplies_required_knowledge_object_types(tmp_path):
     evidence = EvidenceStore(tmp_path / "evidence.db")
     client = RecordingDemoSplunkClient()

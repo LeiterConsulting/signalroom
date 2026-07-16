@@ -4,7 +4,7 @@ const state = {
   activeCase: null, pendingCaseItem: null, detailActions: [], contextPage: 1, contextPageSize: 9,
   contextItems: [], editingArtifactId: null, editingCaseItemId: null, demoTourStep: -1,
   modelRecommendations: {}, validations: [], editingValidationId: null,
-  modelUpdates: null, modelCatalog: null
+  modelUpdates: null, modelCatalog: null, splunkModels: null
 };
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => [...document.querySelectorAll(selector)];
@@ -464,6 +464,61 @@ function renderModelCatalog() {
       <h4>${escapeHtml(item.label)}</h4><p>${escapeHtml(item.purpose)}</p><small>${escapeHtml(item.constraint)}</small>
       <a href="${escapeHtml(item.source_url)}" target="_blank" rel="noopener">Review first-party source ↗</a>
     </article>`).join('')}</div>`;
+}
+
+function splunkDependencyLabel(dependency = {}) {
+  if (!dependency.service) return 'No external dependency declared';
+  const target = `${dependency.service}${dependency.model ? ` · ${dependency.model}` : ''}`;
+  const observations = {
+    observed:'Observed on SignalRoom Ollama',
+    'not-observed':'Not observed · verify endpoint',
+    unknown:'Could not compare',
+    'not-declared':'Backing model not declared',
+    'not-applicable':'Dependency recorded'
+  };
+  return `${target} · ${observations[dependency.observation] || dependency.observation || 'not compared'}`;
+}
+
+function renderSplunkModels() {
+  const value = state.splunkModels; const summaryNode = $('#splunkModelSummary'); const grid = $('#splunkModelGrid');
+  if (!summaryNode || !grid) return;
+  if (!value?.available) {
+    summaryNode.innerHTML = `<div class="splunk-model-empty"><b>${escapeHtml(value?.status === 'unavailable' ? 'MLTK scan unavailable' : 'No MLTK inventory baseline yet')}</b><span>${escapeHtml(value?.detail || 'Run a read-only scan to inventory Splunk-native models.')}</span>${value?.error ? `<small>${escapeHtml(value.error)}</small>` : ''}</div>`;
+    grid.innerHTML = '';
+    return;
+  }
+  const summary = value.summary || {}; const checked = value.checked_at ? new Date(value.checked_at).toLocaleString() : 'unknown';
+  summaryNode.innerHTML = `<div class="splunk-model-counts">
+    <span><b>${Number(summary.observed || 0).toLocaleString()}</b> observed</span><span class="new"><b>${summary.new || 0}</b> new</span><span class="changed"><b>${summary.changed || 0}</b> changed</span><span><b>${summary.missing || 0}</b> missing</span><span class="dependency"><b>${summary.dependencies_not_observed || 0}</b> dependencies to verify</span>
+    </div><p>${escapeHtml(value.freshness_contract || '')}</p><time datetime="${escapeHtml(value.checked_at || '')}">Checked ${escapeHtml(checked)} · read-only · 0 writes</time>`;
+  grid.innerHTML = (value.models || []).map(item => {
+    const dependency = item.dependency || {}; const status = item.status || 'unknown';
+    return `<article class="splunk-model-card ${escapeHtml(status)}">
+      <header><span>${escapeHtml(item.type || 'MLTK model')}</span><b class="splunk-model-status ${escapeHtml(status)}">${escapeHtml(status)}</b></header>
+      <h4>${escapeHtml(item.name || 'Unnamed model')}</h4>
+      <dl><div><dt>Algorithm</dt><dd>${escapeHtml(item.algorithm || 'Not reported')}</dd></div><div><dt>App / owner</dt><dd>${escapeHtml(`${item.app || 'unknown'} / ${item.owner || 'unknown'}`)}</dd></div><div><dt>Sharing</dt><dd>${escapeHtml(item.sharing || 'Not reported')}</dd></div></dl>
+      <div class="splunk-model-dependency ${escapeHtml(dependency.observation || '')}"><span>DECLARED BACKING SERVICE</span><b>${escapeHtml(splunkDependencyLabel(dependency))}</b>${dependency.caveat ? `<small>${escapeHtml(dependency.caveat)}</small>` : ''}</div>
+      <footer><span>Fingerprint</span><code>${escapeHtml((item.fingerprint || '').slice(0, 12))}</code></footer>
+    </article>`;
+  }).join('') || '<div class="empty-inline compact-empty">Splunk MLTK returned no model definitions.</div>';
+}
+
+async function loadSplunkModels() {
+  try { state.splunkModels = await api('/api/splunk-models/latest'); renderSplunkModels(); }
+  catch (error) { state.splunkModels = { available:false, status:'unavailable', detail:error.message }; renderSplunkModels(); }
+}
+
+async function scanSplunkModels() {
+  const button = $('#scanSplunkModels'); const panel = $('#splunkModelProgress');
+  button.disabled = true; button.textContent = 'Scanning…'; panel.hidden = false;
+  panel.querySelector('.operation-label').textContent = 'Preparing MLTK scan'; panel.querySelector('.operation-detail').textContent = 'Waiting for the configured Splunk MCP connection.';
+  panel.querySelector('.operation-elapsed').textContent = '0s'; panel.querySelector('.operation-progress i').style.width = '0%'; panel.querySelector('.operation-progress').setAttribute('aria-valuenow', '0');
+  panel.querySelector('.operation-metrics').innerHTML = ''; panel.querySelector('.operation-steps').innerHTML = '';
+  try {
+    state.splunkModels = await streamApi('/api/splunk-models/scan/stream', {}, event => updateOperation(panel, event));
+    renderSplunkModels(); toast(state.splunkModels.available ? 'Splunk MLTK inventory updated' : (state.splunkModels.detail || 'MLTK inventory unavailable'));
+  } catch (error) { toast(error.message); }
+  finally { button.disabled = false; button.textContent = 'Scan MLTK models'; }
 }
 
 async function pullModel(profileId, button) {
@@ -1013,12 +1068,13 @@ async function deleteValidation(taskId) {
 
 function renderSecurityPosture(result) {
   const posture = result.security_posture; if (!posture) return;
-  const telemetry = posture.telemetry; const detections = posture.detections; const models = posture.data_models;
+  const telemetry = posture.telemetry; const detections = posture.detections; const models = posture.data_models; const mltk = posture.mltk_models || {};
   $('#securityPosture').hidden = false;
   $('#securityPosture').innerHTML = `
     <article><span>TELEMETRY FRESHNESS</span><strong>${telemetry.activity_profiled ? telemetry.stale_over_24h.length : '—'}</strong><p>${telemetry.activity_profiled ? `of ${telemetry.activity_profiled} sourcetypes are older than 24 hours` : 'Freshness was not available at this discovery depth.'}</p></article>
     <article><span>DETECTION HEALTH</span><strong>${detections.enabled}/${detections.total}</strong><p>${detections.disabled} disabled · ${detections.missing_time_bounds_count} missing time bounds</p></article>
     <article><span>DATA-MODEL READINESS</span><strong>${models.accelerated}/${models.total}</strong><p>${models.disabled} disabled · acceleration reported for ${models.accelerated}</p></article>
+    <article><span>SPLUNK MLTK MODELS</span><strong>${mltk.observed ?? '—'}</strong><p>${mltk.observed == null ? 'Run standard or deep discovery to inventory Splunk-native models.' : `${(mltk.changed || 0) + (mltk.missing || 0)} drift signals · ${mltk.dependencies_not_observed || 0} dependencies to verify`}</p></article>
     <article><span>REUSABLE KNOWLEDGE</span><strong>${result.knowledge_artifacts?.length || 0}</strong><p>Focused latest-state documents indexed for later RAG answers</p></article>`;
   const analysis = result.model_analysis || {};
   $('#discoveryAssessment').hidden = false;
@@ -1376,6 +1432,7 @@ $('#demoTourNext').addEventListener('click', () => {
 $('#toggleEvidence').addEventListener('click', () => $('.evidence-panel').classList.add('mobile-open'));
 $('#closeEvidence').addEventListener('click', () => $('.evidence-panel').classList.remove('mobile-open'));
 $('#runDiscovery').addEventListener('click', runDiscovery);
+$('#scanSplunkModels').addEventListener('click', scanSplunkModels);
 $('#contextPrevious').addEventListener('click', () => { state.contextPage -= 1; renderArtifacts(state.contextItems); $('#contextView').scrollIntoView({ behavior:'smooth', block:'start' }); });
 $('#contextNext').addEventListener('click', () => { state.contextPage += 1; renderArtifacts(state.contextItems); $('#contextView').scrollIntoView({ behavior:'smooth', block:'start' }); });
 $('#settingsForm').addEventListener('submit', saveSettings);
@@ -1446,4 +1503,4 @@ document.addEventListener('keydown', event => {
   else if (!$('#caseModal').hidden) { $('#caseModal').hidden = true; state.pendingCaseItem = null; }
 });
 
-Promise.all([loadSettings(), loadArtifacts(), loadCases(), loadLatestDiscovery(), loadValidations(), loadModelCatalog()]).then(() => { renderPromptTree(); renderValidations(); handleDeepLink(); }).catch(error => toast(error.message));
+Promise.all([loadSettings(), loadArtifacts(), loadCases(), loadLatestDiscovery(), loadValidations(), loadModelCatalog(), loadSplunkModels()]).then(() => { renderPromptTree(); renderValidations(); handleDeepLink(); }).catch(error => toast(error.message));

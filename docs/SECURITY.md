@@ -14,6 +14,7 @@ The local prototype defaults to localhost, opt-in demo mode, local specialist ex
 - Demo mode allows validation without live infrastructure.
 - SecureBERT downloads are explicit, use safetensor snapshots, resolve an immutable publisher revision, and record a local installation manifest.
 - Model freshness checks are read-only. They compare recorded immutable revisions and local Ollama digests without pulling, loading, unloading, or swapping models; unprovable provenance is labeled untracked.
+- Splunk MLTK scans use only `listmodels`, retain local definition fingerprints, and perform zero model writes. Dependency comparisons are explicitly scoped to SignalRoom's configured Ollama endpoint.
 - Hugging Face cloud inference has a separate disabled/ask/allow policy and is never implied by local model installation.
 
 ## Known limitations
