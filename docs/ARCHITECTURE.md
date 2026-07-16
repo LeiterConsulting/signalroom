@@ -21,6 +21,11 @@ FastAPI application ───── outward MCP tools
                    │                         └── deterministic reconciliation
                    ├── JSON + Markdown artifacts ── indexed back into evidence store
                    └── ValidationService ── draft → approve → bounded SPL → preserved evidence
+
+AssuranceService ── SQLite policy + runs + events + notices
+        ├── one restart-safe background worker
+        ├── shared per-instance discovery/MLTK execution lane
+        └── hard MCP call ceiling + UTC daily run budget
 ```
 
 ## Design decisions
@@ -63,6 +68,18 @@ enforces the complete Pydantic contract locally, including length and collection
 temperature-zero, and token-bounded; one repair or JSON-mode fallback is allowed and surfaced in the activity UI.
 Hosted inference is not part of discovery.
 
+### Continuous assurance is durable but deliberately bounded
+
+`AssuranceStore` persists the singleton schedule policy, run state, progress events, and acknowledgeable notices.
+`AssuranceService` owns one local worker. Scheduled work, manual discovery, and MLTK scans share an async execution
+lock; no second scheduled run is queued while one is active. A `BudgetedSplunkClient` counts before delegation and
+refuses calls beyond the configured ceiling, including calls launched concurrently. On shutdown, active work is
+re-queued for a fresh read-only collection; an explicit cancellation is terminal and persists across restart.
+
+The scheduler creates local notifications from deterministic result fields. It does not let an LLM send messages,
+approve SPL, or mutate Splunk. A run that observes drift can inform an analyst, but recurring validation remains a
+separate approval boundary.
+
 ### Discovery validation is an explicit state machine
 
 Semantic discovery sections, non-discovery context, model profiles, and output contracts are fingerprinted separately.
@@ -77,9 +94,8 @@ interrupted run returns to `approved` after restart, preserving intent without s
 
 ## Next discovery increment
 
-Add continuous assurance orchestration around this state machine: scheduled restart-safe discovery, cancellation,
-per-instance concurrency and search-cost budgets, evidence freshness policies, and drift notifications. Changed inputs
-should create reviewable validation drafts; recurring execution must use a separate scoped approval policy.
+Correlate recurring drift across multiple assurance runs and generate deduplicated, expiring validation drafts.
+Keep outbound notification channels and any recurring validation authority separately configured and auditable.
 
 ### MCP exists on both sides
 

@@ -4,7 +4,8 @@ const state = {
   activeCase: null, pendingCaseItem: null, detailActions: [], contextPage: 1, contextPageSize: 9,
   contextItems: [], editingArtifactId: null, editingCaseItemId: null, demoTourStep: -1,
   modelRecommendations: {}, validations: [], editingValidationId: null,
-  modelUpdates: null, modelCatalog: null, splunkModels: null
+  modelUpdates: null, modelCatalog: null, splunkModels: null,
+  assurance: null, assurancePolicyDirty: false
 };
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => [...document.querySelectorAll(selector)];
@@ -890,6 +891,95 @@ async function runDiscovery() {
   finally { button.disabled = false; button.textContent = 'Run discovery'; }
 }
 
+function assuranceTime(value) {
+  if (!value) return 'Not scheduled';
+  return new Date(value).toLocaleString();
+}
+
+function hydrateAssurancePolicy(policy) {
+  if (!policy || state.assurancePolicyDirty) return;
+  $('#assuranceEnabled').checked = Boolean(policy.enabled);
+  $('#assuranceDepth').value = policy.discovery_depth;
+  $('#assuranceInterval').value = String(policy.interval_minutes);
+  $('#assuranceCallBudget').value = policy.max_splunk_calls_per_run;
+  $('#assuranceDailyRuns').value = policy.max_runs_per_day;
+  $('#assuranceNotifyDrift').checked = Boolean(policy.notify_on_drift);
+  $('#assuranceNotifyFindings').checked = Boolean(policy.notify_on_high_findings);
+  updateAssuranceBudgetHelp();
+}
+
+function updateAssuranceBudgetHelp() {
+  const depth = $('#assuranceDepth').value; const required = state.assurance?.required_calls?.[depth] || ({quick:4,standard:9,deep:12})[depth];
+  $('#assuranceBudgetHelp').textContent = `Hard limit · ${required} calls required for this depth`;
+  $('#assuranceCallBudget').min = required;
+}
+
+function renderAssurance() {
+  const value = state.assurance; if (!value) return;
+  const policy = value.policy || {}; const usage = value.usage_today || {}; const active = value.active_run;
+  hydrateAssurancePolicy(policy);
+  $('#assuranceWorker').textContent = value.worker?.online ? 'Worker online · concurrency 1' : 'Worker offline';
+  $('#assuranceWorker').className = `subtle-pill ${value.worker?.online ? 'ok' : 'warn'}`;
+  $('#assuranceScheduleStatus').textContent = policy.enabled ? `Next scheduled run · ${assuranceTime(policy.next_run_at)}` : 'Scheduling is off · manual runs remain available';
+  $('#assuranceUsage').innerHTML = `<span><b>${usage.runs || 0}/${policy.max_runs_per_day || 0}</b> runs today</span><span><b>${usage.splunk_calls || 0}</b> Splunk calls today</span><span><b>${policy.max_splunk_calls_per_run || 0}</b> call ceiling</span><span><b>${escapeHtml(value.worker?.restart_recovery || 'unknown')}</b> restart policy</span>`;
+  const panel = $('#assuranceProgress'); panel.hidden = !active;
+  if (active) {
+    panel.querySelector('.operation-label').textContent = active.label || 'Working';
+    panel.querySelector('.operation-detail').textContent = active.detail || '';
+    panel.querySelector('.operation-elapsed').textContent = `${active.progress || 0}%`;
+    panel.querySelector('.operation-progress i').style.width = `${active.progress || 0}%`;
+    panel.querySelector('.operation-progress').setAttribute('aria-valuenow', active.progress || 0);
+    panel.querySelector('.operation-metrics').innerHTML = Object.entries({...(active.metrics || {}), splunk_calls:active.calls_used, call_budget:active.call_budget}).slice(0,5).map(([key,item]) => formatMetric(key,item)).join('');
+    const events = value.active_events || [];
+    panel.querySelector('.operation-steps').innerHTML = events.map((event,index) => `<li class="${event.status === 'error' ? 'error' : index === events.length - 1 && active.status === 'running' ? 'running' : 'complete'}"><i></i><div><b>${escapeHtml(event.label)}</b><span>${escapeHtml(event.detail)}</span></div></li>`).join('');
+    $('#assuranceRunContract').textContent = `${active.trigger} · ${active.depth} · ${active.calls_used}/${active.call_budget} calls${active.recovery_count ? ` · recovered ${active.recovery_count}×` : ''}`;
+    $('#cancelAssuranceRun').disabled = Boolean(active.cancel_requested);
+    $('#cancelAssuranceRun').textContent = active.cancel_requested ? 'Stopping…' : 'Cancel run';
+  }
+  const notices = value.notifications || [];
+  $('#assuranceNotifications').innerHTML = notices.length ? notices.map(item => `<article class="assurance-notice ${escapeHtml(item.severity)} ${item.acknowledged ? 'acknowledged' : ''}"><header><span>${escapeHtml(item.category)}</span><b>${escapeHtml(item.severity)}</b></header><h5>${escapeHtml(item.title)}</h5><p>${escapeHtml(item.detail)}</p><footer><time>${escapeHtml(assuranceTime(item.created_at))}</time>${item.acknowledged ? '<span>Acknowledged</span>' : `<button data-ack-assurance="${escapeHtml(item.id)}">Acknowledge</button>`}</footer></article>`).join('') : '<div class="empty-inline compact-empty">No drift or control notifications require attention.</div>';
+  const runs = value.runs || [];
+  $('#assuranceRuns').innerHTML = runs.length ? runs.slice(0,10).map(run => `<article class="assurance-run ${escapeHtml(run.status)}"><header><span>${escapeHtml(run.trigger)} · ${escapeHtml(run.depth)}</span><b>${escapeHtml(run.status.replaceAll('-', ' '))}</b></header><p>${escapeHtml(run.summary?.headline || run.detail || run.error || 'Waiting to start.')}</p><footer><time>${escapeHtml(assuranceTime(run.completed_at || run.created_at))}</time><span>${run.calls_used}/${run.call_budget} calls${run.recovery_count ? ` · ${run.recovery_count} recovery` : ''}</span></footer></article>`).join('') : '<div class="empty-inline compact-empty">No continuous assurance runs have been queued.</div>';
+  $('#runAssuranceNow').disabled = Boolean(active) || Number(usage.runs || 0) >= Number(policy.max_runs_per_day || 0);
+}
+
+async function loadAssurance() {
+  try { state.assurance = await api('/api/assurance'); renderAssurance(); }
+  catch (error) { $('#assuranceWorker').textContent = 'Worker unavailable'; }
+}
+
+async function saveAssurancePolicy(event) {
+  event.preventDefault();
+  const payload = {
+    enabled:$('#assuranceEnabled').checked,
+    interval_minutes:Number($('#assuranceInterval').value),
+    discovery_depth:$('#assuranceDepth').value,
+    max_splunk_calls_per_run:Number($('#assuranceCallBudget').value),
+    max_runs_per_day:Number($('#assuranceDailyRuns').value),
+    notify_on_drift:$('#assuranceNotifyDrift').checked,
+    notify_on_high_findings:$('#assuranceNotifyFindings').checked
+  };
+  try { state.assurance = await api('/api/assurance/policy', {method:'PUT',body:JSON.stringify(payload)}); state.assurancePolicyDirty = false; renderAssurance(); toast('Continuous assurance policy saved'); }
+  catch (error) { toast(error.message); }
+}
+
+async function runAssuranceNow() {
+  const button = $('#runAssuranceNow'); button.disabled = true;
+  try { await api('/api/assurance/runs', {method:'POST',body:JSON.stringify({depth:null})}); await loadAssurance(); toast('Continuous assurance queued'); }
+  catch (error) { toast(error.message); button.disabled = false; }
+}
+
+async function cancelAssuranceRun() {
+  const run = state.assurance?.active_run; if (!run) return;
+  try { await api(`/api/assurance/runs/${encodeURIComponent(run.id)}/cancel`, {method:'POST'}); await loadAssurance(); toast('Assurance cancellation requested'); }
+  catch (error) { toast(error.message); }
+}
+
+async function acknowledgeAssurance(notificationId) {
+  try { await api(`/api/assurance/notifications/${encodeURIComponent(notificationId)}/acknowledge`, {method:'POST'}); await loadAssurance(); }
+  catch (error) { toast(error.message); }
+}
+
 function renderDiscoveryResult(result) {
   if (!result?.run_id || !result.overview || !result.security_posture) return;
   state.lastDiscovery = result;
@@ -1240,6 +1330,8 @@ function navigateView(name) {
 }
 
 document.addEventListener('click', async event => {
+  const assuranceNotice = event.target.closest('[data-ack-assurance]');
+  if (assuranceNotice) { await acknowledgeAssurance(assuranceNotice.dataset.ackAssurance); return; }
   const copyToggle = event.target.closest('[data-toggle-copy]');
   if (copyToggle) {
     const card = copyToggle.closest('.evidence-card,.ledger-item');
@@ -1432,6 +1524,11 @@ $('#demoTourNext').addEventListener('click', () => {
 $('#toggleEvidence').addEventListener('click', () => $('.evidence-panel').classList.add('mobile-open'));
 $('#closeEvidence').addEventListener('click', () => $('.evidence-panel').classList.remove('mobile-open'));
 $('#runDiscovery').addEventListener('click', runDiscovery);
+$('#assuranceForm').addEventListener('submit', saveAssurancePolicy);
+$('#runAssuranceNow').addEventListener('click', runAssuranceNow);
+$('#cancelAssuranceRun').addEventListener('click', cancelAssuranceRun);
+$('#assuranceDepth').addEventListener('change', updateAssuranceBudgetHelp);
+$$('#assuranceForm input,#assuranceForm select').forEach(node => node.addEventListener('change', () => { state.assurancePolicyDirty = true; }));
 $('#scanSplunkModels').addEventListener('click', scanSplunkModels);
 $('#contextPrevious').addEventListener('click', () => { state.contextPage -= 1; renderArtifacts(state.contextItems); $('#contextView').scrollIntoView({ behavior:'smooth', block:'start' }); });
 $('#contextNext').addEventListener('click', () => { state.contextPage += 1; renderArtifacts(state.contextItems); $('#contextView').scrollIntoView({ behavior:'smooth', block:'start' }); });
@@ -1503,4 +1600,4 @@ document.addEventListener('keydown', event => {
   else if (!$('#caseModal').hidden) { $('#caseModal').hidden = true; state.pendingCaseItem = null; }
 });
 
-Promise.all([loadSettings(), loadArtifacts(), loadCases(), loadLatestDiscovery(), loadValidations(), loadModelCatalog(), loadSplunkModels()]).then(() => { renderPromptTree(); renderValidations(); handleDeepLink(); }).catch(error => toast(error.message));
+Promise.all([loadSettings(), loadArtifacts(), loadCases(), loadLatestDiscovery(), loadValidations(), loadModelCatalog(), loadSplunkModels(), loadAssurance()]).then(() => { renderPromptTree(); renderValidations(); handleDeepLink(); setInterval(loadAssurance, 3000); }).catch(error => toast(error.message));

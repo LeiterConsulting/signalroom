@@ -13,6 +13,7 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from .agents import SecurityAgent
+from .assurance import AssuranceService, AssuranceStore
 from .cases import CaseStore
 from .config import ConfigStore
 from .discovery import DiscoveryPipeline
@@ -23,6 +24,8 @@ from .rag import EvidenceStore
 from .schemas import (
     ArtifactCreate,
     ArtifactUpdate,
+    AssurancePolicyUpdate,
+    AssuranceRunCreate,
     CaseCreate,
     CaseExportRequest,
     CaseItemCreate,
@@ -52,6 +55,8 @@ class Services:
         self.evidence = EvidenceStore(DATA / "evidence.db")
         self.cases = CaseStore(DATA / "cases.db", DATA / "case_exports")
         self.validation_store = ValidationStore(DATA / "validations.db")
+        self.assurance_store = AssuranceStore(DATA / "assurance.db")
+        self.discovery_lock = asyncio.Lock()
         self.model_setup = ModelSetupService(self.config, self.evidence)
         self._fingerprint = ""
         self._splunk: Any = None
@@ -59,6 +64,28 @@ class Services:
         self._discovery: DiscoveryPipeline | None = None
         self._splunk_models: SplunkModelInventoryService | None = None
         self._validations: ValidationService | None = None
+        self.assurance = AssuranceService(
+            self.assurance_store,
+            lambda: self.splunk,
+            self._assurance_pipeline,
+            self._assurance_complete,
+            self.discovery_lock,
+        )
+
+    def _assurance_pipeline(self, client: Any) -> DiscoveryPipeline:
+        model_inventory = SplunkModelInventoryService(self.config, client)
+        return DiscoveryPipeline(
+            client,
+            self.evidence,
+            DATA / "artifacts",
+            self.config,
+            model_inventory,
+        )
+
+    async def _assurance_complete(self, _result: dict[str, Any]) -> None:
+        if self._agent is not None:
+            self._agent.invalidate_context_cache()
+        self.model_setup.schedule_context_index()
 
     def refresh(self, force: bool = False) -> None:
         settings = self.config.load()
@@ -141,7 +168,11 @@ async def lifespan(app: FastAPI):
             )
         )
     services.model_setup.schedule_context_index()
-    yield
+    await services.assurance.start()
+    try:
+        yield
+    finally:
+        await services.assurance.stop()
 
 
 app = FastAPI(
@@ -166,6 +197,7 @@ async def health() -> dict[str, Any]:
         "configured": services.config.load().configured,
         "demo_mode": services.config.load().demo_mode,
         "artifacts": len(services.evidence.list()),
+        "assurance_worker": services.assurance.overview()["worker"]["online"],
     }
 
 
@@ -393,7 +425,20 @@ async def latest_splunk_models() -> dict[str, Any]:
 @app.post("/api/splunk-models/scan/stream")
 async def scan_splunk_models() -> StreamingResponse:
     async def run(progress: Any) -> dict[str, Any]:
-        return await services.splunk_models.scan(progress=progress)
+        if services.discovery_lock.locked():
+            await progress(
+                {
+                    "type": "progress",
+                    "phase": "instance-queue",
+                    "label": "Waiting for the Splunk discovery lane",
+                    "detail": "Another discovery or model inventory is currently running.",
+                    "status": "running",
+                    "progress": 1,
+                    "metrics": {"instance_concurrency": 1},
+                }
+            )
+        async with services.discovery_lock:
+            return await services.splunk_models.scan(progress=progress)
 
     return _stream_response(run)
 
@@ -408,7 +453,8 @@ async def chat_stream(request: ChatRequest) -> StreamingResponse:
 
 @app.post("/api/discovery")
 async def discovery(request: DiscoveryRequest) -> dict[str, Any]:
-    result = await services.discovery.run(request.depth)
+    async with services.discovery_lock:
+        result = await services.discovery.run(request.depth)
     services.agent.invalidate_context_cache()
     services.model_setup.schedule_context_index()
     return result
@@ -422,12 +468,64 @@ async def latest_discovery() -> dict[str, Any]:
 @app.post("/api/discovery/stream")
 async def discovery_stream(request: DiscoveryRequest) -> StreamingResponse:
     async def run(progress: Any) -> dict[str, Any]:
-        result = await services.discovery.run(request.depth, progress=progress)
+        if services.discovery_lock.locked():
+            await progress(
+                {
+                    "type": "progress",
+                    "phase": "instance-queue",
+                    "label": "Waiting for the Splunk discovery lane",
+                    "detail": "Another discovery or model inventory is currently running.",
+                    "status": "running",
+                    "progress": 1,
+                    "metrics": {"instance_concurrency": 1},
+                }
+            )
+        async with services.discovery_lock:
+            result = await services.discovery.run(request.depth, progress=progress)
         services.agent.invalidate_context_cache()
         services.model_setup.schedule_context_index()
         return result
 
     return _stream_response(run)
+
+
+@app.get("/api/assurance")
+async def assurance_overview() -> dict[str, Any]:
+    return services.assurance.overview()
+
+
+@app.put("/api/assurance/policy")
+async def update_assurance_policy(request: AssurancePolicyUpdate) -> dict[str, Any]:
+    try:
+        services.assurance.update_policy(request)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return services.assurance.overview()
+
+
+@app.post("/api/assurance/runs", status_code=202)
+async def create_assurance_run(request: AssuranceRunCreate) -> dict[str, Any]:
+    try:
+        run = services.assurance.enqueue(request.depth)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return run.model_dump(mode="json")
+
+
+@app.post("/api/assurance/runs/{run_id}/cancel")
+async def cancel_assurance_run(run_id: str) -> dict[str, Any]:
+    run = await services.assurance.cancel(run_id)
+    if run is None:
+        raise HTTPException(404, "Continuous assurance run not found")
+    return run.model_dump(mode="json")
+
+
+@app.post("/api/assurance/notifications/{notification_id}/acknowledge")
+async def acknowledge_assurance_notification(notification_id: str) -> dict[str, Any]:
+    notification = services.assurance_store.acknowledge(notification_id)
+    if notification is None:
+        raise HTTPException(404, "Continuous assurance notification not found")
+    return notification
 
 
 @app.get("/api/validations")

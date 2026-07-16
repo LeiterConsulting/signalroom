@@ -12,6 +12,7 @@ This is a focused reimplementation inspired by [LeiterConsulting/splunk-discover
 - First-class security discovery across telemetry freshness, detection health, data-model readiness, and reusable RAG knowledge
 - Delta-aware model-team reuse with exact input fingerprints and visible cache provenance
 - Read-only Splunk MLTK model inventory with definition drift and endpoint-scoped dependency checks
+- Opt-in continuous assurance with durable schedules, restart recovery, cancellation, drift notices, and hard Splunk-call budgets
 - A restart-safe validation queue with bounded SPL preview, explicit analyst approval, live progress, and preserved results
 - An evidence-first agent with bounded multi-tool plans, investigation modes, and a structured ledger
 - Durable local investigation cases with ownership, lifecycle, severity, chronological timelines, and handoff exports
@@ -177,6 +178,7 @@ Invoke-RestMethod -Method Post -Uri http://localhost:8003/mcp -ContentType appli
 ```text
 src/splunk_security_agent/
   agents/          evidence-first chat orchestration and SPL guardrails
+  assurance/       durable scheduling, budgets, recovery, and drift notices
   discovery/       inventory, coverage analysis, and artifact packaging
   cases/           durable local case records, timelines, and handoff exports
   providers/       Ollama, local Transformers, Hugging Face cloud, and capability routing
@@ -240,6 +242,18 @@ Standard and deep discovery run in this order:
 5. A deterministic reconciler rejects unknown evidence references, labels unsupported conclusions as needing
    validation, and promotes only evidence-linked hypotheses into investigation tracks.
 
+### Continuous assurance
+
+The Discovery page can opt in to a local recurring schedule. The policy selects quick, standard, or deep
+discovery, an interval, a hard per-run Splunk MCP call ceiling, a maximum number of runs per UTC day, and
+notification categories. Scheduling is disabled by default. Manual and scheduled runs share the daily budget
+and one per-instance execution lane with interactive Discovery and MLTK inventory.
+
+Run state and progress events are stored in `data/assurance.db`. A restart re-queues an interrupted read-only
+run as a fresh collection; an operator cancellation persists across restart. Completed runs classify inventory,
+coverage, MLTK, high-severity finding, collection-failure, dependency, and budget events into acknowledgeable
+local notices. Continuous assurance never approves or executes proposed validation SPL automatically.
+
 Ollama model switching is serialized to avoid local accelerator contention. Generative passes use deterministic,
 token-bounded structured output, strict local validation, and one visible repair/fallback attempt when necessary.
 The Discovery page shows the executed model, role, duration, input size, token ceiling, and validation mode. A
@@ -278,10 +292,9 @@ Approved work survives restarts, while an interrupted running task returns to th
 
 ### Recommended next discovery increment
 
-The next logical enhancement is continuous assurance orchestration: scheduled restart-safe discovery jobs, cancellation,
-per-instance Splunk workload budgets, freshness policies for evidence references, and drift notifications. Exact-input
-reuse should keep steady-state runs cheap, while material changes create new validation drafts; recurring execution would
-remain separately policy-gated so a schedule never silently broadens an analyst's approval.
+Turn assurance drift into reviewable response packages: correlate repeated changes across runs, rank persistent versus
+transient gaps, and create deduplicated validation drafts with explicit expiry and approval scopes. Outbound notification
+delivery should remain separately opt-in and redact environment details by default.
 
 ### Context
 

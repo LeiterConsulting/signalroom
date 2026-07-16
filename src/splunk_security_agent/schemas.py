@@ -210,6 +210,54 @@ class DiscoveryRequest(BaseModel):
     depth: Literal["quick", "standard", "deep"] = "standard"
 
 
+AssuranceDepth = Literal["quick", "standard", "deep"]
+AssuranceRunStatus = Literal[
+    "queued",
+    "running",
+    "complete",
+    "partial",
+    "error",
+    "cancelled",
+    "budget-blocked",
+]
+
+
+class AssurancePolicyUpdate(BaseModel):
+    enabled: bool = False
+    interval_minutes: int = Field(default=360, ge=15, le=10080)
+    discovery_depth: AssuranceDepth = "standard"
+    max_splunk_calls_per_run: int = Field(default=12, ge=4, le=50)
+    max_runs_per_day: int = Field(default=4, ge=1, le=48)
+    notify_on_drift: bool = True
+    notify_on_high_findings: bool = True
+
+
+class AssuranceRunCreate(BaseModel):
+    depth: AssuranceDepth | None = None
+
+
+class AssuranceRunRecord(BaseModel):
+    id: str
+    trigger: Literal["manual", "scheduled", "recovered"]
+    depth: AssuranceDepth
+    status: AssuranceRunStatus
+    phase: str = "queued"
+    progress: int = 0
+    label: str = "Queued"
+    detail: str = ""
+    metrics: dict[str, Any] = Field(default_factory=dict)
+    summary: dict[str, Any] = Field(default_factory=dict)
+    error: str = ""
+    call_budget: int = 0
+    calls_used: int = 0
+    cancel_requested: bool = False
+    recovery_count: int = 0
+    created_at: str
+    started_at: str | None = None
+    completed_at: str | None = None
+    updated_at: str
+
+
 ValidationStatus = Literal["draft", "approved", "running", "complete", "error"]
 
 
