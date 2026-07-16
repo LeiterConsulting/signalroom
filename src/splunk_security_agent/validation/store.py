@@ -290,6 +290,17 @@ class ValidationStore:
             ).fetchone()
         return self._record(row) if row else None
 
+    def find_latest_complete(
+        self, query_fingerprint: str, exclude_task_id: str = ""
+    ) -> ValidationTaskRecord | None:
+        with self.connect() as db:
+            row = db.execute(
+                """SELECT * FROM validation_tasks WHERE query_fingerprint=?
+                AND status='complete' AND id<>? ORDER BY completed_at DESC LIMIT 1""",
+                (query_fingerprint, exclude_task_id),
+            ).fetchone()
+        return self._record(row) if row else None
+
     @staticmethod
     def fingerprint(spl: str, earliest_time: str, latest_time: str, row_limit: int) -> str:
         payload = json.dumps(

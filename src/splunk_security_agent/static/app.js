@@ -1,11 +1,12 @@
 const state = {
   settings: null, artifacts: [], modelReadiness: null, conversationId: null, busy: false,
   ledger: [], lastDiscovery: null, promptPath: [], contextKind: 'all', cases: [],
-  activeCase: null, pendingCaseItem: null, detailActions: [], contextPage: 1, contextPageSize: 9,
+  activeCase: null, caseCockpit: null, pendingCaseItem: null, detailActions: [], contextPage: 1, contextPageSize: 9,
   contextItems: [], editingArtifactId: null, editingCaseItemId: null, demoTourStep: -1,
   modelRecommendations: {}, validations: [], editingValidationId: null,
   modelUpdates: null, modelCatalog: null, splunkModels: null,
-  assurance: null, assurancePolicyDirty: false
+  assurance: null, assurancePolicyDirty: false, connectionDiagnostics: null, queryIntelligence: null,
+  feedbackBenchmarks: null
 };
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => [...document.querySelectorAll(selector)];
@@ -268,7 +269,7 @@ function setView(name) {
   $('#newConversation').hidden = name !== 'chat';
   if (name === 'context') loadArtifacts();
   if (name === 'cases') loadCases();
-  if (name === 'models') renderModels();
+  if (name === 'models') { renderModels(); loadFeedbackBenchmarks(); }
   if (name === 'discovery') loadValidations();
 }
 
@@ -349,6 +350,59 @@ async function loadSettings() {
     setTimeout(startDemoTour, 250);
   }
   loadModelReadiness();
+}
+
+function diagnosticStageMarkup(stage) {
+  const status = stage.status || 'pending';
+  return `<article class="diagnostic-stage ${escapeHtml(status)}"><i aria-hidden="true"></i><div><b>${escapeHtml(stage.label || stage.id)}</b><p>${escapeHtml(stage.detail || '')}</p>${stage.remediation ? `<small>${escapeHtml(stage.remediation)}</small>` : ''}</div>${stage.duration_ms ? `<time>${Number(stage.duration_ms).toLocaleString()} ms</time>` : ''}</article>`;
+}
+
+function renderConnectionDiagnostics(result, { setup = false } = {}) {
+  if (!result) return;
+  state.connectionDiagnostics = result;
+  const stages = result.stages || [];
+  const ready = Boolean(result.ready);
+  const readiness = result.depth_readiness || {};
+  const title = result.never_checked ? 'Connection contract has not been checked' : ready ? 'Splunk MCP is ready' : `Connection blocked at ${String(result.blocking_stage || 'preflight').replaceAll('-', ' ')}`;
+  const summary = result.never_checked
+    ? 'Run diagnostics before relying on discovery or continuous assurance.'
+    : ready
+      ? `${result.tool_count || 0} read-only tools discovered · quick ${readiness.quick ? 'ready' : 'blocked'} · standard ${readiness.standard ? 'ready' : 'blocked'} · deep ${readiness.deep ? 'ready' : 'blocked'}`
+      : stages.find(stage => stage.status === 'error')?.detail || 'The saved Splunk connection is not ready.';
+  const panel = $('#connectionReadiness');
+  panel.className = `connection-readiness ${ready ? 'ready' : result.never_checked ? '' : 'blocked'}`;
+  panel.querySelector('h3').textContent = title;
+  panel.querySelector(':scope > p').textContent = summary;
+  $('#connectionReadinessStages').innerHTML = stages.map(diagnosticStageMarkup).join('');
+  if (setup) {
+    const setupPanel = $('#setupConnectionDiagnostics'); setupPanel.hidden = false;
+    setupPanel.className = `connection-diagnostics setup-diagnostics ${ready ? 'ready' : 'blocked'}`;
+    setupPanel.querySelector('header span').textContent = ready ? 'Ready' : 'Action required';
+    setupPanel.querySelector('.diagnostic-stages').innerHTML = stages.map(diagnosticStageMarkup).join('');
+  }
+}
+
+async function loadConnectionDiagnostics() {
+  try { renderConnectionDiagnostics(await api('/api/connection/diagnostics')); }
+  catch (_) { /* Health detail remains non-blocking while the app starts. */ }
+}
+
+async function runConnectionDiagnostics() {
+  const button = $('#runConnectionDiagnostics'); button.disabled = true; button.textContent = 'Checking…';
+  const panel = $('#connectionReadiness'); panel.className = 'connection-readiness working';
+  panel.querySelector('h3').textContent = 'Checking connection readiness';
+  $('#connectionReadinessStages').innerHTML = '';
+  try {
+    const result = await streamApi('/api/connection/diagnostics/stream', {}, event => {
+      if (event.type === 'result') return;
+      panel.querySelector('h3').textContent = event.label || 'Checking connection readiness';
+      panel.querySelector(':scope > p').textContent = event.detail || '';
+    });
+    renderConnectionDiagnostics(result);
+    toast(result.ready ? 'Splunk MCP connection is ready' : 'Connection diagnostics found a blocker');
+    return result;
+  } catch (error) { toast(error.message); return null; }
+  finally { button.disabled = false; button.textContent = 'Run diagnostics'; }
 }
 
 function readinessBadge(node, label, status) {
@@ -621,13 +675,30 @@ function renderCaseList() {
 }
 
 async function openCase(id, updateHash = true) {
-  state.activeCase = await api(`/api/cases/${encodeURIComponent(id)}`);
+  [state.activeCase, state.caseCockpit] = await Promise.all([
+    api(`/api/cases/${encodeURIComponent(id)}`),
+    api(`/api/cases/${encodeURIComponent(id)}/cockpit`)
+  ]);
   renderCaseList(); renderCaseDetail();
   if (updateHash) history.replaceState(null, '', `${location.pathname}#cases/${encodeURIComponent(id)}`);
 }
 
 function caseOption(value, current, label = value) {
   return `<option value="${escapeHtml(value)}" ${value === current ? 'selected' : ''}>${escapeHtml(label)}</option>`;
+}
+
+function caseCockpitMarkup() {
+  const cockpit = state.caseCockpit; if (!cockpit) return '';
+  const health = cockpit.health || {};
+  const actions = cockpit.next_actions || [];
+  const validationSummary = Object.entries(cockpit.validation_counts || {}).map(([status,count]) => `${count} ${status}`).join(' · ') || 'No linked validation work';
+  return `<section class="case-cockpit" aria-labelledby="caseCockpitTitle">
+    <header><div><p class="eyebrow">INVESTIGATION COCKPIT</p><h3 id="caseCockpitTitle">Evidence state and next best action</h3></div><button class="button primary small" data-case-investigate="review">Resume in Investigate</button></header>
+    <div class="case-health-grid">
+      <article><b>${health.observations || 0}</b><span>observations</span></article><article><b>${health.open_hypotheses || 0}</b><span>open hypotheses</span></article><article><b>${health.unresolved_items || 0}</b><span>unresolved</span></article><article><b>${health.linked_validations || 0}</b><span>validations</span></article><article class="${health.tensions ? 'warn' : ''}"><b>${health.tensions || 0}</b><span>evidence tensions</span></article>
+    </div>
+    <div class="case-cockpit-body"><section><span>NEXT BEST ACTIONS</span><div class="case-next-actions">${actions.map((action,index) => `<button data-case-next-action="${index}"><b>${escapeHtml(action.label)}</b><small>${escapeHtml(action.reason)}</small></button>`).join('')}</div></section><aside><span>CONTEXT HEALTH</span><p>${health.available_artifacts || 0}/${health.linked_artifacts || 0} linked artifacts available locally</p><p>${escapeHtml(validationSummary)}</p><p>${health.decisions || 0} recorded decision${health.decisions === 1 ? '' : 's'}</p></aside></div>
+  </section>`;
 }
 
 function renderCaseDetail() {
@@ -656,6 +727,7 @@ function renderCaseDetail() {
       <label class="case-tags-field"><span>Tags</span><input id="caseTags" value="${escapeHtml(item.tags.join(', '))}"></label>
       <button class="button ghost" data-save-case>Save case details</button>
     </div>
+    ${caseCockpitMarkup()}
     <div class="case-exports" id="caseExports" hidden></div>
     <div class="case-timeline-heading"><div><p class="eyebrow">CHRONOLOGICAL RECORD</p><h3>Evidence and decision timeline</h3></div><span>${item.items.length} item${item.items.length === 1 ? '' : 's'}</span></div>
     <div class="case-timeline">${timeline}</div>`;
@@ -724,6 +796,36 @@ function renderModels() {
   renderModelCatalog();
 }
 
+function renderFeedbackBenchmarks() {
+  const value = state.feedbackBenchmarks; if (!value) return;
+  $('#feedbackTotal').textContent = `${value.total || 0} rating${value.total === 1 ? '' : 's'}`;
+  $('#modelBenchmarkGrid').innerHTML = (value.scorecards || []).length ? value.scorecards.map(item => `
+    <article class="model-benchmark-card"><header><div><span>${escapeHtml(item.task_type.replaceAll('-', ' '))}</span><h4>${escapeHtml(item.model_profile)}</h4></div><b>${Math.round(Number(item.positive_rate || 0) * 100)}%</b></header><p>${Number(item.total).toLocaleString()} analyst outcome${item.total === 1 ? '' : 's'} · ${escapeHtml(item.confidence)}</p><div>${Object.entries(item.ratings || {}).map(([rating,count]) => `<span><b>${count}</b>${escapeHtml(rating.replaceAll('-', ' '))}</span>`).join('')}</div><code>${escapeHtml(item.model || 'model not reported')}</code></article>`).join('') : '<div class="empty-inline compact-empty">Rate an Investigate response to start a local quality baseline.</div>';
+}
+
+async function loadFeedbackBenchmarks() {
+  try { state.feedbackBenchmarks = await api('/api/feedback/benchmarks'); renderFeedbackBenchmarks(); }
+  catch (_) { /* Outcome reporting is non-blocking. */ }
+}
+
+async function recordAnalystFeedback(button) {
+  const message = button.closest('.message.assistant'); if (!message?.dataset.feedbackTarget) return;
+  const rating = button.dataset.feedbackRating;
+  const note = rating === 'useful' ? '' : (window.prompt('Optional: what should SignalRoom or this model have done differently?') || '');
+  const payload = {
+    target_type:'chat', target_id:message.dataset.feedbackTarget,
+    task_type:message.dataset.feedbackTask || 'general', rating,
+    model_profile:message.dataset.feedbackProfile || '', model:message.dataset.feedbackModel || '',
+    route:message.dataset.feedbackRoute || '', note, metadata:{ local_first:true }
+  };
+  try {
+    await api('/api/feedback', { method:'POST', body:JSON.stringify(payload) });
+    message.querySelectorAll('[data-feedback-rating]').forEach(node => { node.disabled = true; node.classList.toggle('selected', node === button); });
+    const status = message.querySelector('.analyst-feedback em'); if (status) status.textContent = 'Recorded locally';
+    await loadFeedbackBenchmarks(); toast('Analyst feedback recorded locally');
+  } catch (error) { toast(error.message); }
+}
+
 function renderModelRecommendations(items = []) {
   items.forEach(item => { state.modelRecommendations[item.id] = item; });
   if (!items.length) return '';
@@ -773,11 +875,19 @@ function appendMessage(role, content, meta = {}) {
   const welcome = $('.welcome-card'); if (welcome) welcome.remove();
   const node = document.createElement('article'); node.className = `message ${role}`;
   if (role === 'user') node.innerHTML = `<div class="bubble">${escapeHtml(content)}</div>`;
-  else node.innerHTML = `<div class="agent-avatar">S</div><div><div class="answer">${renderMarkdown(content)}</div>
+  else {
+    node.dataset.feedbackTarget = meta.targetId || '';
+    node.dataset.feedbackModel = meta.model || '';
+    node.dataset.feedbackProfile = meta.profile || '';
+    node.dataset.feedbackRoute = meta.route || '';
+    node.dataset.feedbackTask = meta.taskType || 'general';
+    node.innerHTML = `<div class="agent-avatar">S</div><div><div class="answer">${renderMarkdown(content)}</div>
     <div class="answer-meta"><span>Executed · ${escapeHtml(meta.model || 'SignalRoom')}</span>${meta.profile ? `<span>Profile · ${escapeHtml(meta.profile)}</span>` : ''}<span>${escapeHtml(meta.route || 'evidence-led')}</span>${meta.activated ? '<span>Loaded for this request</span>' : ''}</div>
     ${renderResultEnrichment(meta.enrichment || {})}
     ${renderModelRecommendations(meta.modelRecommendations || [])}
-    <div class="suggestions">${(meta.suggestions || []).map(item => `<button data-prompt="${escapeHtml(item)}">${escapeHtml(item)}</button>`).join('')}</div></div>`;
+    <div class="suggestions">${(meta.suggestions || []).map(item => `<button data-prompt="${escapeHtml(item)}">${escapeHtml(item)}</button>`).join('')}</div>
+    ${meta.targetId ? '<div class="analyst-feedback"><span>Did this advance the investigation?</span><button data-feedback-rating="useful">Useful</button><button data-feedback-rating="incorrect">Incorrect</button><button data-feedback-rating="missing-evidence">Missing evidence</button><em></em></div>' : ''}</div>`;
+  }
   $('#messages').appendChild(node); $('#messages').scrollTop = $('#messages').scrollHeight;
 }
 
@@ -874,7 +984,7 @@ async function sendChat(message, options = {}) {
       execute_searches: true
     }, event => updateOperation($('#agentWork')?.querySelector('.agent-work'), event));
     state.conversationId = result.conversation_id; finishAgentWork();
-    appendMessage('assistant', result.message, { model: result.model, profile: result.model_profile, route: result.route, activated:result.model_activation?.activated, suggestions: result.suggested_actions, modelRecommendations:result.model_recommendations, enrichment:result.enrichment });
+    appendMessage('assistant', result.message, { model: result.model, profile: result.model_profile, route: result.route, taskType:result.mode, targetId:`${result.conversation_id}:${result.generated_at}`, activated:result.model_activation?.activated, suggestions: result.suggested_actions, modelRecommendations:result.model_recommendations, enrichment:result.enrichment });
     renderEvidence(result.evidence, result.trace, result.ledger);
     $('#approveHf').checked = false;
   } catch (error) { finishAgentWork(); appendMessage('assistant', `The request failed: ${error.message}`); }
@@ -1131,7 +1241,43 @@ function openValidationEditor(task) {
   $('#validationRowLimit').value = task.row_limit;
   $('#validationEvidenceRefs').value = (task.evidence_refs || []).join(', ') || 'None';
   $('#validationModal').hidden = false;
+  analyzeValidationContract();
   setTimeout(() => $('#validationTitle').focus(), 50);
+}
+
+function queryIntelligencePayload(task = null) {
+  return {
+    spl: task?.spl ?? $('#validationSpl').value,
+    earliest_time: task?.earliest_time ?? $('#validationEarliest').value,
+    latest_time: task?.latest_time ?? $('#validationLatest').value,
+    row_limit: Number(task?.row_limit ?? $('#validationRowLimit').value),
+    exclude_task_id: task?.id || state.editingValidationId || ''
+  };
+}
+
+function renderQueryIntelligence(value) {
+  state.queryIntelligence = value;
+  const panel = $('#queryIntelligence'); if (!panel) return;
+  panel.className = `query-intelligence ${escapeHtml(value.risk)}`;
+  panel.querySelector('header span').textContent = `${value.risk.toUpperCase()} · score ${value.score}/100`;
+  const drivers = (value.cost_drivers || []).map(item => `<li>${escapeHtml(item.label)}</li>`).join('');
+  const controls = (value.positive_controls || []).map(item => `<li>${escapeHtml(item)}</li>`).join('');
+  const reuse = value.reusable_result ? `<div class="query-reuse"><b>Preserved result available</b><span>${escapeHtml(value.reusable_result.title)} · ${new Date(value.reusable_result.completed_at).toLocaleString()}</span></div>` : '';
+  const staged = value.staged_contract || {};
+  panel.innerHTML = `<header><b>Execution intelligence</b><span>${escapeHtml(value.risk.toUpperCase())} · score ${value.score}/100</span></header><p>${escapeHtml(value.execution_recommendation)}</p>${reuse}<div class="query-intelligence-grid"><div><b>Cost and risk drivers</b><ul>${drivers || '<li>No material cost driver detected</li>'}</ul></div><div><b>Bounding controls</b><ul>${controls || '<li>Add an index, time, or result boundary</li>'}</ul></div></div>${staged.spl && staged.spl !== $('#validationSpl').value ? `<details><summary>Safer staged SPL</summary><pre><code>${escapeHtml(staged.spl)}</code></pre></details>` : ''}`;
+}
+
+async function analyzeValidationContract(task = null) {
+  const panel = $('#queryIntelligence'); if (!panel) return null;
+  panel.querySelector('header span').textContent = 'Analyzing contract…';
+  try {
+    const value = await api('/api/query-intelligence', { method:'POST', body:JSON.stringify(queryIntelligencePayload(task)) });
+    renderQueryIntelligence(value); return value;
+  } catch (error) {
+    panel.className = 'query-intelligence blocked';
+    panel.querySelector('header span').textContent = 'Unable to analyze'; panel.querySelector('p').textContent = error.message;
+    return null;
+  }
 }
 
 async function queueValidation(candidateId) {
@@ -1146,7 +1292,10 @@ async function queueValidation(candidateId) {
 
 async function approveValidation(taskId) {
   const task = state.validations.find(item => item.id === taskId); if (!task) return;
-  if (!confirm(`Approve this exact read-only SPL contract?\n\n${task.spl}\n\nWindow: ${task.earliest_time} to ${task.latest_time}\nMaximum rows: ${task.row_limit}`)) return;
+  const intelligence = await analyzeValidationContract(task);
+  if (!intelligence || intelligence.risk === 'blocked') { toast(intelligence?.blocked_reason || 'Query approval is blocked'); return; }
+  const reuse = intelligence.reusable_result ? `\n\nA preserved matching result exists from ${new Date(intelligence.reusable_result.completed_at).toLocaleString()}. Approve only if fresher evidence is required.` : '';
+  if (!confirm(`Approve this exact read-only SPL contract?\n\nRisk: ${intelligence.risk.toUpperCase()} (${intelligence.score}/100)\n${intelligence.execution_recommendation}${reuse}\n\n${task.spl}\n\nWindow: ${task.earliest_time} to ${task.latest_time}\nMaximum rows: ${task.row_limit}`)) return;
   try {
     const approved = await api(`/api/validations/${encodeURIComponent(taskId)}/approve`, { method:'POST', body:'{}' });
     state.validations = state.validations.map(item => item.id === taskId ? approved : item); renderValidations();
@@ -1313,7 +1462,13 @@ async function testConnection(kind, profileId, output) {
       };
     }
     const result = await api('/api/test-connection', { method:'POST', body:JSON.stringify(payload) });
-    output.textContent = result.ok ? (result.demo ? 'Demo client ready' : result.generation_ok ? `Generated with ${result.executed_model}` : `Connected${result.tool_count != null ? ` · ${result.tool_count} tools` : ''}`) : result.error;
+    if (kind === 'splunk') {
+      output.textContent = result.ready ? `${result.demo ? 'Demo client' : 'Splunk MCP'} ready · ${result.tool_count || 0} tools` : `Blocked at ${String(result.blocking_stage || 'preflight').replaceAll('-', ' ')}`;
+      output.className = `test-result ${result.ready ? 'ok' : 'error'}`;
+      renderConnectionDiagnostics(result, { setup:true });
+      return result;
+    }
+    output.textContent = result.ok ? (result.generation_ok ? `Generated with ${result.executed_model}` : 'Connected') : result.error;
     output.className = `test-result ${result.ok ? 'ok' : 'error'}`; return result;
   } catch (error) { output.textContent = error.message; output.className = 'test-result error'; return { ok:false }; }
 }
@@ -1378,6 +1533,8 @@ function navigateView(name) {
 }
 
 document.addEventListener('click', async event => {
+  const feedback = event.target.closest('[data-feedback-rating]');
+  if (feedback) { await recordAnalystFeedback(feedback); return; }
   const assuranceNotice = event.target.closest('[data-ack-assurance]');
   if (assuranceNotice) { await acknowledgeAssurance(assuranceNotice.dataset.ackAssurance); return; }
   const reviewAssurance = event.target.closest('[data-review-assurance-package]');
@@ -1458,6 +1615,22 @@ document.addEventListener('click', async event => {
   const ledger = event.target.closest('[data-open-ledger]'); if (ledger) openLedgerDetail(ledger.dataset.openLedger);
   const artifact = event.target.closest('[data-open-artifact]'); if (artifact) openArtifactDetail(artifact.dataset.openArtifact);
   const openSavedCase = event.target.closest('[data-open-case]'); if (openSavedCase) openCase(openSavedCase.dataset.openCase);
+  const caseInvestigate = event.target.closest('[data-case-investigate]');
+  if (caseInvestigate && state.caseCockpit) {
+    openInvestigation('triage', `Continue this case using the bounded case context below. Reuse it before requesting new SPL.\n\n${state.caseCockpit.context_packet}\n\nGoal: Review the evidence state and recommend the single highest-value next action.`, false);
+  }
+  const caseNextAction = event.target.closest('[data-case-next-action]');
+  if (caseNextAction && state.caseCockpit) {
+    const action = state.caseCockpit.next_actions[Number(caseNextAction.dataset.caseNextAction)];
+    if (action?.kind === 'review-validation') {
+      setView('discovery');
+      const node = document.querySelector(`[data-validation-id="${CSS.escape(action.validation_task_id)}"]`);
+      if (node) { node.scrollIntoView({ behavior:'smooth', block:'center' }); node.classList.add('package-focus'); setTimeout(() => node.classList.remove('package-focus'), 2800); }
+      toast('Case-linked validation staged for review');
+    } else if (action?.prompt) {
+      openInvestigation('triage', `${action.prompt}\n\nCase context:\n${state.caseCockpit.context_packet}`, false);
+    }
+  }
   const artifactInvestigation = event.target.closest('[data-artifact-investigate]');
   if (artifactInvestigation) {
     const item = state.artifacts.find(entry => entry.id === artifactInvestigation.dataset.artifactInvestigate);
@@ -1580,6 +1753,7 @@ $('#demoTourNext').addEventListener('click', () => {
 $('#toggleEvidence').addEventListener('click', () => $('.evidence-panel').classList.add('mobile-open'));
 $('#closeEvidence').addEventListener('click', () => $('.evidence-panel').classList.remove('mobile-open'));
 $('#runDiscovery').addEventListener('click', runDiscovery);
+$('#runConnectionDiagnostics').addEventListener('click', runConnectionDiagnostics);
 $('#assuranceForm').addEventListener('submit', saveAssurancePolicy);
 $('#runAssuranceNow').addEventListener('click', runAssuranceNow);
 $('#cancelAssuranceRun').addEventListener('click', cancelAssuranceRun);
@@ -1621,6 +1795,11 @@ $('#validationForm').addEventListener('submit', async event => {
     state.editingValidationId = null; $('#validationModal').hidden = true; renderValidations(); toast('Draft saved and fingerprint refreshed');
   } catch (error) { toast(error.message); }
 });
+let queryIntelligenceTimer;
+['#validationSpl','#validationEarliest','#validationLatest','#validationRowLimit'].forEach(selector => $(selector).addEventListener('input', () => {
+  clearTimeout(queryIntelligenceTimer);
+  queryIntelligenceTimer = setTimeout(() => analyzeValidationContract(), 350);
+}));
 $('#caseForm').addEventListener('submit', async event => {
   event.preventDefault();
   const pending = state.pendingCaseItem;
@@ -1656,4 +1835,4 @@ document.addEventListener('keydown', event => {
   else if (!$('#caseModal').hidden) { $('#caseModal').hidden = true; state.pendingCaseItem = null; }
 });
 
-Promise.all([loadSettings(), loadArtifacts(), loadCases(), loadLatestDiscovery(), loadValidations(), loadModelCatalog(), loadSplunkModels(), loadAssurance()]).then(() => { renderPromptTree(); renderValidations(); handleDeepLink(); setInterval(loadAssurance, 3000); }).catch(error => toast(error.message));
+Promise.all([loadSettings(), loadArtifacts(), loadCases(), loadLatestDiscovery(), loadValidations(), loadModelCatalog(), loadSplunkModels(), loadAssurance(), loadConnectionDiagnostics(), loadFeedbackBenchmarks()]).then(() => { renderPromptTree(); renderValidations(); handleDeepLink(); setInterval(loadAssurance, 3000); }).catch(error => toast(error.message));

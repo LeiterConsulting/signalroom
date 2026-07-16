@@ -47,6 +47,7 @@ class AssuranceService:
         pipeline_factory: Callable[[Any], Any],
         on_complete: Callable[[str, dict[str, Any]], Awaitable[None] | None] | None = None,
         run_lock: asyncio.Lock | None = None,
+        preflight: Callable[[str, Any], Awaitable[dict[str, Any]]] | None = None,
         poll_seconds: float = 2.0,
     ):
         self.store = store
@@ -54,6 +55,7 @@ class AssuranceService:
         self.pipeline_factory = pipeline_factory
         self.on_complete = on_complete
         self.run_lock = run_lock
+        self.preflight = preflight
         self.poll_seconds = poll_seconds
         self._worker: asyncio.Task[None] | None = None
         self._active_task: asyncio.Task[None] | None = None
@@ -213,6 +215,54 @@ class AssuranceService:
             self.store.update_progress(run_id, event, client.calls_used)
 
         try:
+            if self.preflight is not None:
+                await progress(
+                    {
+                        "phase": "connection:preflight",
+                        "label": "Checking Splunk connection readiness",
+                        "detail": "No Splunk tool calls will run until transport and MCP tools are ready.",
+                        "progress": 2,
+                        "metrics": {"splunk_calls": 0},
+                    }
+                )
+                readiness = await self.preflight(running.depth, progress)
+                if not readiness.get("depth_readiness", {}).get(running.depth, False):
+                    blocking_stage = str(readiness.get("blocking_stage") or "tool-contract")
+                    stage = next(
+                        (
+                            item
+                            for item in readiness.get("stages", [])
+                            if item.get("id") == blocking_stage
+                        ),
+                        {},
+                    )
+                    detail = str(
+                        stage.get("detail")
+                        or f"The endpoint is not ready for {running.depth} discovery."
+                    )
+                    summary = {
+                        "discovery_run_id": "",
+                        "findings": 0,
+                        "high_findings": 0,
+                        "inventory_drift": 0,
+                        "coverage_drift": 0,
+                        "mltk_drift": 0,
+                        "dependency_issues": 0,
+                        "collection_failures": 0,
+                        "coverage_score": None,
+                        "connection_blocked": True,
+                        "blocking_stage": blocking_stage,
+                        "headline": detail,
+                    }
+                    self.store.complete_run(run_id, "connection-blocked", summary, 0)
+                    self.store.add_notification(
+                        run_id,
+                        "high",
+                        "connection",
+                        "Continuous assurance paused before Splunk access",
+                        detail,
+                    )
+                    return
             pipeline = self.pipeline_factory(client)
             if self.run_lock is not None:
                 if self.run_lock.locked():

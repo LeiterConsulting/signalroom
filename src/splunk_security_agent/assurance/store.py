@@ -283,6 +283,7 @@ class AssuranceStore:
             "complete": "Continuous assurance complete",
             "partial": "Continuous assurance completed with collection gaps",
             "budget-blocked": "Continuous assurance reached its Splunk-call budget",
+            "connection-blocked": "Continuous assurance blocked by connection readiness",
         }.get(status, "Continuous assurance finished")
         with self._lock, self.connect() as db:
             db.execute(

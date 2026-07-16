@@ -161,6 +161,58 @@ async def test_assurance_worker_preserves_progress_and_creates_drift_notificatio
     assert {item["category"] for item in store.notifications()} == {"drift", "finding"}
 
 
+@pytest.mark.asyncio
+async def test_assurance_preflight_blocks_before_any_splunk_or_pipeline_call(tmp_path):
+    store = AssuranceStore(tmp_path / "assurance.db")
+    fake_splunk = FakeSplunk()
+    pipeline_started = False
+
+    class ForbiddenPipeline:
+        async def run(self, depth: str, progress):
+            nonlocal pipeline_started
+            pipeline_started = True
+            raise AssertionError(f"pipeline must not start for blocked {depth} readiness")
+
+    async def blocked_preflight(depth: str, progress):
+        await progress(
+            {
+                "phase": "connection:dns",
+                "label": "Resolving Splunk",
+                "detail": "Hostname unavailable",
+                "progress": 20,
+            }
+        )
+        return {
+            "ready": False,
+            "blocking_stage": "dns",
+            "depth_readiness": {"quick": False, "standard": False, "deep": False},
+            "stages": [{"id": "dns", "status": "error", "detail": "Hostname unavailable"}],
+        }
+
+    service = AssuranceService(
+        store,
+        lambda: fake_splunk,
+        lambda client: ForbiddenPipeline(),
+        preflight=blocked_preflight,
+        poll_seconds=0.01,
+    )
+    run = service.enqueue("quick")
+    await service.start()
+    for _ in range(100):
+        current = store.get_run(run.id)
+        if current and current.status == "connection-blocked":
+            break
+        await asyncio.sleep(0.01)
+    await service.stop()
+
+    completed = store.get_run(run.id)
+    assert completed is not None
+    assert completed.status == "connection-blocked"
+    assert completed.calls_used == 0
+    assert pipeline_started is False
+    assert fake_splunk.calls == []
+
+
 def test_assurance_policy_rejects_a_budget_below_selected_depth(tmp_path):
     service = AssuranceService(
         AssuranceStore(tmp_path / "assurance.db"),

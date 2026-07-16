@@ -95,6 +95,11 @@
             <div><p class="eyebrow">READ-ONLY SECURITY INTELLIGENCE</p><h2>Build knowledge once. Investigate from it repeatedly.</h2><p>Profile telemetry, detections, data models, and collection health through Splunk MCP; reason locally with Ollama; then index focused evidence that later conversations can reuse without another search.</p></div>
             <div class="run-controls"><select id="discoveryDepth" aria-label="Discovery depth"><option value="quick">Quick · inventory baseline</option><option value="standard" selected>Standard · detection intelligence</option><option value="deep">Deep · CIM and content readiness</option></select><button class="button primary" id="runDiscovery">Run discovery</button></div>
           </article>
+          <article class="connection-readiness" id="connectionReadiness" aria-live="polite">
+            <header><div><p class="eyebrow">SPLUNK MCP PREFLIGHT</p><h3>Connection contract has not been checked</h3></div><button class="button ghost small" id="runConnectionDiagnostics" type="button">Run diagnostics</button></header>
+            <p>SignalRoom verifies DNS, network reachability, TLS identity, MCP authentication, and required read-only tools before discovery or assurance.</p>
+            <div class="diagnostic-stages" id="connectionReadinessStages"></div>
+          </article>
           <article class="operation-card discovery-operation" id="discoveryProgress" hidden aria-live="polite">
             <header><div><p class="eyebrow">LIVE DISCOVERY ACTIVITY</p><h3 id="discoveryProgressLabel">Preparing discovery</h3></div><span id="discoveryElapsed">0s</span></header>
             <p id="discoveryProgressDetail">SignalRoom is preparing the read-only collection plan.</p>
@@ -210,6 +215,7 @@
         <section class="model-freshness" id="modelFreshness" aria-live="polite" hidden></section>
         <div class="routing-map"><span>Operator question</span><b aria-hidden="true">→</b><span>Task router</span><b aria-hidden="true">→</b><div><em>General agent</em><em>Security reasoning</em><em>Cyber retrieval</em><em>Evidence reranking</em><em>Entity extraction</em></div></div>
         <div class="model-grid" id="modelGrid"></div>
+        <section class="model-benchmarks" aria-labelledby="modelBenchmarksTitle"><header><div><span>ANALYST OUTCOME SCOREBOARD</span><h3 id="modelBenchmarksTitle">Local model value by task</h3><p>Direct analyst feedback is stored locally and separated by model profile and investigation mode. Small samples are marked directional.</p></div><span id="feedbackTotal" class="subtle-pill">0 ratings</span></header><div id="modelBenchmarkGrid" class="model-benchmark-grid"><div class="empty-inline compact-empty">Rate an Investigate response to start a local quality baseline.</div></div></section>
         <section class="splunk-models-panel" aria-labelledby="splunkModelsTitle">
           <header>
             <div><span>SPLUNK-NATIVE MODELS</span><h3 id="splunkModelsTitle">MLTK inventory and dependency drift</h3><p>Inspect model definitions stored in Splunk with the read-only <code>listmodels</code> command. SignalRoom records definition drift and compares declared Ollama dependencies without changing Splunk.</p></div>
@@ -244,7 +250,8 @@
             <div class="tls-warning full" id="tlsWarning" hidden><b>TLS verification is disabled</b><span>The connection remains encrypted, but SignalRoom will not validate the server certificate or identity.</span></div>
             <label class="full" id="caBundleLabel"><span>Private CA bundle path <em>optional</em></span><input id="splunkCaBundle" placeholder="C:\certs\organization-ca.pem or /etc/ssl/org-ca.pem"></label>
           </div>
-          <div class="connection-test-row"><button class="button ghost small" type="button" id="testSplunk">Test connection</button><span class="test-result" id="splunkTestResult"></span></div>
+          <div class="connection-test-row"><button class="button ghost small" type="button" id="testSplunk">Run connection diagnostics</button><span class="test-result" id="splunkTestResult"></span></div>
+          <section class="connection-diagnostics setup-diagnostics" id="setupConnectionDiagnostics" hidden aria-live="polite"><header><b>Connection contract</b><span></span></header><div class="diagnostic-stages"></div></section>
         </div>
         <div class="form-section"><h3>Model services</h3><p>Run chat and security reasoning through Ollama. SecureBERT specialists default to local Transformers after a one-time Hugging Face download; cloud inference remains optional.</p>
           <div class="model-onboarding">
@@ -301,7 +308,7 @@
           <label><span>Latest time</span><input id="validationLatest" required maxlength="64" value="now"></label>
           <label><span>Maximum rows</span><input id="validationRowLimit" type="number" required min="1" max="500" value="100"></label>
           <label><span>Evidence references</span><input id="validationEvidenceRefs" readonly></label>
-        </div></div>
+        </div><section class="query-intelligence" id="queryIntelligence" aria-live="polite"><header><b>Execution intelligence</b><span>Analyzing contract…</span></header><p>SignalRoom will explain scan risk, reuse, and a safer staged contract before approval.</p></section></div>
         <footer><button type="button" class="button ghost close-validation">Cancel</button><button class="button primary" type="submit">Save draft</button></footer>
       </form>
     </section>

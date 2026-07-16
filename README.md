@@ -8,6 +8,7 @@ This is a focused reimplementation inspired by [LeiterConsulting/splunk-discover
 
 - A polished local web workspace with setup, investigation chat, discovery, durable cases, context, and model views
 - Splunk MCP tool discovery and alias resolution for common server naming differences
+- Layered Splunk MCP diagnostics across configuration, DNS, TCP, TLS identity, authentication, and depth-specific tool contracts
 - Parallel read-only quick, standard, and deep discovery with change detection, JSON blueprints, and briefs
 - First-class security discovery across telemetry freshness, detection health, data-model readiness, and reusable RAG knowledge
 - Delta-aware model-team reuse with exact input fingerprints and visible cache provenance
@@ -15,7 +16,9 @@ This is a focused reimplementation inspired by [LeiterConsulting/splunk-discover
 - Opt-in continuous assurance with durable schedules, cross-run signal correlation, response packages, and hard Splunk-call budgets
 - A restart-safe validation queue with bounded SPL preview, explicit analyst approval, expiring assurance drafts, live progress, and preserved results
 - An evidence-first agent with bounded multi-tool plans, investigation modes, and a structured ledger
-- Durable local investigation cases with ownership, lifecycle, severity, chronological timelines, and handoff exports
+- Durable local investigation cases with an evidence-health cockpit, next-best actions, case-scoped context packets, chronological timelines, and handoff exports
+- Deterministic SPL cost and reuse intelligence before approval, including safer staged contracts and exact-result reuse
+- Local analyst feedback and model/task outcome scorecards with no telemetry export
 - Ollama chat and tool-capable model support
 - Hugging Face chat, embedding, and token-classification adapters
 - Capability profiles for Foundation-Sec and SecureBERT 2.0
@@ -67,6 +70,12 @@ Open **Setup** and configure:
 2. A bearer token with the narrowest useful read-only permissions
 3. The **Verify TLS certificates** toggle; keep it enabled and provide a private CA bundle where possible, or disable it explicitly for a trusted self-signed development endpoint
 4. Disable demo mode and test the connection
+
+The diagnostic action evaluates configuration, DNS, TCP reachability, TLS identity, MCP initialization,
+authentication, and the read-only tool contract required by each discovery depth. Results are secret-free and
+stored locally so the Discovery page can show the current blocking stage and last known successful check.
+Continuous assurance runs this same preflight and records `connection-blocked` with zero Splunk tool calls when
+the selected discovery depth is not ready.
 
 The client discovers available tools and resolves common aliases such as `splunk_run_query` / `run_splunk_query`, `splunk_get_indexes` / `get_indexes`, and related SAIA SPL helpers.
 
@@ -180,10 +189,12 @@ src/splunk_security_agent/
   agents/          evidence-first chat orchestration and SPL guardrails
   assurance/       durable scheduling, drift correlation, budgets, recovery, and response packages
   discovery/       inventory, coverage analysis, and artifact packaging
-  cases/           durable local case records, timelines, and handoff exports
+  cases/           durable case records, evidence cockpit, timelines, and handoff exports
   providers/       Ollama, local Transformers, Hugging Face cloud, and capability routing
   rag/             SQLite evidence and chunk retrieval
-  splunk/          tolerant MCP client and safe demo client
+  splunk/          tolerant MCP client, layered connection diagnostics, and safe demo client
+  validation/      bounded execution queue plus deterministic query cost/reuse intelligence
+  feedback.py      local analyst outcomes and model/task scorecards
   static/          dependency-free operator SPA
   app.py           FastAPI routes and service wiring
   mcp_server.py    outward MCP tools
@@ -224,6 +235,23 @@ Ledger entries explain why they exist, whether they are an observation or suppor
 validation status, and provenance. Opening an entry provides workflow-specific actions such as explaining
 relevance, generating validation SPL, starting a hunt, opening the source artifact, or preserving the item
 in a durable case timeline.
+
+### Cases and query intelligence
+
+Opening a case builds an investigation cockpit from its timeline, linked artifacts, and case-bound validation
+tasks. It separates observations, open hypotheses, unresolved items, decisions, and evidence tensions; then
+offers a prioritized next action. **Resume in Investigate** stages a bounded case context packet so the agent can
+reuse known facts before requesting another Splunk search.
+
+Before a validation SPL contract is approved, SignalRoom explains deterministic execution risk. It flags missing
+index scope, wide or unknown time ranges, high row limits, expensive commands, and prohibited operations; it also
+shows positive bounding controls. An exact fingerprint match to a completed validation is surfaced as reusable
+evidence, and wider contracts receive a narrower staged SPL suggestion. This is guidance rather than a Splunk
+cardinality estimate—the actual query still requires explicit, single-use approval.
+
+Each model-backed Investigate response can be rated **Useful**, **Incorrect**, or **Missing evidence**. Ratings
+and optional notes stay in `data/feedback.db`. The Models page aggregates outcomes by local profile and task;
+samples under ten ratings are explicitly labeled directional rather than presented as an accuracy claim.
 
 ### Discovery
 

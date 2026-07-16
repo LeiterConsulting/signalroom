@@ -178,6 +178,22 @@ class ChatResponse(BaseModel):
     generated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
+FeedbackRating = Literal["useful", "incorrect", "missing-evidence", "false-positive", "corrected"]
+
+
+class AnalystFeedbackCreate(BaseModel):
+    target_type: Literal["chat", "discovery", "validation", "case"]
+    target_id: str = Field(min_length=1, max_length=240)
+    task_type: str = Field(default="general", max_length=80)
+    rating: FeedbackRating
+    model_profile: str = Field(default="", max_length=160)
+    model: str = Field(default="", max_length=500)
+    route: str = Field(default="", max_length=160)
+    note: str = Field(default="", max_length=4000)
+    correction: str = Field(default="", max_length=10000)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
 class ArtifactCreate(BaseModel):
     title: str = Field(min_length=1, max_length=240)
     content: str = Field(min_length=1, max_length=2_000_000)
@@ -219,6 +235,7 @@ AssuranceRunStatus = Literal[
     "error",
     "cancelled",
     "budget-blocked",
+    "connection-blocked",
 ]
 
 
@@ -286,6 +303,14 @@ class ValidationTaskUpdate(BaseModel):
     row_limit: int | None = Field(default=None, ge=1, le=500)
     evidence_refs: list[str] | None = Field(default=None, max_length=16)
     case_id: str | None = Field(default=None, max_length=120)
+
+
+class QueryIntelligenceRequest(BaseModel):
+    spl: str = Field(min_length=1, max_length=20000)
+    earliest_time: str = Field(default="-24h", min_length=2, max_length=64)
+    latest_time: str = Field(default="now", min_length=1, max_length=64)
+    row_limit: int = Field(default=100, ge=1, le=500)
+    exclude_task_id: str = Field(default="", max_length=120)
 
 
 class ValidationTaskRecord(ValidationTaskCreate):

@@ -46,6 +46,7 @@ class SplunkMCPClient:
         verify_ssl: bool = True,
         ca_bundle: str | None = None,
         cache_ttl: float = 30,
+        timeout: float = 120,
     ):
         self.url = url.rstrip("/")
         self.token = token
@@ -55,6 +56,7 @@ class SplunkMCPClient:
         self._session_id = ""
         self.server_info: dict[str, Any] = {}
         self.cache_ttl = cache_ttl
+        self.timeout = timeout
         self._cache: dict[str, tuple[float, Any]] = {}
         self._init_lock = asyncio.Lock()
         self._tools_lock = asyncio.Lock()
@@ -104,7 +106,7 @@ class SplunkMCPClient:
         if not self.url:
             raise SplunkMCPError("Splunk MCP URL is not configured")
         try:
-            async with httpx.AsyncClient(verify=self.verify_ssl, timeout=120) as client:
+            async with httpx.AsyncClient(verify=self.verify_ssl, timeout=self.timeout) as client:
                 response = await client.post(self.url, headers=self._headers(), json=payload)
                 response.raise_for_status()
                 session_id = response.headers.get("Mcp-Session-Id")

@@ -2,13 +2,17 @@ from __future__ import annotations
 
 import json
 
-from splunk_security_agent.cases import CaseStore
+from splunk_security_agent.cases import CaseCockpitService, CaseStore
+from splunk_security_agent.rag import EvidenceStore
 from splunk_security_agent.schemas import (
+    ArtifactCreate,
     CaseCreate,
     CaseItemCreate,
     CaseItemUpdate,
     CaseUpdate,
+    ValidationTaskCreate,
 )
+from splunk_security_agent.validation import ValidationStore
 
 
 def test_case_lifecycle_persists_timeline_and_metadata(tmp_path):
@@ -132,3 +136,45 @@ def test_case_and_timeline_items_can_be_updated_and_deleted(tmp_path):
     assert store.delete(case.id) is False
     assert store.get(case.id) is None
     assert store.update_item(case.id, item.id, CaseItemUpdate(title="Missing")) is None
+
+
+def test_case_cockpit_links_evidence_validations_and_next_actions(tmp_path):
+    cases = CaseStore(tmp_path / "cases.db", tmp_path / "exports")
+    evidence = EvidenceStore(tmp_path / "evidence.db")
+    validations = ValidationStore(tmp_path / "validations.db")
+    case = cases.create(CaseCreate(title="Identity investigation", owner="Tier 2"))
+    artifact = evidence.add(
+        ArtifactCreate(
+            title="Identity baseline",
+            content="Known authentication sources and expected service accounts.",
+            kind="runbook",
+            source="analyst",
+        )
+    )
+    cases.add_item(
+        case.id,
+        CaseItemCreate(
+            kind="hypothesis",
+            title="Service account misuse",
+            content="The source host may be unexpected.",
+            status="needs-validation",
+            metadata={"artifact_id": artifact.id},
+        ),
+    )
+    validation = validations.create(
+        ValidationTaskCreate(
+            title="Bound service account search",
+            rationale="Validate the open case hypothesis.",
+            spl="index=identity user=svc_example | head 100",
+            case_id=case.id,
+        )
+    )
+
+    cockpit = CaseCockpitService(cases, validations, evidence).build(case.id)
+
+    assert cockpit is not None
+    assert cockpit["health"]["open_hypotheses"] == 1
+    assert cockpit["health"]["linked_validations"] == 1
+    assert cockpit["health"]["available_artifacts"] == 1
+    assert cockpit["next_actions"][0]["validation_task_id"] == validation.id
+    assert "Use this packet before requesting new SPL" in cockpit["context_packet"]

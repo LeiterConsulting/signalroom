@@ -14,14 +14,16 @@ from fastapi.staticfiles import StaticFiles
 
 from .agents import SecurityAgent
 from .assurance import AssuranceResponseService, AssuranceService, AssuranceStore
-from .cases import CaseStore
+from .cases import CaseCockpitService, CaseStore
 from .config import ConfigStore
 from .discovery import DiscoveryPipeline
+from .feedback import AnalystFeedbackStore
 from .mcp_server import MCPServer
 from .model_setup import ModelSetupService
 from .providers import ModelProviderError, ModelRouter
 from .rag import EvidenceStore
 from .schemas import (
+    AnalystFeedbackCreate,
     ArtifactCreate,
     ArtifactUpdate,
     AssurancePolicyUpdate,
@@ -36,13 +38,19 @@ from .schemas import (
     DiscoveryRequest,
     ModelActivateRequest,
     ModelPullRequest,
+    QueryIntelligenceRequest,
     SettingsUpdate,
     ValidationTaskCreate,
     ValidationTaskUpdate,
 )
-from .splunk import DemoSplunkClient, SplunkMCPClient
+from .splunk import (
+    ConnectionDiagnosticsStore,
+    DemoSplunkClient,
+    SplunkConnectionDiagnostics,
+    SplunkMCPClient,
+)
 from .splunk_models import SplunkModelInventoryService
-from .validation import ValidationService, ValidationStore
+from .validation import QueryIntelligenceService, ValidationService, ValidationStore
 
 ROOT = Path(os.getenv("SIGNALROOM_ROOT", Path.cwd())).resolve()
 STATIC = Path(__file__).resolve().parent / "static"
@@ -53,9 +61,20 @@ class Services:
     def __init__(self):
         self.config = ConfigStore(DATA)
         self.evidence = EvidenceStore(DATA / "evidence.db")
+        self.feedback = AnalystFeedbackStore(DATA / "feedback.db")
         self.cases = CaseStore(DATA / "cases.db", DATA / "case_exports")
         self.validation_store = ValidationStore(DATA / "validations.db")
+        self.query_intelligence = QueryIntelligenceService(self.validation_store)
+        self.case_cockpit = CaseCockpitService(
+            self.cases, self.validation_store, self.evidence
+        )
         self.assurance_store = AssuranceStore(DATA / "assurance.db")
+        self.connection_diagnostics_store = ConnectionDiagnosticsStore(
+            DATA / "connection_diagnostics.db"
+        )
+        self.connection_diagnostics = SplunkConnectionDiagnostics(
+            self.connection_diagnostics_store
+        )
         self.discovery_lock = asyncio.Lock()
         self.model_setup = ModelSetupService(self.config, self.evidence)
         self._fingerprint = ""
@@ -73,6 +92,7 @@ class Services:
             self._assurance_pipeline,
             self._assurance_complete,
             self.discovery_lock,
+            self._assurance_preflight,
         )
 
     def _assurance_pipeline(self, client: Any) -> DiscoveryPipeline:
@@ -90,6 +110,15 @@ class Services:
         if self._agent is not None:
             self._agent.invalidate_context_cache()
         self.model_setup.schedule_context_index()
+
+    async def _assurance_preflight(self, _depth: str, progress: Any) -> dict[str, Any]:
+        settings = self.config.load()
+        return await self.connection_diagnostics.run(
+            settings.splunk,
+            self.config.secret("splunk_token"),
+            demo_mode=settings.demo_mode,
+            progress=progress,
+        )
 
     def refresh(self, force: bool = False) -> None:
         settings = self.config.load()
@@ -195,6 +224,7 @@ async def index() -> FileResponse:
 
 @app.get("/api/health")
 async def health() -> dict[str, Any]:
+    latest_diagnostic = services.connection_diagnostics_store.latest() or {}
     return {
         "ok": True,
         "version": app.version,
@@ -202,12 +232,23 @@ async def health() -> dict[str, Any]:
         "demo_mode": services.config.load().demo_mode,
         "artifacts": len(services.evidence.list()),
         "assurance_worker": services.assurance.overview()["worker"]["online"],
+        "connection_ready": bool(latest_diagnostic.get("ready")),
     }
 
 
 @app.get("/api/settings")
 async def get_settings() -> dict[str, Any]:
     return services.config.public_payload()
+
+
+@app.post("/api/feedback", status_code=201)
+async def record_feedback(request: AnalystFeedbackCreate) -> dict[str, Any]:
+    return services.feedback.record(request)
+
+
+@app.get("/api/feedback/benchmarks")
+async def feedback_benchmarks() -> dict[str, Any]:
+    return services.feedback.benchmarks()
 
 
 @app.put("/api/settings")
@@ -224,17 +265,13 @@ async def put_settings(update: SettingsUpdate) -> dict[str, Any]:
 @app.post("/api/test-connection")
 async def test_connection(request: ConnectionTestRequest) -> dict[str, Any]:
     if request.kind == "splunk":
-        if request.demo_mode is True:
-            return await DemoSplunkClient().health()
         connection = request.splunk or services.config.load().splunk
         token = request.splunk_token or services.config.secret("splunk_token")
-        client = SplunkMCPClient(
-            connection.url,
+        return await services.connection_diagnostics.run(
+            connection,
             token,
-            connection.verify_ssl,
-            connection.ca_bundle,
+            demo_mode=request.demo_mode is True,
         )
-        return await client.health()
     if not request.profile_id:
         raise HTTPException(400, "profile_id is required for model tests")
     try:
@@ -421,6 +458,32 @@ def _stream_response(runner: Any) -> StreamingResponse:
     )
 
 
+@app.get("/api/connection/diagnostics")
+async def latest_connection_diagnostics() -> dict[str, Any]:
+    latest = services.connection_diagnostics_store.latest()
+    return latest or {
+        "ready": False,
+        "stages": [],
+        "depth_readiness": {"quick": False, "standard": False, "deep": False},
+        "last_success_at": None,
+        "never_checked": True,
+    }
+
+
+@app.post("/api/connection/diagnostics/stream")
+async def run_connection_diagnostics() -> StreamingResponse:
+    async def run(progress: Any) -> dict[str, Any]:
+        settings = services.config.load()
+        return await services.connection_diagnostics.run(
+            settings.splunk,
+            services.config.secret("splunk_token"),
+            demo_mode=settings.demo_mode,
+            progress=progress,
+        )
+
+    return _stream_response(run)
+
+
 @app.get("/api/splunk-models/latest")
 async def latest_splunk_models() -> dict[str, Any]:
     return services.splunk_models.latest()
@@ -545,6 +608,11 @@ async def list_validations() -> list[dict[str, Any]]:
     return [item.model_dump(mode="json") for item in services.validation_store.list()]
 
 
+@app.post("/api/query-intelligence")
+async def query_intelligence(request: QueryIntelligenceRequest) -> dict[str, Any]:
+    return services.query_intelligence.analyze(request)
+
+
 @app.post("/api/validations", status_code=201)
 async def create_validation(request: ValidationTaskCreate) -> dict[str, Any]:
     try:
@@ -617,6 +685,14 @@ async def get_case(case_id: str) -> dict[str, Any]:
     if not case:
         raise HTTPException(404, "Case not found")
     return case.model_dump(mode="json")
+
+
+@app.get("/api/cases/{case_id}/cockpit")
+async def get_case_cockpit(case_id: str) -> dict[str, Any]:
+    cockpit = services.case_cockpit.build(case_id)
+    if cockpit is None:
+        raise HTTPException(404, "Case not found")
+    return cockpit
 
 
 @app.patch("/api/cases/{case_id}")
