@@ -18,6 +18,9 @@ from splunk_security_agent.schemas import (
     DetectionRepositoryPreviewRequest,
     DetectionRepositoryRemoteRequest,
     DetectionRepositoryReviewRequest,
+    DetectionRuntimeAssessmentRequest,
+    DetectionRuntimeCaseRequest,
+    DetectionRuntimeDraftRequest,
     DetectionUpdate,
     DetectionValidationDraftRequest,
     ValidationTaskUpdate,
@@ -322,4 +325,63 @@ async def test_splunk_deployment_observation_and_case_preservation_are_audited(
     assert audit.event_types == [
         "detection.deployment.observed",
         "detection.deployment.preserved",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_snapshot_bound_runtime_workflow_is_audited(monkeypatch):
+    app_module = importlib.import_module("splunk_security_agent.app")
+    audit = AuditRecorder()
+    runtime = {
+        "id": "runtime-1",
+        "detection_id": "detection-1",
+        "deployment_snapshot_sha256": "b" * 64,
+        "check_sha256": "c" * 64,
+        "query_fingerprint": "d" * 64,
+        "validation_task_id": "validation-1",
+        "assessment_sha256": "e" * 64,
+        "case_item_id": "case-item-1",
+        "assessment": {
+            "status": "healthy",
+            "risk_level": "low",
+            "validation": {"artifact_id": "artifact-1"},
+        },
+    }
+    fake_deployment = SimpleNamespace(
+        create_runtime_draft=lambda *args: (runtime, False),
+        assess_runtime=lambda *args: runtime,
+        preserve_runtime_to_case=lambda *args: runtime,
+    )
+    monkeypatch.setattr(
+        app_module,
+        "services",
+        SimpleNamespace(
+            audit=audit,
+            detection_deployment=fake_deployment,
+        ),
+    )
+
+    await app_module.create_detection_runtime_draft(
+        "detection-1",
+        DetectionRuntimeDraftRequest(
+            expected_snapshot_sha256="b" * 64,
+        ),
+    )
+    await app_module.assess_detection_runtime(
+        "detection-1",
+        DetectionRuntimeAssessmentRequest(
+            expected_runtime_check_sha256="c" * 64,
+        ),
+    )
+    await app_module.preserve_detection_runtime(
+        "detection-1",
+        DetectionRuntimeCaseRequest(
+            expected_assessment_sha256="e" * 64,
+        ),
+    )
+
+    assert audit.event_types == [
+        "detection.runtime.validation.staged",
+        "detection.runtime.assessed",
+        "detection.runtime.preserved",
     ]

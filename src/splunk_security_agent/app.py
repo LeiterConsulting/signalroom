@@ -61,6 +61,9 @@ from .schemas import (
     DetectionRepositoryReviewRequest,
     DetectionRepositoryTestRequest,
     DetectionReviewRequest,
+    DetectionRuntimeAssessmentRequest,
+    DetectionRuntimeCaseRequest,
+    DetectionRuntimeDraftRequest,
     DetectionUpdate,
     DetectionValidationDraftRequest,
     DiscoveryRequest,
@@ -1129,6 +1132,138 @@ async def preserve_detection_deployment_verification(
         },
     )
     return snapshot
+
+
+@app.post(
+    "/api/detections/{detection_id}/deployment-verification/runtime-draft",
+    status_code=201,
+)
+async def create_detection_runtime_draft(
+    detection_id: str,
+    request: DetectionRuntimeDraftRequest,
+) -> dict[str, Any]:
+    try:
+        runtime, reused = services.detection_deployment.create_runtime_draft(
+            detection_id,
+            request.expected_snapshot_sha256,
+            request.earliest_time,
+            request.max_lag_seconds,
+        )
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    services.audit.record(
+        "detection.runtime.validation.staged",
+        "create",
+        target_type="validation",
+        target_id=runtime["validation_task_id"],
+        outcome="reused" if reused else "draft",
+        summary=(
+            "A bounded scheduler-health validation was bound to an exact "
+            "deployment snapshot. It still requires analyst approval."
+        ),
+        metadata={
+            "detection_id": detection_id,
+            "deployment_snapshot_sha256": runtime[
+                "deployment_snapshot_sha256"
+            ],
+            "runtime_check_sha256": runtime["check_sha256"],
+            "query_fingerprint": runtime["query_fingerprint"],
+            "validation_task_id": runtime["validation_task_id"],
+            "approval_scope": "single-execution",
+            "changes_splunk": False,
+            "reused": reused,
+        },
+    )
+    return {"runtime": runtime, "reused": reused}
+
+
+@app.post(
+    "/api/detections/{detection_id}/deployment-verification/runtime-assessment"
+)
+async def assess_detection_runtime(
+    detection_id: str,
+    request: DetectionRuntimeAssessmentRequest,
+) -> dict[str, Any]:
+    try:
+        runtime = services.detection_deployment.assess_runtime(
+            detection_id,
+            request.expected_runtime_check_sha256,
+        )
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    assessment = runtime["assessment"]
+    services.audit.record(
+        "detection.runtime.assessed",
+        "create",
+        target_type="detection",
+        target_id=detection_id,
+        outcome=assessment["status"],
+        summary=(
+            "A completed, exact-contract scheduler validation was interpreted "
+            "as snapshot-bound runtime evidence."
+        ),
+        metadata={
+            "deployment_snapshot_sha256": runtime[
+                "deployment_snapshot_sha256"
+            ],
+            "runtime_check_sha256": runtime["check_sha256"],
+            "assessment_sha256": runtime["assessment_sha256"],
+            "validation_task_id": runtime["validation_task_id"],
+            "artifact_id": assessment["validation"]["artifact_id"],
+            "runtime_status": assessment["status"],
+            "risk_level": assessment["risk_level"],
+            "changes_splunk": False,
+        },
+    )
+    return runtime
+
+
+@app.post(
+    "/api/detections/{detection_id}/deployment-verification/runtime-case"
+)
+async def preserve_detection_runtime(
+    detection_id: str,
+    request: DetectionRuntimeCaseRequest,
+) -> dict[str, Any]:
+    try:
+        runtime = services.detection_deployment.preserve_runtime_to_case(
+            detection_id,
+            request.expected_assessment_sha256,
+        )
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    assessment = runtime["assessment"]
+    services.audit.record(
+        "detection.runtime.preserved",
+        "create",
+        target_type="case-item",
+        target_id=runtime["case_item_id"],
+        outcome=assessment["status"],
+        summary=(
+            "An exact snapshot-bound runtime assessment was preserved in the "
+            "linked case timeline."
+        ),
+        metadata={
+            "detection_id": detection_id,
+            "deployment_snapshot_sha256": runtime[
+                "deployment_snapshot_sha256"
+            ],
+            "runtime_check_sha256": runtime["check_sha256"],
+            "assessment_sha256": runtime["assessment_sha256"],
+            "validation_task_id": runtime["validation_task_id"],
+            "case_item_id": runtime["case_item_id"],
+            "runtime_status": assessment["status"],
+            "risk_level": assessment["risk_level"],
+            "changes_splunk": False,
+        },
+    )
+    return runtime
 
 
 @app.patch("/api/detections/{detection_id}")

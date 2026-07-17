@@ -63,6 +63,10 @@ class DetectionService:
             raise ValueError(
                 "A detection project requires a completed validation with preserved evidence"
             )
+        if task.source_run_id.startswith("detection-runtime:"):
+            raise ValueError(
+                "A deployment runtime control cannot become a detection project"
+            )
         if self.evidence.get(task.artifact_id) is None:
             raise ValueError("The validation evidence artifact is no longer available")
         case_id = value.case_id or task.case_id

@@ -21,6 +21,7 @@ from splunk_security_agent.schemas import (
     DetectionGateRunRequest,
     DetectionReviewRequest,
     ValidationTaskCreate,
+    ValidationTaskUpdate,
 )
 from splunk_security_agent.validation import ValidationStore
 
@@ -365,3 +366,353 @@ async def test_deployment_verification_requires_exact_approved_content(tmp_path)
     ):
         await service.refresh(detection["id"], "0" * 64)
     assert client.calls == []
+
+
+def complete_runtime_validation(service, runtime, row):
+    task_id = runtime["validation_task_id"]
+    service.detections.validations.approve(task_id)
+    running = service.detections.validations.mark_running(task_id)
+    assert running is not None
+    artifact = service.detections.evidence.add(
+        ArtifactCreate(
+            title="Runtime scheduler validation",
+            content="Exact bounded scheduler result.",
+            kind="validation",
+            source="test",
+        )
+    )
+    completed = service.detections.validations.complete(
+        task_id,
+        1,
+        [row],
+        artifact.id,
+    )
+    assert completed is not None
+    return completed
+
+
+@pytest.mark.asyncio
+async def test_runtime_check_stages_exact_single_execution_validation(tmp_path):
+    response = {"results": [], "total_rows": 1, "truncated": False}
+    service, client, detection, _ = deployment_fixture(tmp_path, response)
+    client.response["results"] = [deployed_row(detection)]
+    snapshot = await service.refresh(
+        detection["id"],
+        detection["current_sha256"],
+        "security_content",
+    )
+
+    runtime, reused = service.create_runtime_draft(
+        detection["id"],
+        snapshot["snapshot_sha256"],
+    )
+    same_runtime, reused_again = service.create_runtime_draft(
+        detection["id"],
+        snapshot["snapshot_sha256"],
+    )
+    task = service.detections.validations.get(runtime["validation_task_id"])
+
+    assert reused is False
+    assert reused_again is True
+    assert same_runtime["id"] == runtime["id"]
+    assert runtime["state"] == "draft"
+    assert runtime["subject"]["deployment_snapshot_sha256"] == (
+        snapshot["snapshot_sha256"]
+    )
+    assert runtime["identity"] == {
+        "savedsearch_name": detection["content"]["title"],
+        "attribution": "scheduler-name-only",
+        "target_app": "security_content",
+        "unique_name_observed": True,
+    }
+    assert runtime["policy"]["expected_cadence_seconds"] == 600
+    assert runtime["policy"]["max_lag_seconds"] == 1800
+    assert runtime["authority"]["requires_analyst_approval"] is True
+    assert task is not None
+    assert task.status == "draft"
+    assert task.approval_scope == "single-execution"
+    assert task.row_limit == 1
+    assert 'savedsearch_name="Suspicious encoded PowerShell"' in task.spl
+    assert "index=_internal" in task.spl
+    assert len(client.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_runtime_check_requires_verified_unique_name_identity(tmp_path):
+    response = {"results": [], "total_rows": 2, "truncated": False}
+    service, client, detection, _ = deployment_fixture(tmp_path, response)
+    client.response["results"] = [
+        deployed_row(detection, app="security_content"),
+        deployed_row(detection, app="local"),
+    ]
+    snapshot = await service.refresh(
+        detection["id"],
+        detection["current_sha256"],
+        "security_content",
+    )
+
+    assert snapshot["status"] == "verified"
+    assert snapshot["runtime_identity"]["unique_name_observed"] is False
+    with pytest.raises(
+        DeploymentVerificationError,
+        match="uniquely observed",
+    ):
+        service.create_runtime_draft(
+            detection["id"],
+            snapshot["snapshot_sha256"],
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("row", "status", "risk"),
+    [
+        (
+            {
+                "executions": "12",
+                "last_run_epoch": "1784200000",
+                "last_status": "success",
+                "statuses": ["success"],
+                "avg_run_seconds": "2.5",
+                "max_run_seconds": "4.2",
+                "non_success": "0",
+                "observed_at_epoch": "1784200300",
+                "lag_seconds": "300",
+            },
+            "healthy",
+            "low",
+        ),
+        (
+            {
+                "executions": "12",
+                "last_run_epoch": "1784200000",
+                "last_status": "failed",
+                "statuses": ["failed", "success"],
+                "non_success": "1",
+                "observed_at_epoch": "1784200300",
+                "lag_seconds": "300",
+            },
+            "failing",
+            "critical",
+        ),
+        (
+            {
+                "executions": "12",
+                "last_run_epoch": "1784190000",
+                "last_status": "success",
+                "statuses": ["success"],
+                "non_success": "0",
+                "observed_at_epoch": "1784200300",
+                "lag_seconds": "10300",
+            },
+            "stale",
+            "high",
+        ),
+        (
+            {
+                "executions": "0",
+                "non_success": "0",
+                "observed_at_epoch": "1784200300",
+            },
+            "no-executions",
+            "high",
+        ),
+    ],
+)
+async def test_runtime_assessment_interprets_only_preserved_exact_result(
+    tmp_path,
+    row,
+    status,
+    risk,
+):
+    response = {"results": [], "total_rows": 1, "truncated": False}
+    service, client, detection, _ = deployment_fixture(tmp_path, response)
+    client.response["results"] = [deployed_row(detection)]
+    snapshot = await service.refresh(
+        detection["id"],
+        detection["current_sha256"],
+        "security_content",
+    )
+    runtime, _ = service.create_runtime_draft(
+        detection["id"],
+        snapshot["snapshot_sha256"],
+    )
+    completed = complete_runtime_validation(service, runtime, row)
+
+    assessed = service.assess_runtime(
+        detection["id"],
+        runtime["check_sha256"],
+    )
+
+    assert assessed["state"] == status
+    assert assessed["assessment"]["status"] == status
+    assert assessed["assessment"]["risk_level"] == risk
+    assert assessed["assessment"]["validation"]["task_id"] == completed.id
+    assert assessed["assessment"]["validation"]["artifact_id"] == (
+        completed.artifact_id
+    )
+    assert assessed["assessment"]["authority"]["changes_splunk"] is False
+    assert assessed["assessment_sha256"]
+
+
+@pytest.mark.asyncio
+async def test_runtime_contract_edit_blocks_interpretation(tmp_path):
+    response = {"results": [], "total_rows": 1, "truncated": False}
+    service, client, detection, _ = deployment_fixture(tmp_path, response)
+    client.response["results"] = [deployed_row(detection)]
+    snapshot = await service.refresh(
+        detection["id"],
+        detection["current_sha256"],
+        "security_content",
+    )
+    runtime, _ = service.create_runtime_draft(
+        detection["id"],
+        snapshot["snapshot_sha256"],
+    )
+    service.detections.validations.update(
+        runtime["validation_task_id"],
+        ValidationTaskUpdate(
+            spl="search index=_internal | stats count",
+        ),
+    )
+    complete_runtime_validation(
+        service,
+        runtime,
+        {
+            "executions": 1,
+            "last_status": "success",
+            "non_success": 0,
+            "observed_at_epoch": 1000,
+            "last_run_epoch": 900,
+            "lag_seconds": 100,
+        },
+    )
+
+    latest = service.latest(
+        detection["id"],
+        detection["current_sha256"],
+    )
+    assert latest is not None
+    assert latest["runtime_verification"]["state"] == "contract-drifted"
+    with pytest.raises(
+        DeploymentVerificationError,
+        match="contract changed",
+    ):
+        service.assess_runtime(
+            detection["id"],
+            runtime["check_sha256"],
+        )
+
+
+@pytest.mark.asyncio
+async def test_runtime_control_cannot_be_promoted_into_a_detection(tmp_path):
+    response = {"results": [], "total_rows": 1, "truncated": False}
+    service, client, detection, _ = deployment_fixture(tmp_path, response)
+    client.response["results"] = [deployed_row(detection)]
+    snapshot = await service.refresh(
+        detection["id"],
+        detection["current_sha256"],
+        "security_content",
+    )
+    runtime, _ = service.create_runtime_draft(
+        detection["id"],
+        snapshot["snapshot_sha256"],
+    )
+    complete_runtime_validation(
+        service,
+        runtime,
+        {
+            "executions": 1,
+            "last_status": "success",
+            "non_success": 0,
+            "observed_at_epoch": 1000,
+            "last_run_epoch": 900,
+            "lag_seconds": 100,
+        },
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="runtime control cannot become a detection",
+    ):
+        service.detections.create(
+            DetectionCreate(
+                validation_task_id=runtime["validation_task_id"],
+                title="Invalid scheduler-derived detection",
+            )
+        )
+
+
+@pytest.mark.asyncio
+async def test_runtime_assessment_is_digest_bound_and_case_preservation_is_idempotent(
+    tmp_path,
+):
+    response = {"results": [], "total_rows": 1, "truncated": False}
+    service, client, detection, cases = deployment_fixture(tmp_path, response)
+    client.response["results"] = [deployed_row(detection)]
+    snapshot = await service.refresh(
+        detection["id"],
+        detection["current_sha256"],
+        "security_content",
+    )
+    runtime, _ = service.create_runtime_draft(
+        detection["id"],
+        snapshot["snapshot_sha256"],
+    )
+    complete_runtime_validation(
+        service,
+        runtime,
+        {
+            "executions": 9,
+            "last_status": "success",
+            "statuses": ["success"],
+            "non_success": 0,
+            "observed_at_epoch": 2000,
+            "last_run_epoch": 1900,
+            "lag_seconds": 100,
+            "avg_run_seconds": 1.4,
+            "max_run_seconds": 2.1,
+        },
+    )
+    assessed = service.assess_runtime(
+        detection["id"],
+        runtime["check_sha256"],
+    )
+    before = cases.get(detection["case_id"])
+    assert before is not None
+
+    preserved = service.preserve_runtime_to_case(
+        detection["id"],
+        assessed["assessment_sha256"],
+    )
+    after = cases.get(detection["case_id"])
+    assert after is not None
+    assert preserved["case_item_id"]
+    assert len(after.items) == len(before.items) + 1
+    assert after.items[-1].metadata[
+        "detection_runtime_assessment_sha256"
+    ] == assessed["assessment_sha256"]
+    assert "does not prove alert firing" in after.items[-1].content
+
+    service.preserve_runtime_to_case(
+        detection["id"],
+        assessed["assessment_sha256"],
+    )
+    idempotent = cases.get(detection["case_id"])
+    assert idempotent is not None
+    assert len(idempotent.items) == len(after.items)
+
+    with sqlite3.connect(service.store.path) as db:
+        db.execute(
+            """UPDATE detection_runtime_checks
+            SET assessment='{}' WHERE id=?""",
+            (runtime["id"],),
+        )
+    with pytest.raises(
+        DeploymentVerificationError,
+        match="assessment is invalid",
+    ):
+        service.preserve_runtime_to_case(
+            detection["id"],
+            assessed["assessment_sha256"],
+        )

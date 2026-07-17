@@ -1453,8 +1453,13 @@ function renderValidations() {
     if (task.status === 'approved') actions.push(`<button class="button primary small" data-run-validation="${escapeHtml(task.id)}">Run approved validation</button>`);
     if (task.status === 'complete') {
       const detection = state.detections.find(item => item.source_validation_id === task.id);
+      const runtimeDetectionId = task.source_run_id?.startsWith('detection-runtime:')
+        ? task.source_run_id.slice('detection-runtime:'.length)
+        : '';
       actions.push(`<button class="button primary small" data-inspect-validation="${escapeHtml(task.id)}">Inspect preserved result</button>`);
-      actions.push(detection
+      actions.push(runtimeDetectionId
+        ? `<button class="button ghost small" data-open-detection="${escapeHtml(runtimeDetectionId)}">Interpret runtime evidence</button>`
+        : detection
         ? `<button class="button ghost small" data-open-detection="${escapeHtml(detection.id)}">Open detection v${Number(detection.current_version)}</button>`
         : `<button class="button ghost small" data-create-detection="${escapeHtml(task.id)}">Create detection draft</button>`);
     }
@@ -1583,9 +1588,12 @@ function openValidationResult(task) {
   ];
   if (artifact) actions.push({ label:'Open evidence artifact', kind:'artifact', target:artifact.id });
   const detection = state.detections.find(item => item.source_validation_id === task.id);
-  actions.push(detection
-    ? { label:`Open detection v${detection.current_version}`, kind:'detection', target:detection.id }
-    : { label:'Create detection draft', kind:'detection-create', target:task.id });
+  const runtimeDetectionId = task.source_run_id?.startsWith('detection-runtime:')
+    ? task.source_run_id.slice('detection-runtime:'.length)
+    : '';
+  if (detection) actions.push({ label:`Open detection v${detection.current_version}`, kind:'detection', target:detection.id });
+  else if (!runtimeDetectionId) actions.push({ label:'Create detection draft', kind:'detection-create', target:task.id });
+  if (runtimeDetectionId) actions.unshift({ label:'Interpret deployment runtime result', kind:'detection', target:runtimeDetectionId });
   actions.push({ label:'Add result to case', kind:'case-item', item:{ kind:'evidence', title:task.title, content:`Approved SPL:\n${task.spl}\n\nWindow: ${task.earliest_time} to ${task.latest_time}\nRows returned: ${task.result_count}\nArtifact: ${task.artifact_id}`, source:'SignalRoom validation queue', confidence:'high', status:'observed', metadata:{ validation_id:task.id, artifact_id:task.artifact_id, query_fingerprint:task.query_fingerprint, evidence_refs:task.evidence_refs } } });
   showDetail({
     eyebrow:'OBSERVED · APPROVED VALIDATION', title:task.title,
@@ -1619,7 +1627,7 @@ function detectionForValidation(validationId) {
 
 function renderDetectionCandidates() {
   const container = $('#detectionCandidates'); if (!container) return;
-  const complete = state.validations.filter(task => task.status === 'complete');
+  const complete = state.validations.filter(task => task.status === 'complete' && !task.source_run_id?.startsWith('detection-runtime:'));
   const available = complete.filter(task => !detectionForValidation(task.id));
   $('#showDetectionCandidates').disabled = !available.length;
   container.innerHTML = available.length ? available.map(task => `
@@ -1676,7 +1684,7 @@ async function loadDetections() {
 
 async function createDetectionFromValidation(validationId) {
   const task = state.validations.find(item => item.id === validationId);
-  if (!task || task.status !== 'complete') return;
+  if (!task || task.status !== 'complete' || task.source_run_id?.startsWith('detection-runtime:')) return;
   try {
     const detection = await api('/api/detections', {
       method:'POST',
@@ -1815,6 +1823,56 @@ function detectionRepositoryMarkup(detection) {
   </section>`;
 }
 
+function detectionRuntimeMarkup(detection, snapshot) {
+  const runtime = snapshot.runtime_verification;
+  const identity = snapshot.runtime_identity || {};
+  const eligible = snapshot.status === 'verified' && identity.unique_name_observed === true;
+  if (!runtime) {
+    const reason = snapshot.status !== 'verified'
+      ? 'Runtime attribution stays locked until the exact saved-search definition is verified and enabled.'
+      : identity.unique_name_observed !== true
+      ? 'Scheduler telemetry is name-bound. Refresh the definition catalog and resolve duplicate saved-search names before using it.'
+      : 'Stage one bounded scheduler query tied to this exact deployment snapshot. The validation remains editable, unapproved, and unexecuted until an analyst acts.';
+    return `<section class="deployment-runtime empty">
+      <header><div><span>RUNTIME EVIDENCE · SEPARATE CLAIM</span><h5>${eligible ? 'Definition verified; operation not yet observed' : 'Runtime verification unavailable'}</h5><p>${escapeHtml(reason)}</p></div>${eligible ? '<button class="button primary" type="button" data-stage-runtime>Stage runtime validation</button>' : ''}</header>
+      <div class="runtime-boundary"><b>No automatic <code>_internal</code> search</b><span>SignalRoom can draft the exact scheduler check, but only the existing single-execution approval queue can run it.</span></div>
+    </section>`;
+  }
+  const assessment = runtime.assessment;
+  const observation = assessment?.observation || {};
+  const validation = runtime.validation_task || {};
+  const stateLabel = String(runtime.state || validation.status || 'unknown').replaceAll('-', ' ');
+  const actions = [];
+  if (!assessment) {
+    actions.push(`<button class="button ghost" type="button" data-open-runtime-validation="${escapeHtml(runtime.validation_task_id)}">Open approval queue</button>`);
+    if (runtime.ready_to_assess) actions.push('<button class="button primary" type="button" data-assess-runtime>Interpret preserved result</button>');
+    if (['contract-drifted','validation-missing','expired'].includes(runtime.state)) actions.push('<button class="button primary" type="button" data-stage-runtime>Stage replacement check</button>');
+  } else {
+    actions.push('<button class="button ghost" type="button" data-stage-runtime>Stage fresh runtime check</button>');
+    if (detection.case_id && runtime.case_item_id) {
+      actions.push(`<button class="button ghost" type="button" data-open-runtime-case="${escapeHtml(detection.case_id)}">Open preserved case entry</button>`);
+    } else if (detection.case_id) {
+      actions.push('<button class="button ghost" type="button" data-preserve-runtime>Preserve assessment to case</button>');
+    }
+  }
+  const result = assessment ? `<div class="runtime-metrics">
+    <article><span>Executions</span><b>${observation.executions == null ? '—' : Number(observation.executions).toLocaleString()}</b><small>${escapeHtml(runtime.policy.earliest_time)} → now</small></article>
+    <article><span>Latest outcome</span><b>${escapeHtml(observation.last_status || 'not observed')}</b><small>${Number(observation.non_success || 0).toLocaleString()} non-success</small></article>
+    <article><span>Last-run lag</span><b>${observation.lag_seconds == null ? '—' : `${Math.round(Number(observation.lag_seconds)).toLocaleString()}s`}</b><small>Threshold ${Number(runtime.policy.max_lag_seconds).toLocaleString()}s</small></article>
+    <article><span>Runtime</span><b>${observation.avg_run_seconds == null ? '—' : `${Number(observation.avg_run_seconds).toFixed(2)}s`}</b><small>Max ${observation.max_run_seconds == null ? 'not observed' : `${Number(observation.max_run_seconds).toFixed(2)}s`}</small></article>
+  </div>
+  <div class="runtime-recommendation"><b>Next analyst action</b><p>${escapeHtml(assessment.recommended_action)}</p></div>
+  <dl class="runtime-provenance"><div><dt>Assessment digest</dt><dd><code>${escapeHtml(runtime.assessment_sha256)}</code></dd></div><div><dt>Evidence artifact</dt><dd><code>${escapeHtml(assessment.validation.artifact_id)}</code></dd></div></dl>` : `<div class="runtime-queue-state">
+    <b>${escapeHtml(stateLabel)}</b><span>${validation.exact_contract === false ? 'The queued query no longer matches the snapshot-bound contract.' : validation.status === 'complete' ? 'The exact result is preserved and ready for deterministic interpretation.' : 'Review, approve, and run this exact contract in the validation queue.'}</span>
+    ${validation.error ? `<small>${escapeHtml(validation.error)}</small>` : ''}
+  </div>`;
+  return `<section class="deployment-runtime ${escapeHtml(assessment?.risk_level || runtime.state || '')}">
+    <header><div><span>RUNTIME EVIDENCE · ${escapeHtml(assessment ? `${assessment.risk_level} RISK` : 'AWAITING APPROVAL')}</span><h5>${escapeHtml(assessment?.status?.replaceAll('-', ' ') || stateLabel)}</h5><p>Check <code>${escapeHtml(runtime.check_sha256)}</code> · validation <code>${escapeHtml(runtime.validation_task_id)}</code></p></div><div class="runtime-actions">${actions.join('')}</div></header>
+    ${result}
+    <div class="runtime-boundary"><b>Name-bound scheduler evidence</b><span>This check is tied to deployment snapshot <code>${escapeHtml(runtime.deployment_snapshot_sha256)}</code>. It does not prove firing, notable-event creation, suppression behavior, or response delivery.</span></div>
+  </section>`;
+}
+
 function detectionDeploymentMarkup(detection) {
   if (detection.status !== 'approved') return '';
   const snapshot = detection.deployment_verification;
@@ -1856,6 +1914,7 @@ function detectionDeploymentMarkup(detection) {
     ${controls ? `<ul class="deployment-controls">${controls}</ul>` : ''}
     ${candidates}
     <details class="deployment-limitations"><summary>Controls this MCP response cannot prove</summary><ul>${unobserved}</ul><p>Use scheduler and alert-runtime telemetry as a separate evidence source.</p></details>
+    ${detectionRuntimeMarkup(detection, snapshot)}
     <footer>${caseAction}</footer>
     <div class="deployment-authority"><b>Read-only authority</b><span>This observation did not deploy, enable, schedule, or change the saved search. A matching definition does not prove it ran or fired.</span></div>
   </section>`;
@@ -2151,6 +2210,69 @@ async function preserveDetectionDeployment() {
   } catch (error) { toast(error.message); }
 }
 
+async function openRuntimeValidation(taskId) {
+  await loadValidations();
+  navigateView('discovery');
+  $('#validationWorkspace').scrollIntoView({behavior:'smooth',block:'start'});
+  setTimeout(() => {
+    const card = document.querySelector(`[data-validation-id="${CSS.escape(taskId)}"]`);
+    if (card) {
+      card.classList.add('package-focus');
+      card.scrollIntoView({behavior:'smooth',block:'center'});
+      setTimeout(() => card.classList.remove('package-focus'), 3500);
+    }
+  }, 350);
+}
+
+async function stageDetectionRuntime() {
+  const detection = state.activeDetection;
+  const snapshot = detection?.deployment_verification;
+  if (!detection || !snapshot) return;
+  const button = document.querySelector('[data-stage-runtime]');
+  if (button) { button.disabled = true; button.textContent = 'Binding contract…'; }
+  try {
+    const result = await api(`/api/detections/${encodeURIComponent(detection.id)}/deployment-verification/runtime-draft`, {method:'POST',body:JSON.stringify({expected_snapshot_sha256:snapshot.snapshot_sha256})});
+    snapshot.runtime_verification = result.runtime;
+    renderDetectionDetail();
+    await openRuntimeValidation(result.runtime.validation_task_id);
+    toast(result.reused ? 'Opened the existing snapshot-bound runtime check' : 'Runtime check staged; review and approve the single execution');
+  } catch (error) {
+    renderDetectionDetail();
+    toast(error.message);
+  }
+}
+
+async function assessDetectionRuntime() {
+  const detection = state.activeDetection;
+  const snapshot = detection?.deployment_verification;
+  const runtime = snapshot?.runtime_verification;
+  if (!detection || !runtime?.ready_to_assess) return;
+  const button = document.querySelector('[data-assess-runtime]');
+  if (button) { button.disabled = true; button.textContent = 'Interpreting evidence…'; }
+  try {
+    snapshot.runtime_verification = await api(`/api/detections/${encodeURIComponent(detection.id)}/deployment-verification/runtime-assessment`, {method:'POST',body:JSON.stringify({expected_runtime_check_sha256:runtime.check_sha256})});
+    renderDetectionDetail();
+    const assessment = snapshot.runtime_verification.assessment;
+    toast(`Runtime evidence: ${assessment.status.replaceAll('-', ' ')} · ${assessment.risk_level} risk`);
+  } catch (error) {
+    renderDetectionDetail();
+    toast(error.message);
+  }
+}
+
+async function preserveDetectionRuntime() {
+  const detection = state.activeDetection;
+  const runtime = detection?.deployment_verification?.runtime_verification;
+  if (!detection || !runtime?.assessment || runtime.case_item_id) return;
+  const approved = confirm(`Preserve this exact runtime assessment to the linked case?\n\nAssessment SHA-256: ${runtime.assessment_sha256}\nStatus: ${runtime.assessment.status}\nRisk: ${runtime.assessment.risk_level}\n\nThis records local evidence only. It does not change Splunk.`);
+  if (!approved) return;
+  try {
+    detection.deployment_verification.runtime_verification = await api(`/api/detections/${encodeURIComponent(detection.id)}/deployment-verification/runtime-case`, {method:'POST',body:JSON.stringify({expected_assessment_sha256:runtime.assessment_sha256})});
+    renderDetectionDetail();
+    toast('Exact runtime assessment preserved to the linked case');
+  } catch (error) { toast(error.message); }
+}
+
 async function retireDetection() {
   const detection = state.activeDetection; if (!detection) return;
   if (!confirm(`Retire “${detection.content.title}”? Its versions, reviews, exports, and evidence links will be retained.`)) return;
@@ -2382,6 +2504,13 @@ document.addEventListener('click', async event => {
   if (repositoryCase) { setView('cases'); await openCase(repositoryCase.dataset.openRepositoryCase); return; }
   if (event.target.closest('[data-refresh-deployment]')) { await refreshDetectionDeployment(); return; }
   if (event.target.closest('[data-preserve-deployment]')) { await preserveDetectionDeployment(); return; }
+  if (event.target.closest('[data-stage-runtime]')) { await stageDetectionRuntime(); return; }
+  if (event.target.closest('[data-assess-runtime]')) { await assessDetectionRuntime(); return; }
+  if (event.target.closest('[data-preserve-runtime]')) { await preserveDetectionRuntime(); return; }
+  const runtimeValidation = event.target.closest('[data-open-runtime-validation]');
+  if (runtimeValidation) { await openRuntimeValidation(runtimeValidation.dataset.openRuntimeValidation); return; }
+  const runtimeCase = event.target.closest('[data-open-runtime-case]');
+  if (runtimeCase) { setView('cases'); await openCase(runtimeCase.dataset.openRuntimeCase); return; }
   const deploymentCase = event.target.closest('[data-open-deployment-case]');
   if (deploymentCase) { setView('cases'); await openCase(deploymentCase.dataset.openDeploymentCase); return; }
   if (event.target.closest('[data-retire-detection]')) { await retireDetection(); return; }

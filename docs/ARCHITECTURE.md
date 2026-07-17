@@ -161,6 +161,16 @@ identities fail closed, SPL drift is critical, and absence is classified as miss
 `truncated` establish an exhaustive response. Scheduler execution, actions, suppression, and firing remain
 unobserved. Preserving a digest-bound result to a linked case is a separate local action.
 
+Runtime verification is a second, deliberately separate evidence chain. Only a verified, enabled definition with
+a uniquely observed saved-search name can stage a scheduler-health query. The draft binds the approved detection
+hash, immutable deployment snapshot digest, exact SPL fingerprint, cron-derived observation window and lag
+threshold, and single-execution approval scope. SignalRoom does not approve or execute the query. After the normal
+validation queue preserves a result, deterministic interpretation rejects edited contracts and evidence that
+predates the definition snapshot, then classifies execution as healthy, degraded, failing, stale, no-executions,
+or inconclusive. The immutable assessment retains its validation artifact and digest; preserving it to a case is
+another explicit local action. Scheduler attribution is name-only and never becomes proof of alert firing,
+notable-event creation, suppression behavior, or response delivery.
+
 ## Outbound delivery is a separate authority
 
 `AssuranceDeliveryService` owns a separately opt-in generic webhook policy and restart-safe delivery worker. A

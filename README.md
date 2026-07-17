@@ -440,6 +440,13 @@ Assurance-generated drafts carry a seven-day expiry, a package reference, and a 
 Expiry invalidates an unexecuted draft or approval without modifying completed evidence. A recurring package reuses
 an existing live fingerprint instead of creating duplicate validation work.
 
+Approved detections add a snapshot-bound runtime path after explicit Splunk definition verification. SignalRoom
+stages—but does not approve or run—a one-row scheduler-health validation for the uniquely observed saved-search
+name. Once the normal queue preserves that exact result, the detection workspace interprets executions, latest
+outcome, non-success count, last-run lag, and runtime duration against a cron-derived threshold. The durable
+assessment links the deployment digest, query fingerprint, validation artifact, and optional case entry while
+remaining explicit that scheduler activity is not alert-firing or response-delivery proof.
+
 ### Local audit and recommended next increment
 
 Major local control-plane decisions and every outbound delivery action are written to `data/audit.db` as an

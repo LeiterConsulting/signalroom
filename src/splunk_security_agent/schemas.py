@@ -477,6 +477,30 @@ class DetectionDeploymentCaseRequest(BaseModel):
     )
 
 
+class DetectionRuntimeDraftRequest(BaseModel):
+    expected_snapshot_sha256: str = Field(
+        min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$"
+    )
+    earliest_time: str = Field(default="", max_length=64)
+    max_lag_seconds: int | None = Field(
+        default=None,
+        ge=60,
+        le=30 * 24 * 60 * 60,
+    )
+
+
+class DetectionRuntimeAssessmentRequest(BaseModel):
+    expected_runtime_check_sha256: str = Field(
+        min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$"
+    )
+
+
+class DetectionRuntimeCaseRequest(BaseModel):
+    expected_assessment_sha256: str = Field(
+        min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$"
+    )
+
+
 class DetectionRepositoryTestRequest(BaseModel):
     settings: DetectionRepositorySettings
 
