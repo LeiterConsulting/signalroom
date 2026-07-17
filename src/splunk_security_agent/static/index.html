@@ -57,8 +57,8 @@
             </div>
             <form class="composer" id="chatForm">
               <div class="composer-tools">
-                <label class="toggle"><input type="checkbox" id="includeContext" checked><span></span>Use local context</label>
-                <label class="toggle hf-query-approval" id="hfQueryApproval" hidden><input type="checkbox" id="approveHf"><span></span>Approve HF cloud for this question</label>
+                <label class="toggle"><input type="checkbox" id="includeContext" checked><span aria-hidden="true"></span>Use local context</label>
+                <label class="toggle hf-query-approval" id="hfQueryApproval" hidden><input type="checkbox" id="approveHf"><span aria-hidden="true"></span>Approve HF cloud for this question</label>
                 <select id="investigationMode" aria-label="Investigation mode">
                   <option value="auto">Auto mode</option><option value="general">General analysis</option>
                   <option value="discovery">Environment discovery</option><option value="detection">Detection validation</option>
@@ -110,7 +110,7 @@
           <article class="wide-card assurance-workspace" aria-labelledby="assuranceTitle">
             <div class="panel-heading"><div><p class="eyebrow">CONTINUOUS ASSURANCE</p><h3 id="assuranceTitle">Re-run discovery safely—and know what persists</h3><p class="panel-intro">Opt in to a durable local schedule. SignalRoom separates transient changes from recurring drift, then packages bounded response work without approving or running SPL.</p></div><span id="assuranceWorker" class="subtle-pill">Loading worker</span></div>
             <form id="assuranceForm" class="assurance-policy-form">
-              <label class="switch-line assurance-enable"><span><b>Enable scheduled assurance</b><small>Disabled by default; enabling schedules the first run after the selected interval</small></span><input type="checkbox" id="assuranceEnabled"><i></i></label>
+              <label class="switch-line assurance-enable"><span><b>Enable scheduled assurance</b><small>Disabled by default; enabling schedules the first run after the selected interval</small></span><input type="checkbox" id="assuranceEnabled"><span class="switch-control" aria-hidden="true"></span></label>
               <div class="assurance-policy-grid">
                 <label><span>Scheduled discovery depth</span><select id="assuranceDepth"><option value="quick">Quick · 4 calls</option><option value="standard">Standard · up to 9 calls</option><option value="deep">Deep · up to 12 calls</option></select></label>
                 <label><span>Run interval</span><select id="assuranceInterval"><option value="15">Every 15 minutes</option><option value="60">Hourly</option><option value="360">Every 6 hours</option><option value="1440">Daily</option><option value="10080">Weekly</option></select></label>
@@ -136,7 +136,7 @@
                 <header><div><span>CONTROLLED OUTBOUND DELIVERY</span><h4 id="deliveryTitle">Send the package—not the Splunk data</h4><p>Preview the exact redacted JSON, approve its hash, and track every bounded attempt locally. Delivery can never approve or execute validation SPL.</p></div><span class="subtle-pill" id="deliveryStatus">Disabled</span></header>
                 <details class="delivery-policy"><summary>Configure generic webhook policy</summary>
                   <form id="deliveryForm">
-                    <label class="switch-line"><span><b>Enable outbound response delivery</b><small>Opt in separately from continuous assurance; nothing is sent while disabled</small></span><input type="checkbox" id="deliveryEnabled"><i></i></label>
+                    <label class="switch-line"><span><b>Enable outbound response delivery</b><small>Opt in separately from continuous assurance; nothing is sent while disabled</small></span><input type="checkbox" id="deliveryEnabled"><span class="switch-control" aria-hidden="true"></span></label>
                     <div class="delivery-policy-grid">
                       <label><span>Approval mode</span><select id="deliveryMode"><option value="manual">Manual · preview and approve every package</option><option value="automatic">Automatic · apply the policy to eligible packages</option></select></label>
                       <label><span>Minimum severity</span><select id="deliverySeverity"><option value="critical">Critical</option><option value="high" selected>High</option><option value="medium">Medium</option><option value="low">Low</option></select></label>
@@ -148,7 +148,7 @@
                       <label class="full secret-revoke"><input id="deliveryClearAuthorization" type="checkbox"><span>Remove the saved authorization header when this policy is saved</span></label>
                       <label><span>Maximum attempts</span><input id="deliveryAttempts" type="number" min="1" max="8" value="3"></label>
                       <label><span>Initial retry backoff</span><select id="deliveryBackoff"><option value="10">10 seconds</option><option value="60" selected>1 minute</option><option value="300">5 minutes</option><option value="900">15 minutes</option></select></label>
-                      <label class="full switch-line nested-switch"><span><b>Verify webhook TLS certificates</b><small>Recommended. A private CA path can be supplied for internal destinations.</small></span><input type="checkbox" id="deliveryVerifyTls" checked><i></i></label>
+                      <label class="full switch-line nested-switch"><span><b>Verify webhook TLS certificates</b><small>Recommended. A private CA path can be supplied for internal destinations.</small></span><input type="checkbox" id="deliveryVerifyTls" checked><span class="switch-control" aria-hidden="true"></span></label>
                       <label class="full"><span>Private CA bundle path <em>optional</em></span><input id="deliveryCaBundle" maxlength="1000" placeholder="C:\certs\organization-ca.pem or /etc/ssl/org-ca.pem"></label>
                     </div>
                     <fieldset class="delivery-categories"><legend>Eligible signal categories</legend><label><input type="checkbox" value="finding" checked> Findings</label><label><input type="checkbox" value="coverage" checked> Coverage</label><label><input type="checkbox" value="inventory" checked> Inventory</label><label><input type="checkbox" value="mltk" checked> MLTK drift</label><label><input type="checkbox" value="collection" checked> Collection failures</label></fieldset>
@@ -282,12 +282,12 @@
       <div class="setup-progress"><span class="active">1</span><i></i><span>2</span><i></i><span>3</span><div><b>Splunk</b><b>Models</b><b>Policy</b></div></div>
       <form id="settingsForm">
         <div class="form-section"><h3>Splunk MCP</h3><p>Connect a compatible Splunk MCP endpoint. The optional guided demo uses isolated sample responses and never searches Splunk.</p>
-          <label class="switch-line"><span><b>Enable guided demo workspace</b><small>Opt in to sample inventory plus an interactive product tour; searches are never executed</small></span><input type="checkbox" id="demoMode"><i></i></label>
+          <label class="switch-line"><span><b>Enable guided demo workspace</b><small>Opt in to sample inventory plus an interactive product tour; searches are never executed</small></span><input type="checkbox" id="demoMode"><span class="switch-control" aria-hidden="true"></span></label>
           <div class="form-grid">
             <label><span>Connection name</span><input id="splunkName" placeholder="Production search head"></label>
             <label class="full"><span>MCP endpoint URL</span><input id="splunkUrl" type="url" placeholder="https://splunk.example:8089/services/mcp"><small class="field-help">Copy this from the Splunk MCP Server app. The standard path is <code>/services/mcp</code> (plural).</small></label>
             <label class="full"><span>Encrypted MCP token</span><input id="splunkToken" type="password" placeholder="Leave blank to keep existing token"><small class="field-help">Use the encrypted token created in the Splunk MCP Server app—not a normal Splunk REST token.</small></label>
-            <label class="full switch-line nested-switch"><span><b>Verify TLS certificates</b><small>Recommended. Disable only for a trusted self-signed development endpoint.</small></span><input type="checkbox" id="verifySplunkTls" checked><i></i></label>
+            <label class="full switch-line nested-switch"><span><b>Verify TLS certificates</b><small>Recommended. Disable only for a trusted self-signed development endpoint.</small></span><input type="checkbox" id="verifySplunkTls" checked><span class="switch-control" aria-hidden="true"></span></label>
             <div class="tls-warning full" id="tlsWarning" hidden><b>TLS verification is disabled</b><span>The connection remains encrypted, but SignalRoom will not validate the server certificate or identity.</span></div>
             <label class="full" id="caBundleLabel"><span>Private CA bundle path <em>optional</em></span><input id="splunkCaBundle" placeholder="C:\certs\organization-ca.pem or /etc/ssl/org-ca.pem"></label>
           </div>
@@ -328,7 +328,7 @@
             <label class="full"><span>Hugging Face cloud usage policy</span><select id="hfPolicy"><option value="disabled">Disabled · never send evidence to hosted inference</option><option value="ask">Ask · require approval for every cloud question</option><option value="allow">Allowed · use hosted specialists automatically</option></select><small class="field-help">This policy applies only when the cloud runtime is selected. Local SecureBERT inference does not require cloud approval.</small></label>
           </div>
         </div>
-        <div class="form-section"><h3>Execution policy</h3><label class="switch-line"><span><b>Allow write-capable tools</b><small>Keep disabled for analyst workspaces; not implemented in this release</small></span><input type="checkbox" id="allowWrites" disabled><i></i></label></div>
+        <div class="form-section"><h3>Execution policy</h3><label class="switch-line"><span><b>Allow write-capable tools</b><small>Keep disabled for analyst workspaces; not implemented in this release</small></span><input type="checkbox" id="allowWrites" disabled><span class="switch-control" aria-hidden="true"></span></label></div>
         <footer><span><i class="lock-icon">◆</i> Tokens are encrypted at rest and never returned by the API.</span><button class="button primary" type="submit">Save workspace</button></footer>
       </form>
     </section>
