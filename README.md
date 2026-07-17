@@ -110,6 +110,13 @@ An allowed remote push and GitHub draft pull request each require another explic
 the locally installed and authenticated GitHub CLI. None of these repository actions writes to Splunk, enables a
 saved search, or grants SignalRoom deployment authority.
 
+After a draft pull request exists, **Refresh PR + CI status** performs one explicit read-only GitHub observation;
+SignalRoom never polls in the background. The durable snapshot binds the observed PR head to the approved commit,
+normalizes review and check state, and recommends the next analyst action. A changed head is a critical stop even
+when CI is green. An analyst can preserve that exact snapshot by SHA-256 to a linked case timeline and deep-link
+back to the detection. Merge state remains repository evidence—not proof that a saved search was deployed or
+enabled in Splunk.
+
 ## Model setup
 
 The default registry describes six local-first profiles. The installer downloads only the selected

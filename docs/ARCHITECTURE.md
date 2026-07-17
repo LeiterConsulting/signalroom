@@ -146,6 +146,13 @@ and exact commit binding. Push verifies the remote ref after transfer. Draft PR 
 identity, an authenticated local GitHub CLI, and an additional explicit action. Repository handoff never changes
 the generated disabled saved-search policy and does not cross the Splunk write boundary.
 
+Repository feedback is a later, read-only state transition and is never polled implicitly. An explicit refresh
+uses the local GitHub CLI to capture PR identity, exact head OID, lifecycle, review decision, mergeability, and
+normalized check results. `DetectionRepositoryStore` keeps each observation as an immutable SHA-256 snapshot.
+Head or branch drift from the approved handoff becomes a critical stop condition. A separately requested case
+action binds one exact snapshot digest into the linked case timeline; the timeline item deep-links to the
+detection and states that repository merge is not deployment proof.
+
 ## Outbound delivery is a separate authority
 
 `AssuranceDeliveryService` owns a separately opt-in generic webhook policy and restart-safe delivery worker. A

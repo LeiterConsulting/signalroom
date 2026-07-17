@@ -51,8 +51,10 @@ from .schemas import (
     DetectionGateRunRequest,
     DetectionGitExportRequest,
     DetectionRepositoryApprovalRequest,
+    DetectionRepositoryCaseRequest,
     DetectionRepositoryPreviewRequest,
     DetectionRepositoryRemoteRequest,
+    DetectionRepositoryReviewRequest,
     DetectionRepositoryTestRequest,
     DetectionReviewRequest,
     DetectionUpdate,
@@ -1410,6 +1412,84 @@ async def open_detection_repository_pull_request(
             "commit_sha": result["commit_sha"],
             "pull_request_url": result["pull_request_url"],
             "draft": True,
+        },
+    )
+    return result
+
+
+@app.post("/api/detection-repository/handoffs/{handoff_id}/review-refresh")
+async def refresh_detection_repository_review(
+    handoff_id: str,
+    request: DetectionRepositoryReviewRequest,
+) -> dict[str, Any]:
+    try:
+        result = services.detection_repository.refresh_pull_request(
+            handoff_id,
+            request.expected_commit_sha,
+        )
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    review = result["review"]
+    services.audit.record(
+        "detection.repository.review.refreshed",
+        "read",
+        target_type="detection-repository-handoff",
+        target_id=handoff_id,
+        outcome=review["risk_level"],
+        summary=(
+            "An explicit read-only GitHub refresh captured exact pull-request, "
+            "review, and CI state."
+        ),
+        metadata={
+            "detection_id": result["detection_id"],
+            "commit_sha": result["commit_sha"],
+            "snapshot_sha256": review["snapshot_sha256"],
+            "identity_status": review["identity_status"],
+            "lifecycle": review["lifecycle"],
+            "review_decision": review["review_decision"],
+            "checks_status": review["checks_status"],
+            "risk_level": review["risk_level"],
+            "changes_repository": False,
+            "deploys_to_splunk": False,
+        },
+    )
+    return result
+
+
+@app.post("/api/detection-repository/handoffs/{handoff_id}/review-case")
+async def preserve_detection_repository_review(
+    handoff_id: str,
+    request: DetectionRepositoryCaseRequest,
+) -> dict[str, Any]:
+    try:
+        result = services.detection_repository.preserve_review_to_case(
+            handoff_id,
+            request.expected_snapshot_sha256,
+        )
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    review = result["review"]
+    services.audit.record(
+        "detection.repository.review.preserved",
+        "create",
+        target_type="case-item",
+        target_id=review["case_item_id"],
+        outcome=review["risk_level"],
+        summary=(
+            "An exact repository feedback snapshot was preserved in the "
+            "linked case timeline."
+        ),
+        metadata={
+            "detection_id": result["detection_id"],
+            "handoff_id": handoff_id,
+            "snapshot_sha256": review["snapshot_sha256"],
+            "case_item_id": review["case_item_id"],
+            "identity_status": review["identity_status"],
+            "lifecycle": review["lifecycle"],
         },
     )
     return result

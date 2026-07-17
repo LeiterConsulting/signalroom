@@ -9,12 +9,13 @@ import subprocess
 import zipfile
 from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
+from threading import RLock
 from typing import Any
 from urllib.parse import urlparse
 from uuid import uuid4
 
 from ..config import ConfigStore
-from ..schemas import DetectionRepositorySettings
+from ..schemas import CaseItemCreate, DetectionRepositorySettings
 from .gitops_verifier import VerificationError, verify_path
 from .repository_store import DetectionRepositoryStore
 from .service import DetectionService
@@ -51,6 +52,7 @@ class DetectionRepositoryService:
         self.preview_root = self.runtime_root / "previews"
         self.worktree_root = self.runtime_root / "worktrees"
         self.disabled_hooks_root = self.runtime_root / "disabled-git-hooks"
+        self._case_lock = RLock()
         self.preview_root.mkdir(parents=True, exist_ok=True)
         self.worktree_root.mkdir(parents=True, exist_ok=True)
         self.disabled_hooks_root.mkdir(parents=True, exist_ok=True)
@@ -605,12 +607,122 @@ class DetectionRepositoryService:
             self.store.mark_pull_request(handoff_id, expected_commit_sha, url)
         )
 
+    def refresh_pull_request(
+        self,
+        handoff_id: str,
+        expected_commit_sha: str,
+    ) -> dict[str, Any]:
+        record = self._record(handoff_id)
+        self._validate_commit(record, expected_commit_sha)
+        if (
+            record["status"] != "pull-request-opened"
+            or not record["pull_request_url"]
+        ):
+            raise RepositoryHandoffError(
+                "Open a draft pull request before refreshing repository feedback"
+            )
+        repository = self._repository_for_record(record)
+        remote_url = self._remote_url(repository, record["remote_name"])
+        github_repository = self._github_repository(remote_url)
+        pull_request_number = self._pull_request_number(
+            record["pull_request_url"],
+            github_repository,
+        )
+        pull_request, checks = self._github_pull_request(
+            repository,
+            github_repository,
+            record["pull_request_url"],
+        )
+        snapshot = self._review_snapshot(
+            record,
+            github_repository,
+            pull_request_number,
+            pull_request,
+            checks,
+        )
+        snapshot_sha256 = self._sha256(self._canonical(snapshot))
+        self.store.record_review(
+            handoff_id,
+            record["detection_id"],
+            record["commit_sha"],
+            snapshot_sha256,
+            snapshot,
+        )
+        return self.public(record)
+
+    def preserve_review_to_case(
+        self,
+        handoff_id: str,
+        expected_snapshot_sha256: str,
+    ) -> dict[str, Any]:
+        record = self._record(handoff_id)
+        if (
+            record["status"] != "pull-request-opened"
+            or not record["pull_request_url"]
+        ):
+            raise RepositoryHandoffError(
+                "Repository feedback requires an opened pull request"
+            )
+        review = self.store.review_by_sha256(
+            handoff_id,
+            expected_snapshot_sha256,
+        )
+        if review is None:
+            raise RepositoryHandoffError(
+                "Repository feedback snapshot changed; refresh before preserving"
+            )
+        payload = {
+            key: value
+            for key, value in review.items()
+            if key
+            not in {
+                "id",
+                "handoff_id",
+                "detection_id",
+                "commit_sha",
+                "snapshot_sha256",
+                "case_item_id",
+            }
+        }
+        if self._sha256(self._canonical(payload)) != expected_snapshot_sha256:
+            raise RepositoryHandoffError(
+                "Stored repository feedback snapshot is invalid"
+            )
+        if review["commit_sha"] != record["commit_sha"]:
+            raise RepositoryHandoffError(
+                "Repository feedback does not match the approved handoff commit"
+            )
+        if review["case_item_id"]:
+            return self.public(record)
+        detection = self.detections.store.get(record["detection_id"])
+        if detection is None:
+            raise RepositoryHandoffError("Linked detection is unavailable")
+        case_id = detection.get("case_id")
+        if not case_id or self.detections.cases.get(case_id) is None:
+            raise RepositoryHandoffError(
+                "Link the detection to a case before preserving repository feedback"
+            )
+        with self._case_lock:
+            latest = self.store.review(review["id"])
+            assert latest is not None
+            if latest["case_item_id"]:
+                return self.public(record)
+            item = self.detections.cases.add_item(
+                case_id,
+                self._review_case_item(detection, latest),
+            )
+            if item is None:
+                raise RepositoryHandoffError(
+                    "Linked case is unavailable"
+                )
+            self.store.mark_review_preserved(review["id"], item.id)
+        return self.public(record)
+
     def latest(self, detection_id: str) -> dict[str, Any] | None:
         value = self.store.latest(detection_id)
         return self.public(value) if value else None
 
-    @staticmethod
-    def public(record: dict[str, Any]) -> dict[str, Any]:
+    def public(self, record: dict[str, Any]) -> dict[str, Any]:
         contract = record["preview_contract"]
         return {
             "id": record["id"],
@@ -636,6 +748,7 @@ class DetectionRepositoryService:
             "applied_at": record["applied_at"],
             "pushed_at": record["pushed_at"],
             "pull_request_at": record["pull_request_at"],
+            "review": self.store.latest_review(record["id"]),
         }
 
     def _repository(self, policy: DetectionRepositorySettings) -> Path:
@@ -881,6 +994,383 @@ class DetectionRepositoryService:
                 "GitHub CLI returned invalid pull-request state"
             ) from exc
         return value if isinstance(value, dict) else None
+
+    def _github_pull_request(
+        self,
+        repository: Path,
+        github_repository: str,
+        pull_request_url: str,
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        fields = ",".join(
+            [
+                "url",
+                "number",
+                "title",
+                "state",
+                "isDraft",
+                "mergedAt",
+                "headRefName",
+                "headRefOid",
+                "baseRefName",
+                "baseRefOid",
+                "reviewDecision",
+                "mergeStateStatus",
+                "mergeable",
+                "updatedAt",
+            ]
+        )
+        view = self._run(
+            self._command(
+                "gh",
+                "pr",
+                "view",
+                pull_request_url,
+                "--repo",
+                github_repository,
+                "--json",
+                fields,
+            ),
+            repository,
+            timeout=60,
+            environment={
+                "GH_PROMPT_DISABLED": "1",
+                "GIT_TERMINAL_PROMPT": "0",
+            },
+        )
+        try:
+            pull_request = json.loads(view.stdout)
+        except json.JSONDecodeError as exc:
+            raise RepositoryHandoffError(
+                "GitHub CLI returned invalid pull-request state"
+            ) from exc
+        if not isinstance(pull_request, dict):
+            raise RepositoryHandoffError(
+                "GitHub CLI returned an invalid pull-request record"
+            )
+        checks_result = self._run(
+            self._command(
+                "gh",
+                "pr",
+                "checks",
+                pull_request_url,
+                "--repo",
+                github_repository,
+                "--json",
+                (
+                    "name,state,bucket,workflow,description,"
+                    "startedAt,completedAt"
+                ),
+            ),
+            repository,
+            timeout=60,
+            check=False,
+            environment={
+                "GH_PROMPT_DISABLED": "1",
+                "GIT_TERMINAL_PROMPT": "0",
+            },
+        )
+        if checks_result.returncode not in {0, 8}:
+            detail = checks_result.stderr.decode(
+                "utf-8",
+                errors="replace",
+            ).strip()
+            if "no checks reported" in detail.lower():
+                return pull_request, []
+            raise RepositoryHandoffError(
+                f"GitHub check refresh failed: "
+                f"{detail[-800:] or 'unknown error'}"
+            )
+        try:
+            checks = json.loads(checks_result.stdout or b"[]")
+        except json.JSONDecodeError as exc:
+            raise RepositoryHandoffError(
+                "GitHub CLI returned invalid check state"
+            ) from exc
+        if not isinstance(checks, list):
+            raise RepositoryHandoffError(
+                "GitHub CLI returned an invalid check collection"
+            )
+        return pull_request, [
+            item for item in checks if isinstance(item, dict)
+        ]
+
+    def _review_snapshot(
+        self,
+        record: dict[str, Any],
+        github_repository: str,
+        pull_request_number: int,
+        pull_request: dict[str, Any],
+        checks: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        returned_url = self._bounded_text(pull_request.get("url"), 1000)
+        if returned_url != record["pull_request_url"]:
+            raise RepositoryHandoffError(
+                "GitHub returned a different pull-request identity"
+            )
+        returned_number = pull_request.get("number")
+        if (
+            isinstance(returned_number, bool)
+            or not isinstance(returned_number, int)
+            or returned_number != pull_request_number
+        ):
+            raise RepositoryHandoffError(
+                "GitHub returned a different pull-request number"
+            )
+        head_oid = self._bounded_text(pull_request.get("headRefOid"), 64).lower()
+        head_ref = self._bounded_text(pull_request.get("headRefName"), 240)
+        commit_matches = (
+            bool(COMMIT_SHA.fullmatch(head_oid))
+            and head_oid == record["commit_sha"]
+        )
+        branch_matches = head_ref == record["branch_name"]
+        identity_status = (
+            "exact" if commit_matches and branch_matches else "stale"
+        )
+        normalized_checks: list[dict[str, str]] = []
+        counts = {
+            "pass": 0,
+            "fail": 0,
+            "pending": 0,
+            "skipping": 0,
+            "cancel": 0,
+            "unknown": 0,
+        }
+        for item in checks[:100]:
+            bucket = self._bounded_text(item.get("bucket"), 40).lower()
+            if bucket not in counts:
+                bucket = "unknown"
+            counts[bucket] += 1
+            normalized_checks.append(
+                {
+                    "name": self._bounded_text(item.get("name"), 240)
+                    or "Unnamed check",
+                    "workflow": self._bounded_text(
+                        item.get("workflow"),
+                        240,
+                    ),
+                    "state": self._bounded_text(item.get("state"), 80),
+                    "bucket": bucket,
+                    "description": self._bounded_text(
+                        item.get("description"),
+                        500,
+                    ),
+                    "started_at": self._bounded_text(
+                        item.get("startedAt"),
+                        80,
+                    ),
+                    "completed_at": self._bounded_text(
+                        item.get("completedAt"),
+                        80,
+                    ),
+                }
+            )
+        if counts["fail"] or counts["cancel"]:
+            checks_status = "fail"
+        elif counts["pending"] or counts["unknown"]:
+            checks_status = "pending"
+        elif normalized_checks:
+            checks_status = "pass"
+        else:
+            checks_status = "none"
+        review_decision = self._bounded_text(
+            pull_request.get("reviewDecision"),
+            80,
+        ).upper()
+        if review_decision not in {
+            "APPROVED",
+            "CHANGES_REQUESTED",
+            "REVIEW_REQUIRED",
+        }:
+            review_decision = "REVIEW_REQUIRED"
+        state = self._bounded_text(pull_request.get("state"), 40).upper()
+        merged_at = self._bounded_text(pull_request.get("mergedAt"), 80)
+        is_draft = bool(pull_request.get("isDraft"))
+        if merged_at or state == "MERGED":
+            lifecycle = "merged"
+        elif state == "CLOSED":
+            lifecycle = "closed"
+        elif is_draft:
+            lifecycle = "draft"
+        else:
+            lifecycle = "open"
+        if identity_status != "exact":
+            risk_level = "critical"
+            recommended_action = (
+                "Stop promotion: the pull-request head no longer matches the "
+                "approved SignalRoom branch and commit. Inspect the remote diff."
+            )
+        elif lifecycle == "merged":
+            risk_level = "low"
+            recommended_action = (
+                "The exact observed commit merged. Confirm downstream deployment "
+                "and Splunk saved-search state independently."
+            )
+        elif lifecycle == "closed":
+            risk_level = "high"
+            recommended_action = (
+                "The pull request closed without an observed merge. Decide whether "
+                "to revise, supersede, or retire this detection handoff."
+            )
+        elif checks_status == "fail":
+            risk_level = "high"
+            recommended_action = (
+                "Resolve failed or cancelled repository checks before requesting "
+                "promotion."
+            )
+        elif review_decision == "CHANGES_REQUESTED":
+            risk_level = "high"
+            recommended_action = (
+                "Address requested review changes, then create a new SignalRoom "
+                "preview if the approved detection content changes."
+            )
+        elif (
+            lifecycle == "draft"
+            or checks_status in {"pending", "none"}
+            or review_decision == "REVIEW_REQUIRED"
+        ):
+            risk_level = "medium"
+            recommended_action = (
+                "Repository review is incomplete. Wait for required checks and "
+                "reviewers, then refresh explicitly."
+            )
+        else:
+            risk_level = "low"
+            recommended_action = (
+                "Observed checks and review are ready. Merge remains controlled "
+                "by repository policy outside SignalRoom."
+            )
+        return {
+            "schema_version": "signalroom-repository-review/v1",
+            "provider": "github",
+            "repository": github_repository,
+            "pull_request_url": returned_url,
+            "pull_request_number": pull_request_number,
+            "title": self._bounded_text(pull_request.get("title"), 240),
+            "lifecycle": lifecycle,
+            "is_draft": is_draft,
+            "merged_at": merged_at,
+            "updated_at": self._bounded_text(
+                pull_request.get("updatedAt"),
+                80,
+            ),
+            "review_decision": review_decision.lower().replace("_", "-"),
+            "merge_state_status": self._bounded_text(
+                pull_request.get("mergeStateStatus"),
+                80,
+            ).lower(),
+            "mergeable": self._bounded_text(
+                pull_request.get("mergeable"),
+                80,
+            ).lower(),
+            "head_ref_name": head_ref,
+            "head_ref_oid": head_oid,
+            "base_ref_name": self._bounded_text(
+                pull_request.get("baseRefName"),
+                240,
+            ),
+            "base_ref_oid": self._bounded_text(
+                pull_request.get("baseRefOid"),
+                64,
+            ).lower(),
+            "expected_branch": record["branch_name"],
+            "expected_commit_sha": record["commit_sha"],
+            "identity_status": identity_status,
+            "checks_status": checks_status,
+            "check_counts": counts,
+            "checks": normalized_checks,
+            "risk_level": risk_level,
+            "recommended_action": recommended_action,
+            "authority": {
+                "read_only_refresh": True,
+                "changes_repository": False,
+                "merges_pull_request": False,
+                "deploys_to_splunk": False,
+                "proves_splunk_deployment": False,
+            },
+            "observed_at": datetime.now(UTC).isoformat(),
+        }
+
+    def _review_case_item(
+        self,
+        detection: dict[str, Any],
+        review: dict[str, Any],
+    ) -> CaseItemCreate:
+        counts = review["check_counts"]
+        return CaseItemCreate(
+            kind=(
+                "decision"
+                if review["lifecycle"] in {"merged", "closed"}
+                else "action"
+            ),
+            title=(
+                f"Repository feedback · "
+                f"{detection['content']['title']} · "
+                f"{review['lifecycle']}"
+            ),
+            content=(
+                f"Explicit GitHub observation: {review['observed_at']}\n\n"
+                f"Pull request: {review['pull_request_url']}\n"
+                f"Approved commit: {review['expected_commit_sha']}\n"
+                f"Observed head: {review['head_ref_oid'] or 'unavailable'}\n"
+                f"Identity: {review['identity_status']}\n"
+                f"Lifecycle: {review['lifecycle']}\n"
+                f"Review: {review['review_decision']}\n"
+                f"Checks: {review['checks_status']} "
+                f"({counts['pass']} pass, {counts['fail']} fail, "
+                f"{counts['pending']} pending, {counts['cancel']} cancelled)\n\n"
+                f"Next: {review['recommended_action']}\n\n"
+                "This snapshot records repository state only. It does not prove "
+                "that the detection was deployed or enabled in Splunk."
+            ),
+            source="SignalRoom repository feedback",
+            confidence="high",
+            status=(
+                "complete"
+                if review["lifecycle"] in {"merged", "closed"}
+                else "needs-validation"
+            ),
+            occurred_at=review["observed_at"],
+            metadata={
+                "detection_id": detection["id"],
+                "detection_repository_handoff_id": review["handoff_id"],
+                "repository_review_id": review["id"],
+                "repository_review_sha256": review["snapshot_sha256"],
+                "commit_sha": review["expected_commit_sha"],
+                "pull_request_url": review["pull_request_url"],
+                "risk_level": review["risk_level"],
+                "identity_status": review["identity_status"],
+                "lifecycle": review["lifecycle"],
+            },
+        )
+
+    @staticmethod
+    def _pull_request_number(
+        pull_request_url: str,
+        github_repository: str,
+    ) -> int:
+        parsed = urlparse(pull_request_url.strip())
+        parts = [part for part in parsed.path.split("/") if part]
+        expected = github_repository.split("/", 1)
+        if (
+            parsed.scheme != "https"
+            or parsed.hostname not in {"github.com", "www.github.com"}
+            or len(parts) != 4
+            or [parts[0].lower(), parts[1].lower()]
+            != [expected[0].lower(), expected[1].lower()]
+            or parts[2] != "pull"
+            or not parts[3].isdigit()
+        ):
+            raise RepositoryHandoffError(
+                "Stored pull-request URL does not match the configured GitHub repository"
+            )
+        number = int(parts[3])
+        if number < 1:
+            raise RepositoryHandoffError("Pull-request number is invalid")
+        return number
+
+    @staticmethod
+    def _bounded_text(value: Any, limit: int) -> str:
+        return str(value or "").strip()[:limit]
 
     @staticmethod
     def _github_repository(remote_url: str) -> str:

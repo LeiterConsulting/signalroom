@@ -448,6 +448,18 @@ class DetectionRepositoryRemoteRequest(BaseModel):
     )
 
 
+class DetectionRepositoryReviewRequest(BaseModel):
+    expected_commit_sha: str = Field(
+        min_length=40, max_length=64, pattern=r"^[0-9a-f]{40,64}$"
+    )
+
+
+class DetectionRepositoryCaseRequest(BaseModel):
+    expected_snapshot_sha256: str = Field(
+        min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$"
+    )
+
+
 class DetectionRepositoryTestRequest(BaseModel):
     settings: DetectionRepositorySettings
 

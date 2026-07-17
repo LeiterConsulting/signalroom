@@ -12,8 +12,10 @@ from splunk_security_agent.schemas import (
     DetectionGateRunRequest,
     DetectionGitExportRequest,
     DetectionRepositoryApprovalRequest,
+    DetectionRepositoryCaseRequest,
     DetectionRepositoryPreviewRequest,
     DetectionRepositoryRemoteRequest,
+    DetectionRepositoryReviewRequest,
     DetectionUpdate,
     DetectionValidationDraftRequest,
     ValidationTaskUpdate,
@@ -205,12 +207,23 @@ async def test_repository_handoff_control_plane_is_audited(monkeypatch):
         "pull_request_url": "https://github.com/example/repo/pull/1",
         "summary": {"added": 10, "modified": 0},
         "blocking_reasons": [],
+        "review": {
+            "snapshot_sha256": "e" * 64,
+            "case_item_id": "case-item-1",
+            "identity_status": "exact",
+            "lifecycle": "open",
+            "review_decision": "approved",
+            "checks_status": "pass",
+            "risk_level": "low",
+        },
     }
     fake_repository = SimpleNamespace(
         preview=lambda detection_id, expected: handoff,
         apply=lambda handoff_id, expected: handoff,
         push=lambda handoff_id, expected: handoff,
         open_draft_pull_request=lambda handoff_id, expected: handoff,
+        refresh_pull_request=lambda handoff_id, expected: handoff,
+        preserve_review_to_case=lambda handoff_id, expected: handoff,
     )
     monkeypatch.setattr(
         app_module,
@@ -234,10 +247,20 @@ async def test_repository_handoff_control_plane_is_audited(monkeypatch):
         "handoff-1",
         DetectionRepositoryRemoteRequest(expected_commit_sha="d" * 40),
     )
+    await app_module.refresh_detection_repository_review(
+        "handoff-1",
+        DetectionRepositoryReviewRequest(expected_commit_sha="d" * 40),
+    )
+    await app_module.preserve_detection_repository_review(
+        "handoff-1",
+        DetectionRepositoryCaseRequest(expected_snapshot_sha256="e" * 64),
+    )
 
     assert audit.event_types == [
         "detection.repository.previewed",
         "detection.repository.committed",
         "detection.repository.pushed",
         "detection.repository.pull_request.opened",
+        "detection.repository.review.refreshed",
+        "detection.repository.review.preserved",
     ]

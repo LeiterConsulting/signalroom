@@ -734,11 +734,26 @@ def _install_failing_git_hook(repository, name, marker):
     hook.chmod(0o755)
 
 
-def repository_handoff_fixture(tmp_path, *, remote=False):
-    detection_service, _, validations, evidence, _ = service_fixture(
+def repository_handoff_fixture(tmp_path, *, remote=False, linked_case=False):
+    detection_service, _, validations, evidence, cases = service_fixture(
         tmp_path / "signalroom"
     )
-    source = completed_validation(validations, evidence)
+    case = (
+        cases.create(
+            CaseCreate(
+                title="Repository feedback investigation",
+                severity="high",
+                owner="Detection engineering",
+            )
+        )
+        if linked_case
+        else None
+    )
+    source = completed_validation(
+        validations,
+        evidence,
+        case_id=case.id if case else None,
+    )
     assert source is not None
     detection = detection_service.create(
         DetectionCreate(
@@ -967,3 +982,271 @@ def test_repository_handoff_pushes_only_the_exact_local_commit(tmp_path):
     )
     assert not hook_marker.exists()
     assert service.push(pushed["id"], pushed["commit_sha"])["status"] == "pushed"
+
+
+def repository_review_fixture(tmp_path, *, linked_case=False):
+    service, _, repository, _, detection = repository_handoff_fixture(
+        tmp_path,
+        linked_case=linked_case,
+    )
+    _git(
+        repository,
+        "remote",
+        "add",
+        "origin",
+        "https://github.com/example/detections.git",
+    )
+    preview = service.preview(detection["id"], detection["current_sha256"])
+    applied = service.apply(preview["id"], preview["preview_sha256"])
+    pushed = service.store.mark_pushed(applied["id"], applied["commit_sha"])
+    handoff = service.store.mark_pull_request(
+        pushed["id"],
+        pushed["commit_sha"],
+        "https://github.com/example/detections/pull/17",
+    )
+    return service, repository, detection, handoff
+
+
+def github_pull_request(handoff, **changes):
+    value = {
+        "url": handoff["pull_request_url"],
+        "number": 17,
+        "title": "Detection: encoded PowerShell",
+        "state": "OPEN",
+        "isDraft": False,
+        "mergedAt": None,
+        "headRefName": handoff["branch_name"],
+        "headRefOid": handoff["commit_sha"],
+        "baseRefName": "main",
+        "baseRefOid": handoff["base_commit"],
+        "reviewDecision": "APPROVED",
+        "mergeStateStatus": "CLEAN",
+        "mergeable": "MERGEABLE",
+        "updatedAt": "2026-07-17T20:15:00Z",
+    }
+    value.update(changes)
+    return value
+
+
+def test_repository_review_refresh_is_exact_and_can_be_preserved_to_case(
+    tmp_path,
+    monkeypatch,
+):
+    service, _, detection, handoff = repository_review_fixture(
+        tmp_path,
+        linked_case=True,
+    )
+    checks = [
+        {
+            "name": "SignalRoom policy",
+            "workflow": "Detection policy",
+            "state": "SUCCESS",
+            "bucket": "pass",
+            "description": "Signed bundle verified",
+            "startedAt": "2026-07-17T20:10:00Z",
+            "completedAt": "2026-07-17T20:11:00Z",
+        },
+        {
+            "name": "Detection tests",
+            "workflow": "Detection policy",
+            "state": "SUCCESS",
+            "bucket": "pass",
+        },
+    ]
+    monkeypatch.setattr(
+        service,
+        "_github_pull_request",
+        lambda repository, github_repository, pull_request_url: (
+            github_pull_request(handoff),
+            checks,
+        ),
+    )
+
+    refreshed = service.refresh_pull_request(
+        handoff["id"],
+        handoff["commit_sha"],
+    )
+    review = refreshed["review"]
+    assert review["identity_status"] == "exact"
+    assert review["checks_status"] == "pass"
+    assert review["check_counts"]["pass"] == 2
+    assert review["review_decision"] == "approved"
+    assert review["risk_level"] == "low"
+    assert review["authority"]["changes_repository"] is False
+    assert review["authority"]["proves_splunk_deployment"] is False
+    assert len(review["snapshot_sha256"]) == 64
+
+    with pytest.raises(
+        RepositoryHandoffError,
+        match="snapshot changed",
+    ):
+        service.preserve_review_to_case(handoff["id"], "0" * 64)
+
+    case_before = service.detections.cases.get(detection["case_id"])
+    assert case_before is not None
+    preserved = service.preserve_review_to_case(
+        handoff["id"],
+        review["snapshot_sha256"],
+    )
+    assert preserved["review"]["case_item_id"]
+    case_after = service.detections.cases.get(detection["case_id"])
+    assert case_after is not None
+    assert len(case_after.items) == len(case_before.items) + 1
+    repository_item = case_after.items[-1]
+    assert repository_item.metadata["detection_id"] == detection["id"]
+    assert (
+        repository_item.metadata["repository_review_sha256"]
+        == review["snapshot_sha256"]
+    )
+    assert "does not prove" in repository_item.content
+
+    service.preserve_review_to_case(
+        handoff["id"],
+        review["snapshot_sha256"],
+    )
+    idempotent_case = service.detections.cases.get(detection["case_id"])
+    assert idempotent_case is not None
+    assert len(idempotent_case.items) == len(case_after.items)
+
+
+def test_repository_review_flags_a_changed_pull_request_head(
+    tmp_path,
+    monkeypatch,
+):
+    service, _, _, handoff = repository_review_fixture(tmp_path)
+    monkeypatch.setattr(
+        service,
+        "_github_pull_request",
+        lambda repository, github_repository, pull_request_url: (
+            github_pull_request(handoff, headRefOid="f" * 40),
+            [{"name": "Policy", "state": "SUCCESS", "bucket": "pass"}],
+        ),
+    )
+
+    refreshed = service.refresh_pull_request(
+        handoff["id"],
+        handoff["commit_sha"],
+    )
+    review = refreshed["review"]
+    assert review["identity_status"] == "stale"
+    assert review["risk_level"] == "critical"
+    assert "Stop promotion" in review["recommended_action"]
+
+
+def test_repository_review_rejects_changed_pull_request_identity(
+    tmp_path,
+    monkeypatch,
+):
+    service, _, _, handoff = repository_review_fixture(tmp_path)
+    monkeypatch.setattr(
+        service,
+        "_github_pull_request",
+        lambda repository, github_repository, pull_request_url: (
+            github_pull_request(
+                handoff,
+                url="https://github.com/other/repository/pull/17",
+            ),
+            [],
+        ),
+    )
+
+    with pytest.raises(
+        RepositoryHandoffError,
+        match="different pull-request identity",
+    ):
+        service.refresh_pull_request(
+            handoff["id"],
+            handoff["commit_sha"],
+        )
+    assert service.store.latest_review(handoff["id"]) is None
+
+
+def test_repository_review_accepts_pending_github_check_exit_code(
+    tmp_path,
+    monkeypatch,
+):
+    service, repository, _, handoff = repository_review_fixture(tmp_path)
+    responses = iter(
+        [
+            subprocess.CompletedProcess(
+                ["gh", "pr", "view"],
+                0,
+                stdout=json.dumps(github_pull_request(handoff)).encode(),
+                stderr=b"",
+            ),
+            subprocess.CompletedProcess(
+                ["gh", "pr", "checks"],
+                8,
+                stdout=json.dumps(
+                    [
+                        {
+                            "name": "Detection policy",
+                            "state": "IN_PROGRESS",
+                            "bucket": "pending",
+                        }
+                    ]
+                ).encode(),
+                stderr=b"",
+            ),
+        ]
+    )
+    commands = []
+
+    def fake_run(command, current_repository, **kwargs):
+        commands.append((command, current_repository, kwargs))
+        return next(responses)
+
+    monkeypatch.setattr(
+        service,
+        "_command",
+        lambda executable, *arguments: [executable, *arguments],
+    )
+    monkeypatch.setattr(service, "_run", fake_run)
+
+    pull_request, checks = service._github_pull_request(
+        repository,
+        "example/detections",
+        handoff["pull_request_url"],
+    )
+
+    assert pull_request["headRefOid"] == handoff["commit_sha"]
+    assert checks[0]["bucket"] == "pending"
+    assert len(commands) == 2
+    assert commands[1][2]["check"] is False
+
+
+def test_repository_review_rejects_tampered_snapshot_before_case_preservation(
+    tmp_path,
+    monkeypatch,
+):
+    service, _, _, handoff = repository_review_fixture(
+        tmp_path,
+        linked_case=True,
+    )
+    monkeypatch.setattr(
+        service,
+        "_github_pull_request",
+        lambda repository, github_repository, pull_request_url: (
+            github_pull_request(handoff),
+            [],
+        ),
+    )
+    review = service.refresh_pull_request(
+        handoff["id"],
+        handoff["commit_sha"],
+    )["review"]
+    with sqlite3.connect(service.store.path) as db:
+        db.execute(
+            """UPDATE detection_repository_review_snapshots
+            SET snapshot='{}' WHERE id=?""",
+            (review["id"],),
+        )
+
+    with pytest.raises(
+        RepositoryHandoffError,
+        match="snapshot is invalid",
+    ):
+        service.preserve_review_to_case(
+            handoff["id"],
+            review["snapshot_sha256"],
+        )

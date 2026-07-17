@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from threading import RLock
 from typing import Any
+from uuid import uuid4
 
 
 def _now() -> str:
@@ -56,6 +57,20 @@ class DetectionRepositoryStore:
                 );
                 CREATE INDEX IF NOT EXISTS idx_detection_repository_latest
                     ON detection_repository_handoffs(detection_id, created_at DESC);
+                CREATE TABLE IF NOT EXISTS detection_repository_review_snapshots (
+                    id TEXT PRIMARY KEY,
+                    handoff_id TEXT NOT NULL,
+                    detection_id TEXT NOT NULL,
+                    commit_sha TEXT NOT NULL,
+                    snapshot_sha256 TEXT NOT NULL UNIQUE,
+                    snapshot TEXT NOT NULL,
+                    case_item_id TEXT NOT NULL DEFAULT '',
+                    observed_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_detection_repository_review_latest
+                    ON detection_repository_review_snapshots(
+                        handoff_id, observed_at DESC
+                    );
                 """
             )
 
@@ -170,6 +185,87 @@ class DetectionRepositoryStore:
         assert result is not None
         return result
 
+    def record_review(
+        self,
+        handoff_id: str,
+        detection_id: str,
+        commit_sha: str,
+        snapshot_sha256: str,
+        snapshot: dict[str, Any],
+    ) -> dict[str, Any]:
+        review_id = str(uuid4())
+        observed_at = str(snapshot["observed_at"])
+        with self._lock, self.connect() as db:
+            db.execute(
+                """INSERT INTO detection_repository_review_snapshots
+                (id,handoff_id,detection_id,commit_sha,snapshot_sha256,
+                snapshot,observed_at)
+                VALUES (?,?,?,?,?,?,?)""",
+                (
+                    review_id,
+                    handoff_id,
+                    detection_id,
+                    commit_sha,
+                    snapshot_sha256,
+                    self.canonical(snapshot),
+                    observed_at,
+                ),
+            )
+        result = self.review(review_id)
+        assert result is not None
+        return result
+
+    def review(self, review_id: str) -> dict[str, Any] | None:
+        with self.connect() as db:
+            row = db.execute(
+                """SELECT * FROM detection_repository_review_snapshots
+                WHERE id=?""",
+                (review_id,),
+            ).fetchone()
+        return self._review(row) if row else None
+
+    def latest_review(self, handoff_id: str) -> dict[str, Any] | None:
+        with self.connect() as db:
+            row = db.execute(
+                """SELECT * FROM detection_repository_review_snapshots
+                WHERE handoff_id=? ORDER BY observed_at DESC LIMIT 1""",
+                (handoff_id,),
+            ).fetchone()
+        return self._review(row) if row else None
+
+    def review_by_sha256(
+        self,
+        handoff_id: str,
+        snapshot_sha256: str,
+    ) -> dict[str, Any] | None:
+        with self.connect() as db:
+            row = db.execute(
+                """SELECT * FROM detection_repository_review_snapshots
+                WHERE handoff_id=? AND snapshot_sha256=?""",
+                (handoff_id, snapshot_sha256),
+            ).fetchone()
+        return self._review(row) if row else None
+
+    def mark_review_preserved(
+        self,
+        review_id: str,
+        case_item_id: str,
+    ) -> dict[str, Any]:
+        with self._lock, self.connect() as db:
+            cursor = db.execute(
+                """UPDATE detection_repository_review_snapshots
+                SET case_item_id=?
+                WHERE id=? AND case_item_id=''""",
+                (case_item_id, review_id),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError(
+                    "Repository review snapshot is already preserved"
+                )
+        result = self.review(review_id)
+        assert result is not None
+        return result
+
     @staticmethod
     def canonical(value: dict[str, Any]) -> str:
         return json.dumps(
@@ -205,3 +301,19 @@ class DetectionRepositoryStore:
             "pushed_at": row["pushed_at"],
             "pull_request_at": row["pull_request_at"],
         }
+
+    @staticmethod
+    def _review(row: sqlite3.Row) -> dict[str, Any]:
+        value = json.loads(row["snapshot"])
+        value.update(
+            {
+                "id": row["id"],
+                "handoff_id": row["handoff_id"],
+                "detection_id": row["detection_id"],
+                "commit_sha": row["commit_sha"],
+                "snapshot_sha256": row["snapshot_sha256"],
+                "case_item_id": row["case_item_id"],
+                "observed_at": row["observed_at"],
+            }
+        )
+        return value

@@ -774,15 +774,20 @@ function caseCockpitMarkup() {
 function renderCaseDetail() {
   const item = state.activeCase;
   if (!item) return;
-  const timeline = item.items.length ? item.items.map(entry => `
+  const timeline = item.items.length ? item.items.map(entry => {
+    const repositoryLink = entry.metadata?.detection_repository_handoff_id && entry.metadata?.detection_id
+      ? `<button class="timeline-deep-link" data-open-repository-detection="${escapeHtml(entry.metadata.detection_id)}">Open detection handoff</button>`
+      : '';
+    return `
     <article class="timeline-item">
       <div class="timeline-marker ${escapeHtml(entry.kind)}"></div>
       <div class="timeline-card">
         <header><div><span>${escapeHtml(entry.kind)} · ${escapeHtml(entry.status)}</span><h4>${escapeHtml(entry.title)}</h4></div><span class="timeline-admin-actions"><button data-edit-case-item="${escapeHtml(entry.id)}">Edit</button><button data-delete-case-item="${escapeHtml(entry.id)}" aria-label="Remove ${escapeHtml(entry.title)}">Remove</button></span></header>
         <p>${escapeHtml(entry.content)}</p>
-        <footer><span>${escapeHtml(entry.source)} · ${escapeHtml(entry.confidence)} confidence</span><time>${new Date(entry.occurred_at || entry.created_at).toLocaleString()}</time></footer>
+        <footer><span>${escapeHtml(entry.source)} · ${escapeHtml(entry.confidence)} confidence</span>${repositoryLink}<time>${new Date(entry.occurred_at || entry.created_at).toLocaleString()}</time></footer>
       </div>
-    </article>`).join('') : '<div class="case-timeline-empty"><b>The timeline is ready.</b><p>Add an analyst note, or preserve evidence directly from Investigate, Discovery, or Context.</p></div>';
+    </article>`;
+  }).join('') : '<div class="case-timeline-empty"><b>The timeline is ready.</b><p>Add an analyst note, or preserve evidence directly from Investigate, Discovery, or Context.</p></div>';
   $('#caseDetail').innerHTML = `
     <div class="case-detail-header">
       <div><p class="eyebrow">CASE ${escapeHtml(item.id.slice(0, 8).toUpperCase())}</p><h2>${escapeHtml(item.title)}</h2><p>Created ${new Date(item.created_at).toLocaleString()} · Updated ${new Date(item.updated_at).toLocaleString()}</p></div>
@@ -1730,6 +1735,38 @@ function detectionGitOpsMarkup(detection) {
   </section>`;
 }
 
+function repositoryReviewMarkup(detection, handoff) {
+  if (handoff.status !== 'pull-request-opened') return '';
+  const review = handoff.review;
+  if (!review) {
+    return `<section class="repository-feedback empty">
+      <header><div><span>EXPLICIT REPOSITORY FEEDBACK</span><h5>No CI or review snapshot captured</h5><p>SignalRoom never polls GitHub silently. Refresh when you want a durable observation of the exact pull request, reviewers, and checks.</p></div><button class="button primary" type="button" data-refresh-repository-review>Refresh PR + CI status</button></header>
+      <div class="repository-authority"><b>Read-only boundary</b><span>This action reads repository state and writes only a local snapshot. It cannot merge the pull request or prove Splunk deployment.</span></div>
+    </section>`;
+  }
+  const counts = review.check_counts || {};
+  const checks = (review.checks || []).map(check => `<li class="${escapeHtml(check.bucket)}"><span>${escapeHtml(check.bucket)}</span><div><b>${escapeHtml(check.name)}</b>${check.workflow ? `<small>${escapeHtml(check.workflow)}</small>` : ''}${check.description ? `<p>${escapeHtml(check.description)}</p>` : ''}</div><code>${escapeHtml(check.state || 'unknown')}</code></li>`).join('');
+  let caseAction = '<span class="repository-case-note">Link this detection to a case to preserve the snapshot.</span>';
+  if (detection.case_id && review.case_item_id) {
+    caseAction = `<button class="button ghost" type="button" data-open-repository-case="${escapeHtml(detection.case_id)}">Open preserved case entry</button>`;
+  } else if (detection.case_id) {
+    caseAction = '<button class="button ghost" type="button" data-preserve-repository-review>Preserve exact snapshot to case</button>';
+  }
+  return `<section class="repository-feedback ${escapeHtml(review.risk_level)}">
+    <header><div><span>REPOSITORY FEEDBACK · ${escapeHtml(review.risk_level)}</span><h5>${escapeHtml(review.title || `Pull request #${review.pull_request_number}`)}</h5><p>Observed ${new Date(review.observed_at).toLocaleString()} · snapshot <code>${escapeHtml(review.snapshot_sha256)}</code></p></div><button class="button primary" type="button" data-refresh-repository-review>Refresh explicitly</button></header>
+    <div class="repository-feedback-grid">
+      <article><span>Head identity</span><b class="${escapeHtml(review.identity_status)}">${escapeHtml(review.identity_status)}</b><small>${escapeHtml(String(review.head_ref_oid || '').slice(0, 12) || 'unavailable')}</small></article>
+      <article><span>Lifecycle</span><b>${escapeHtml(review.lifecycle)}</b><small>${review.is_draft ? 'Draft pull request' : 'Repository state'}</small></article>
+      <article><span>Review</span><b>${escapeHtml(review.review_decision.replaceAll('-', ' '))}</b><small>${escapeHtml(review.merge_state_status || review.mergeable || 'not reported')}</small></article>
+      <article><span>Checks</span><b>${escapeHtml(review.checks_status)}</b><small>${Number(counts.pass || 0)} pass · ${Number(counts.fail || 0)} fail · ${Number(counts.pending || 0)} pending</small></article>
+    </div>
+    <div class="repository-recommendation"><b>Next analyst action</b><p>${escapeHtml(review.recommended_action)}</p></div>
+    ${checks ? `<details class="repository-checks" open><summary>Observed checks · ${review.checks.length}</summary><ul>${checks}</ul></details>` : '<div class="repository-no-checks">No repository checks were reported at this observation.</div>'}
+    <footer><a class="button ghost" href="${escapeHtml(review.pull_request_url)}" target="_blank" rel="noopener">Open pull request</a>${caseAction}</footer>
+    <div class="repository-authority"><b>Authority boundary</b><span>Observed repository state is mutable external evidence. Merge does not prove this detection was deployed or enabled in Splunk.</span></div>
+  </section>`;
+}
+
 function detectionRepositoryMarkup(detection) {
   if (detection.status !== 'approved') return '';
   const policy = state.settings?.detection_repository || {};
@@ -1772,6 +1809,7 @@ function detectionRepositoryMarkup(detection) {
     ${reasons}
     <details class="repository-file-diff" open><summary>Exact file plan · ${(current.files || []).length} files</summary><ul>${files}</ul></details>
     <div class="repository-authority"><b>Authority boundary</b><span>${current.status === 'previewed' ? 'No repository mutation has occurred.' : 'The primary checkout was not changed.'} SignalRoom cannot deploy or enable this detection in Splunk.</span></div>
+    ${repositoryReviewMarkup(detection, current)}
   </section>`;
 }
 
@@ -2001,6 +2039,28 @@ async function openDetectionRepositoryPullRequest() {
   } catch (error) { toast(error.message); }
 }
 
+async function refreshDetectionRepositoryReview() {
+  const value = state.repositoryHandoff; if (!value?.commit_sha || value.status !== 'pull-request-opened') return;
+  try {
+    state.repositoryHandoff = await api(`/api/detection-repository/handoffs/${encodeURIComponent(value.id)}/review-refresh`, {method:'POST',body:JSON.stringify({expected_commit_sha:value.commit_sha})});
+    renderDetectionDetail();
+    const review = state.repositoryHandoff.review;
+    toast(review.identity_status === 'exact' ? `Repository feedback captured · ${review.risk_level} attention` : 'Promotion stopped: pull-request head no longer matches the approved commit');
+  } catch (error) { toast(error.message); }
+}
+
+async function preserveDetectionRepositoryReview() {
+  const value = state.repositoryHandoff; const review = value?.review;
+  if (!value || !review || review.case_item_id) return;
+  const approved = confirm(`Preserve this exact repository feedback snapshot to the linked case?\n\nSnapshot SHA-256: ${review.snapshot_sha256}\nRisk: ${review.risk_level}\nLifecycle: ${review.lifecycle}\n\nThis creates a durable local timeline item. It does not change GitHub or Splunk.`);
+  if (!approved) return;
+  try {
+    state.repositoryHandoff = await api(`/api/detection-repository/handoffs/${encodeURIComponent(value.id)}/review-case`, {method:'POST',body:JSON.stringify({expected_snapshot_sha256:review.snapshot_sha256})});
+    renderDetectionDetail();
+    toast('Exact repository feedback preserved to the linked case');
+  } catch (error) { toast(error.message); }
+}
+
 async function retireDetection() {
   const detection = state.activeDetection; if (!detection) return;
   if (!confirm(`Retire “${detection.content.title}”? Its versions, reviews, exports, and evidence links will be retained.`)) return;
@@ -2226,6 +2286,10 @@ document.addEventListener('click', async event => {
   if (event.target.closest('[data-apply-repository]')) { await applyDetectionRepository(); return; }
   if (event.target.closest('[data-push-repository]')) { await pushDetectionRepository(); return; }
   if (event.target.closest('[data-pull-request-repository]')) { await openDetectionRepositoryPullRequest(); return; }
+  if (event.target.closest('[data-refresh-repository-review]')) { await refreshDetectionRepositoryReview(); return; }
+  if (event.target.closest('[data-preserve-repository-review]')) { await preserveDetectionRepositoryReview(); return; }
+  const repositoryCase = event.target.closest('[data-open-repository-case]');
+  if (repositoryCase) { setView('cases'); await openCase(repositoryCase.dataset.openRepositoryCase); return; }
   if (event.target.closest('[data-retire-detection]')) { await retireDetection(); return; }
   if (event.target.closest('[data-delete-detection]')) { await deleteDetection(); return; }
   if (event.target.closest('[data-detection-investigate]')) { investigateDetection(); return; }
@@ -2329,6 +2393,8 @@ document.addEventListener('click', async event => {
   const ledger = event.target.closest('[data-open-ledger]'); if (ledger) openLedgerDetail(ledger.dataset.openLedger);
   const artifact = event.target.closest('[data-open-artifact]'); if (artifact) openArtifactDetail(artifact.dataset.openArtifact);
   const openSavedCase = event.target.closest('[data-open-case]'); if (openSavedCase) openCase(openSavedCase.dataset.openCase);
+  const repositoryDetection = event.target.closest('[data-open-repository-detection]');
+  if (repositoryDetection) { setView('detections'); await openDetection(repositoryDetection.dataset.openRepositoryDetection); return; }
   const caseInvestigate = event.target.closest('[data-case-investigate]');
   if (caseInvestigate && state.caseCockpit) {
     openInvestigation('triage', `Continue this case using the bounded case context below. Reuse it before requesting new SPL.\n\n${state.caseCockpit.context_packet}\n\nGoal: Review the evidence state and recommend the single highest-value next action.`, false);
