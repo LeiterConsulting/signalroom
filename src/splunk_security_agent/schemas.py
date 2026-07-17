@@ -33,6 +33,26 @@ class ModelProfile(BaseModel):
     max_output_tokens: int | None = Field(default=None, ge=64, le=8192)
 
 
+class DetectionRepositorySettings(BaseModel):
+    enabled: bool = False
+    path: str = Field(default="", max_length=4000)
+    base_ref: str = Field(default="main", min_length=1, max_length=240)
+    branch_prefix: str = Field(default="signalroom/", min_length=1, max_length=120)
+    remote_name: str = Field(default="origin", min_length=1, max_length=120)
+    commit_author_name: str = Field(
+        default="SignalRoom Detection Engineering",
+        min_length=1,
+        max_length=160,
+    )
+    commit_author_email: str = Field(
+        default="signalroom@localhost",
+        min_length=3,
+        max_length=320,
+    )
+    allow_push: bool = False
+    allow_draft_pull_request: bool = False
+
+
 class AppSettings(BaseModel):
     configured: bool = False
     splunk: SplunkConnection = Field(default_factory=SplunkConnection)
@@ -47,6 +67,9 @@ class AppSettings(BaseModel):
     allow_write_tools: bool = False
     max_agent_steps: int = 4
     demo_mode: bool = False
+    detection_repository: DetectionRepositorySettings = Field(
+        default_factory=DetectionRepositorySettings
+    )
 
 
 class SettingsUpdate(BaseModel):
@@ -405,6 +428,28 @@ class DetectionGitExportRequest(BaseModel):
     expected_content_sha256: str = Field(
         min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$"
     )
+
+
+class DetectionRepositoryPreviewRequest(BaseModel):
+    expected_content_sha256: str = Field(
+        min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$"
+    )
+
+
+class DetectionRepositoryApprovalRequest(BaseModel):
+    expected_preview_sha256: str = Field(
+        min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$"
+    )
+
+
+class DetectionRepositoryRemoteRequest(BaseModel):
+    expected_commit_sha: str = Field(
+        min_length=40, max_length=64, pattern=r"^[0-9a-f]{40,64}$"
+    )
+
+
+class DetectionRepositoryTestRequest(BaseModel):
+    settings: DetectionRepositorySettings
 
 
 class DetectionGateRunRequest(BaseModel):

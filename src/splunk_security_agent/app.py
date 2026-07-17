@@ -19,7 +19,12 @@ from .benchmarks import GoldenBenchmarkService, GoldenBenchmarkStore
 from .cases import CaseCockpitService, CaseStore
 from .config import ConfigStore
 from .delivery import AssuranceDeliveryService, DeliveryStore
-from .detections import DetectionService, DetectionStore
+from .detections import (
+    DetectionRepositoryService,
+    DetectionRepositoryStore,
+    DetectionService,
+    DetectionStore,
+)
 from .discovery import DiscoveryPipeline
 from .feedback import AnalystFeedbackStore
 from .mcp_server import MCPServer
@@ -45,6 +50,10 @@ from .schemas import (
     DetectionExportRequest,
     DetectionGateRunRequest,
     DetectionGitExportRequest,
+    DetectionRepositoryApprovalRequest,
+    DetectionRepositoryPreviewRequest,
+    DetectionRepositoryRemoteRequest,
+    DetectionRepositoryTestRequest,
     DetectionReviewRequest,
     DetectionUpdate,
     DetectionValidationDraftRequest,
@@ -93,6 +102,15 @@ class Services:
             self.evidence,
             self.cases,
             DATA / "detection_exports",
+        )
+        self.detection_repository_store = DetectionRepositoryStore(
+            DATA / "detection_repository.db"
+        )
+        self.detection_repository = DetectionRepositoryService(
+            self.config,
+            self.detections,
+            self.detection_repository_store,
+            DATA / "detection_repository_runtime",
         )
         self.case_cockpit = CaseCockpitService(
             self.cases, self.validation_store, self.evidence
@@ -314,9 +332,30 @@ async def put_settings(update: SettingsUpdate) -> dict[str, Any]:
             "verify_tls": update.settings.splunk.verify_ssl,
             "specialist_runtime": update.settings.specialist_runtime,
             "huggingface_policy": update.settings.huggingface_policy,
+            "detection_repository_enabled": (
+                update.settings.detection_repository.enabled
+            ),
+            "detection_repository_push": (
+                update.settings.detection_repository.allow_push
+            ),
+            "detection_repository_pull_request": (
+                update.settings.detection_repository.allow_draft_pull_request
+            ),
         },
     )
     return services.config.public_payload()
+
+
+@app.get("/api/detection-repository/status")
+async def detection_repository_status() -> dict[str, Any]:
+    return services.detection_repository.inspect()
+
+
+@app.post("/api/detection-repository/test")
+async def test_detection_repository(
+    request: DetectionRepositoryTestRequest,
+) -> dict[str, Any]:
+    return services.detection_repository.inspect(request.settings)
 
 
 @app.post("/api/test-connection")
@@ -1226,6 +1265,154 @@ async def export_detection_git_change(
             "deploys_to_splunk": False,
         },
     }
+
+
+@app.get("/api/detections/{detection_id}/repository-handoff")
+async def latest_detection_repository_handoff(
+    detection_id: str,
+) -> dict[str, Any] | None:
+    if services.detection_store.get(detection_id) is None:
+        raise HTTPException(404, "Detection not found")
+    return services.detection_repository.latest(detection_id)
+
+
+@app.post("/api/detections/{detection_id}/repository-preview")
+async def preview_detection_repository_handoff(
+    detection_id: str,
+    request: DetectionRepositoryPreviewRequest,
+) -> dict[str, Any]:
+    try:
+        result = services.detection_repository.preview(
+            detection_id,
+            request.expected_content_sha256,
+        )
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    services.audit.record(
+        "detection.repository.previewed",
+        "preview",
+        target_type="detection-repository-handoff",
+        target_id=result["id"],
+        outcome="blocked" if result["blocking_reasons"] else "ready",
+        summary=(
+            "An exact signed detection change was compared with an immutable "
+            "repository base commit; no repository mutation occurred."
+        ),
+        metadata={
+            "detection_id": detection_id,
+            "version": result["version"],
+            "content_sha256": result["content_sha256"],
+            "preview_sha256": result["preview_sha256"],
+            "base_commit": result["base_commit"],
+            "branch_name": result["branch_name"],
+            "summary": result["summary"],
+            "blocking_reasons": result["blocking_reasons"],
+        },
+    )
+    return result
+
+
+@app.post("/api/detection-repository/handoffs/{handoff_id}/apply")
+async def apply_detection_repository_handoff(
+    handoff_id: str,
+    request: DetectionRepositoryApprovalRequest,
+) -> dict[str, Any]:
+    try:
+        result = services.detection_repository.apply(
+            handoff_id,
+            request.expected_preview_sha256,
+        )
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    services.audit.record(
+        "detection.repository.committed",
+        "commit",
+        target_type="detection-repository-handoff",
+        target_id=handoff_id,
+        summary=(
+            "The analyst-approved preview was committed on an isolated local "
+            "branch without changing the primary worktree."
+        ),
+        metadata={
+            "detection_id": result["detection_id"],
+            "preview_sha256": result["preview_sha256"],
+            "base_commit": result["base_commit"],
+            "branch_name": result["branch_name"],
+            "commit_sha": result["commit_sha"],
+            "changes_primary_worktree": False,
+            "pushes_remote": False,
+        },
+    )
+    return result
+
+
+@app.post("/api/detection-repository/handoffs/{handoff_id}/push")
+async def push_detection_repository_handoff(
+    handoff_id: str,
+    request: DetectionRepositoryRemoteRequest,
+) -> dict[str, Any]:
+    try:
+        result = services.detection_repository.push(
+            handoff_id,
+            request.expected_commit_sha,
+        )
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    services.audit.record(
+        "detection.repository.pushed",
+        "push",
+        target_type="detection-repository-handoff",
+        target_id=handoff_id,
+        summary="An explicitly approved detection branch was pushed to Git remote.",
+        metadata={
+            "detection_id": result["detection_id"],
+            "branch_name": result["branch_name"],
+            "commit_sha": result["commit_sha"],
+            "remote_name": result["remote_name"],
+            "opens_pull_request": False,
+        },
+    )
+    return result
+
+
+@app.post("/api/detection-repository/handoffs/{handoff_id}/pull-request")
+async def open_detection_repository_pull_request(
+    handoff_id: str,
+    request: DetectionRepositoryRemoteRequest,
+) -> dict[str, Any]:
+    try:
+        result = services.detection_repository.open_draft_pull_request(
+            handoff_id,
+            request.expected_commit_sha,
+        )
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    services.audit.record(
+        "detection.repository.pull_request.opened",
+        "create",
+        target_type="detection-repository-handoff",
+        target_id=handoff_id,
+        summary=(
+            "A draft pull request was explicitly opened for the exact pushed "
+            "detection commit."
+        ),
+        metadata={
+            "detection_id": result["detection_id"],
+            "branch_name": result["branch_name"],
+            "commit_sha": result["commit_sha"],
+            "pull_request_url": result["pull_request_url"],
+            "draft": True,
+        },
+    )
+    return result
 
 
 @app.post("/api/detections/{detection_id}/retire")

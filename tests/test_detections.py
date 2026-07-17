@@ -3,16 +3,25 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+import subprocess
 import zipfile
 
 import pytest
 
 from splunk_security_agent.cases import CaseStore
+from splunk_security_agent.config import ConfigStore
 from splunk_security_agent.detections import DetectionService, DetectionStore
 from splunk_security_agent.detections.gitops_verifier import (
     VerificationError,
     verify_change_bundle,
     verify_path,
+)
+from splunk_security_agent.detections.repository import (
+    DetectionRepositoryService,
+    RepositoryHandoffError,
+)
+from splunk_security_agent.detections.repository_store import (
+    DetectionRepositoryStore,
 )
 from splunk_security_agent.rag import EvidenceStore
 from splunk_security_agent.schemas import (
@@ -22,6 +31,7 @@ from splunk_security_agent.schemas import (
     DetectionExportRequest,
     DetectionGateRunRequest,
     DetectionGitExportRequest,
+    DetectionRepositorySettings,
     DetectionReviewRequest,
     DetectionUpdate,
     DetectionValidationDraftRequest,
@@ -699,3 +709,261 @@ def test_detection_store_migrates_legacy_exports(tmp_path):
         }
     assert "export_kind" in columns
     DetectionStore(path)
+
+
+def _git(repository, *arguments, check=True):
+    result = subprocess.run(
+        ["git", *arguments],
+        cwd=repository,
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+    if check and result.returncode:
+        raise AssertionError(result.stderr or result.stdout)
+    return result
+
+
+def _install_failing_git_hook(repository, name, marker):
+    hook = repository / ".git" / "hooks" / name
+    marker_path = marker.as_posix().replace("'", "'\"'\"'")
+    hook.write_text(
+        f"#!/bin/sh\nprintf executed > '{marker_path}'\nexit 91\n",
+        encoding="utf-8",
+    )
+    hook.chmod(0o755)
+
+
+def repository_handoff_fixture(tmp_path, *, remote=False):
+    detection_service, _, validations, evidence, _ = service_fixture(
+        tmp_path / "signalroom"
+    )
+    source = completed_validation(validations, evidence)
+    assert source is not None
+    detection = detection_service.create(
+        DetectionCreate(
+            validation_task_id=source.id,
+            title="Encoded PowerShell repository handoff",
+            severity="high",
+            security_domain="endpoint",
+            mitre_attack=["T1059.001"],
+        )
+    )
+    detection_service.run_gate(
+        detection["id"],
+        DetectionGateRunRequest(
+            expected_content_sha256=detection["current_sha256"]
+        ),
+    )
+    detection_service.submit(detection["id"])
+    approved = detection_service.review(
+        detection["id"],
+        DetectionReviewRequest(
+            decision="approve",
+            expected_content_sha256=detection["current_sha256"],
+            reviewer="Repository reviewer",
+        ),
+    )
+    assert approved is not None
+
+    repository = tmp_path / "detection-repository"
+    repository.mkdir()
+    _git(repository, "init", "-b", "main")
+    (repository / "README.md").write_text(
+        "# Detection repository\n",
+        encoding="utf-8",
+    )
+    _git(repository, "add", "README.md")
+    _git(
+        repository,
+        "-c",
+        "user.name=Repository owner",
+        "-c",
+        "user.email=owner@example.test",
+        "commit",
+        "-m",
+        "Initialize detection repository",
+    )
+    remote_path = None
+    if remote:
+        remote_path = tmp_path / "remote.git"
+        remote_path.mkdir()
+        _git(remote_path, "init", "--bare")
+        _git(repository, "remote", "add", "origin", str(remote_path))
+
+    config = ConfigStore(tmp_path / "config")
+    settings = config.load()
+    settings.detection_repository = DetectionRepositorySettings(
+        enabled=True,
+        path=str(repository.resolve()),
+        base_ref="main",
+        branch_prefix="signalroom/",
+        remote_name="origin",
+        allow_push=remote,
+    )
+    config.save(settings)
+    store = DetectionRepositoryStore(tmp_path / "repository-handoffs.db")
+    service = DetectionRepositoryService(
+        config,
+        detection_service,
+        store,
+        tmp_path / "repository-runtime",
+    )
+    return service, config, repository, remote_path, approved
+
+
+def test_repository_handoff_is_preview_bound_and_keeps_checkout_untouched(tmp_path):
+    service, _, repository, _, detection = repository_handoff_fixture(tmp_path)
+    hook_marker = tmp_path / "repository-hook-ran"
+    _install_failing_git_hook(repository, "post-checkout", hook_marker)
+    _install_failing_git_hook(repository, "pre-commit", hook_marker)
+    original_branch = _git(repository, "branch", "--show-current").stdout.strip()
+    original_status = _git(repository, "status", "--porcelain").stdout
+    original_branches = _git(repository, "branch", "--format=%(refname:short)").stdout
+
+    status = service.inspect()
+    assert status["ready"] is True
+    assert status["current_branch"] == "main"
+    preview = service.preview(
+        detection["id"],
+        detection["current_sha256"],
+    )
+
+    assert preview["status"] == "previewed"
+    assert preview["blocking_reasons"] == []
+    assert preview["summary"]["added"] >= 10
+    assert preview["authority"]["changes_primary_worktree"] is False
+    assert preview["authority"]["pushes_remote"] is False
+    assert _git(repository, "branch", "--format=%(refname:short)").stdout == (
+        original_branches
+    )
+    with pytest.raises(
+        RepositoryHandoffError,
+        match="preview changed",
+    ):
+        service.apply(preview["id"], "0" * 64)
+
+    applied = service.apply(preview["id"], preview["preview_sha256"])
+    assert applied["status"] == "applied"
+    assert len(applied["commit_sha"]) in {40, 64}
+    assert (
+        _git(repository, "rev-parse", f"{applied['commit_sha']}^").stdout.strip()
+        == preview["base_commit"]
+    )
+    assert (
+        _git(
+            repository,
+            "show",
+            f"{applied['commit_sha']}:.signalroom/signalroom.pub",
+        ).stdout.startswith("-----BEGIN PUBLIC KEY-----")
+    )
+    assert _git(repository, "branch", "--show-current").stdout.strip() == original_branch
+    assert _git(repository, "status", "--porcelain").stdout == original_status
+    assert not (repository / "detections").exists()
+    assert not (service.worktree_root / preview["id"]).exists()
+    assert not hook_marker.exists()
+    assert (
+        service.apply(preview["id"], preview["preview_sha256"])["commit_sha"]
+        == applied["commit_sha"]
+    )
+
+
+def test_repository_handoff_rejects_a_moved_base(tmp_path):
+    service, _, repository, _, detection = repository_handoff_fixture(tmp_path)
+    preview = service.preview(detection["id"], detection["current_sha256"])
+    (repository / "README.md").write_text(
+        "# Detection repository\n\nBase moved.\n",
+        encoding="utf-8",
+    )
+    _git(repository, "add", "README.md")
+    _git(
+        repository,
+        "-c",
+        "user.name=Repository owner",
+        "-c",
+        "user.email=owner@example.test",
+        "commit",
+        "-m",
+        "Advance base",
+    )
+
+    with pytest.raises(
+        RepositoryHandoffError,
+        match="base moved",
+    ):
+        service.apply(preview["id"], preview["preview_sha256"])
+    assert not service._branch_commit(repository, preview["branch_name"])
+
+
+def test_repository_handoff_rejects_a_tampered_preview_archive(tmp_path):
+    service, _, repository, _, detection = repository_handoff_fixture(tmp_path)
+    original_branches = _git(repository, "branch", "--format=%(refname:short)").stdout
+    preview = service.preview(detection["id"], detection["current_sha256"])
+    archive = service.store.get(preview["id"])["archive_path"]
+    with open(archive, "ab") as handle:
+        handle.write(b"\ntampered after preview\n")
+
+    with pytest.raises(
+        RepositoryHandoffError,
+        match="archive changed",
+    ):
+        service.apply(preview["id"], preview["preview_sha256"])
+    assert (
+        _git(repository, "branch", "--format=%(refname:short)").stdout
+        == original_branches
+    )
+    assert not service._branch_commit(repository, preview["branch_name"])
+
+
+def test_repository_handoff_blocks_policy_control_replacement(tmp_path):
+    service, _, repository, _, detection = repository_handoff_fixture(tmp_path)
+    policy_path = repository / ".signalroom" / "signalroom.pub"
+    policy_path.parent.mkdir()
+    policy_path.write_text("repository-owned-key\n", encoding="utf-8")
+    _git(repository, "add", ".signalroom/signalroom.pub")
+    _git(
+        repository,
+        "-c",
+        "user.name=Repository owner",
+        "-c",
+        "user.email=owner@example.test",
+        "commit",
+        "-m",
+        "Add repository trust policy",
+    )
+
+    preview = service.preview(detection["id"], detection["current_sha256"])
+    assert preview["summary"]["protected-conflict"] == 1
+    assert any(
+        ".signalroom/signalroom.pub" in reason
+        for reason in preview["blocking_reasons"]
+    )
+    with pytest.raises(RepositoryHandoffError, match="preview is blocked"):
+        service.apply(preview["id"], preview["preview_sha256"])
+
+
+def test_repository_handoff_pushes_only_the_exact_local_commit(tmp_path):
+    service, _, repository, remote, detection = repository_handoff_fixture(
+        tmp_path,
+        remote=True,
+    )
+    assert remote is not None
+    hook_marker = tmp_path / "repository-push-hook-ran"
+    _install_failing_git_hook(repository, "pre-push", hook_marker)
+    preview = service.preview(detection["id"], detection["current_sha256"])
+    applied = service.apply(preview["id"], preview["preview_sha256"])
+    with pytest.raises(RepositoryHandoffError, match="commit changed"):
+        service.push(applied["id"], "0" * 40)
+
+    pushed = service.push(applied["id"], applied["commit_sha"])
+    assert pushed["status"] == "pushed"
+    assert (
+        _git(
+            remote,
+            "rev-parse",
+            f"refs/heads/{pushed['branch_name']}",
+        ).stdout.strip()
+        == pushed["commit_sha"]
+    )
+    assert not hook_marker.exists()
+    assert service.push(pushed["id"], pushed["commit_sha"])["status"] == "pushed"

@@ -89,6 +89,27 @@ SPLUNK_MCP_TOKEN=...
 HF_TOKEN=...
 ```
 
+## Connect a detection repository
+
+Repository handoff is optional and disabled by default. In **Setup → Detection repository handoff**, choose an
+absolute local Git repository root, base branch or ref, branch prefix, remote name, and commit identity. Use the
+read-only inspection action before saving. Remote push and draft-pull-request permissions are independent,
+off-by-default controls; enabling them never makes an export, preview, or local commit perform those later
+actions automatically.
+
+SignalRoom compares each signed bundle with the exact base commit and displays every added, modified, unchanged,
+or protected-conflict file. Approval binds that file plan, bundle SHA-256, signing key, repository, base commit,
+and generated branch name into a 30-minute preview digest. Apply uses a temporary no-checkout Git worktree and
+isolated index, constructs the exact tree with Git plumbing, verifies its paths and bytes, atomically creates one
+local branch, and removes the worktree. Repository hooks, content filters, filesystem monitors, and the Git
+`ext` protocol cannot participate in that commit path. The user's primary checkout is never switched or
+modified. If the base moves, the bundle changes, a symbolic-link boundary is present, or a repository-owned
+policy control differs, the handoff fails closed.
+
+An allowed remote push and GitHub draft pull request each require another explicit confirmation. The latter uses
+the locally installed and authenticated GitHub CLI. None of these repository actions writes to Splunk, enables a
+saved search, or grants SignalRoom deployment authority.
+
 ## Model setup
 
 The default registry describes six local-first profiles. The installer downloads only the selected
@@ -305,7 +326,11 @@ a persistent local Ed25519 key and includes a standalone offline verifier, a rea
 workflow, repository policy, and change-request checklist. The workflow fails closed until an administrator pins
 the out-of-band verified key fingerprint as the protected repository variable
 `SIGNALROOM_TRUSTED_KEY_SHA256`. SignalRoom does not initialize a repository, create a commit, push a branch, or
-open a pull request.
+open a pull request as part of export.
+
+When optional repository handoff is configured, the same signed artifact can proceed through a separate
+**preview → approve → local commit → optional push → optional draft PR** workflow. Each transition is exact-hash
+bound and independently authorized; the export button itself remains a local packaging operation.
 
 Verify an extracted change or the ZIP directly:
 

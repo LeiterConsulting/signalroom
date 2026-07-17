@@ -7,7 +7,8 @@ const state = {
   modelUpdates: null, modelCatalog: null, splunkModels: null,
   assurance: null, assurancePolicyDirty: false, connectionDiagnostics: null, queryIntelligence: null,
   feedbackBenchmarks: null, goldenBenchmarks: null, deliveryPolicyDirty: false,
-  deliveryPreview: null, detections: [], activeDetection: null, detectionGitExport: null
+  deliveryPreview: null, detections: [], activeDetection: null, detectionGitExport: null,
+  repositoryStatus: null, repositoryHandoff: null
 };
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => [...document.querySelectorAll(selector)];
@@ -326,6 +327,17 @@ function hydrateSettings() {
   $('#splunkCaBundle').value = settings.splunk.ca_bundle || '';
   updateTlsControls();
   $('#allowWrites').checked = settings.allow_write_tools;
+  const repository = settings.detection_repository || {};
+  $('#repositoryEnabled').checked = Boolean(repository.enabled);
+  $('#repositoryPath').value = repository.path || '';
+  $('#repositoryBaseRef').value = repository.base_ref || 'main';
+  $('#repositoryBranchPrefix').value = repository.branch_prefix || 'signalroom/';
+  $('#repositoryRemote').value = repository.remote_name || 'origin';
+  $('#repositoryAuthorName').value = repository.commit_author_name || 'SignalRoom Detection Engineering';
+  $('#repositoryAuthorEmail').value = repository.commit_author_email || 'signalroom@localhost';
+  $('#repositoryAllowPush').checked = Boolean(repository.allow_push);
+  $('#repositoryAllowPullRequest').checked = Boolean(repository.allow_draft_pull_request);
+  updateRepositoryControls();
   const chatProfiles = settings.models.filter(model => ['chat', 'security_reasoning'].includes(model.task));
   for (const selector of ['#defaultModel', '#securityModel']) {
     $(selector).innerHTML = chatProfiles.map(model => `<option value="${escapeHtml(model.id)}">${escapeHtml(model.label)}</option>`).join('');
@@ -358,6 +370,56 @@ async function loadSettings() {
     setTimeout(startDemoTour, 250);
   }
   loadModelReadiness();
+  await loadDetectionRepositoryStatus();
+}
+
+function repositorySettingsPayload() {
+  return {
+    enabled:$('#repositoryEnabled').checked,
+    path:$('#repositoryPath').value.trim(),
+    base_ref:$('#repositoryBaseRef').value.trim() || 'main',
+    branch_prefix:$('#repositoryBranchPrefix').value.trim() || 'signalroom/',
+    remote_name:$('#repositoryRemote').value.trim() || 'origin',
+    commit_author_name:$('#repositoryAuthorName').value.trim() || 'SignalRoom Detection Engineering',
+    commit_author_email:$('#repositoryAuthorEmail').value.trim() || 'signalroom@localhost',
+    allow_push:$('#repositoryAllowPush').checked,
+    allow_draft_pull_request:$('#repositoryAllowPullRequest').checked
+  };
+}
+
+function updateRepositoryControls() {
+  const enabled = $('#repositoryEnabled').checked;
+  const push = enabled && $('#repositoryAllowPush').checked;
+  $$('#repositorySettings input').forEach(input => {
+    if (!['repositoryAllowPush','repositoryAllowPullRequest'].includes(input.id)) input.disabled = !enabled;
+  });
+  $('#repositoryAllowPush').disabled = !enabled;
+  $('#repositoryAllowPullRequest').disabled = !push;
+  if (!push) $('#repositoryAllowPullRequest').checked = false;
+  $('#testRepository').disabled = !enabled;
+}
+
+async function loadDetectionRepositoryStatus() {
+  try {
+    state.repositoryStatus = await api('/api/detection-repository/status');
+  } catch (_) {
+    state.repositoryStatus = null;
+  }
+}
+
+async function testDetectionRepository() {
+  const output = $('#repositoryTestResult');
+  output.textContent = 'Inspecting…'; output.className = 'test-result';
+  try {
+    const result = await api('/api/detection-repository/test', {method:'POST',body:JSON.stringify({settings:repositorySettingsPayload()})});
+    state.repositoryStatus = result;
+    output.textContent = result.ready
+      ? `${result.current_branch || 'detached'} · base ${String(result.base_commit || '').slice(0, 12)} · ${result.remotes?.length || 0} remote${result.remotes?.length === 1 ? '' : 's'}${result.warnings?.length ? ` · ${result.warnings[0]}` : ''}`
+      : result.blocking_reason;
+    output.className = `test-result ${result.ready ? 'ok' : 'error'}`;
+  } catch (error) {
+    output.textContent = error.message; output.className = 'test-result error';
+  }
 }
 
 function diagnosticStageMarkup(stage) {
@@ -1634,8 +1696,14 @@ async function createDetectionFromValidation(validationId) {
 
 async function openDetection(detectionId, updateHash = true) {
   try {
-    if (state.activeDetection?.id !== detectionId) state.detectionGitExport = null;
+    if (state.activeDetection?.id !== detectionId) {
+      state.detectionGitExport = null;
+      state.repositoryHandoff = null;
+    }
     state.activeDetection = await api(`/api/detections/${encodeURIComponent(detectionId)}`);
+    if (state.settings?.detection_repository?.enabled) {
+      state.repositoryHandoff = await api(`/api/detections/${encodeURIComponent(detectionId)}/repository-handoff`).catch(() => null);
+    }
     renderDetectionList(); renderDetectionDetail();
     if (updateHash) history.replaceState(null, '', `${location.pathname}#detections/${encodeURIComponent(detectionId)}`);
   } catch (error) { toast(error.message); }
@@ -1659,6 +1727,51 @@ function detectionGitOpsMarkup(detection) {
     <header><div><span>GIT-NATIVE CHANGE CONTROL</span><h4>Signed repository change bundle</h4><p>Export the approved detection, accepted gate provenance, offline verifier, and a read-only pull-request workflow. SignalRoom will not create a commit, open a pull request, or deploy to Splunk.</p></div><button class="button primary" type="button" data-export-detection-git>Export Git change bundle</button></header>
     <div class="detection-git-flow"><span>Approved detection</span><b>→</b><span>Signed manifest</span><b>→</b><span>Repository-pinned CI</span><b>→</b><span>Your deployment process</span></div>
     ${verification}
+  </section>`;
+}
+
+function detectionRepositoryMarkup(detection) {
+  if (detection.status !== 'approved') return '';
+  const policy = state.settings?.detection_repository || {};
+  if (!policy.enabled) {
+    return `<section class="detection-repository disabled">
+      <header><div><span>OPTIONAL REPOSITORY HANDOFF</span><h4>Move from export to an exact Git diff</h4><p>Configure a local detection repository to preview policy conflicts and create an isolated branch without changing your primary checkout.</p></div><button class="button ghost" type="button" data-open-settings>Configure repository</button></header>
+    </section>`;
+  }
+  const value = state.repositoryHandoff;
+  const current = value?.detection_id === detection.id && value?.content_sha256 === detection.current_sha256 ? value : null;
+  const repository = state.repositoryStatus;
+  if (!current) {
+    const readiness = repository?.ready
+      ? `${escapeHtml(repository.repository_root)} · ${escapeHtml(repository.base_ref)} at <code>${escapeHtml(String(repository.base_commit || '').slice(0, 12))}</code>`
+      : escapeHtml(repository?.blocking_reason || 'Repository readiness will be checked before preview.');
+    return `<section class="detection-repository">
+      <header><div><span>PREVIEW → APPROVE → LOCAL COMMIT</span><h4>Repository-bound handoff</h4><p>Compare this exact signed detection against the configured base commit. Previewing creates no branch, commit, push, or pull request.</p></div><button class="button primary" type="button" data-preview-repository>Preview exact diff</button></header>
+      <div class="repository-readiness"><b>${repository?.ready ? 'Repository ready' : 'Readiness required'}</b><span>${readiness}</span></div>
+    </section>`;
+  }
+  const summary = current.summary || {};
+  const blocked = (current.blocking_reasons || []).length > 0;
+  const files = (current.files || []).map(item => `<li class="${escapeHtml(item.status)}"><span>${escapeHtml(item.status.replaceAll('-', ' '))}</span><code>${escapeHtml(item.path)}</code>${item.protected ? '<b>Policy control</b>' : ''}</li>`).join('');
+  const reasons = blocked ? `<div class="repository-blockers"><b>Handoff blocked</b><ul>${current.blocking_reasons.map(reason => `<li>${escapeHtml(reason)}</li>`).join('')}</ul><p>Repository-owned controls are never replaced implicitly. Resolve the control drift through your normal administrator process, then preview again.</p></div>` : '';
+  let action = '';
+  if (current.status === 'previewed' && !blocked) action = '<button class="button primary" type="button" data-apply-repository>Create approved local branch + commit</button>';
+  if (current.status === 'previewed' && blocked) action = '<button class="button ghost" type="button" data-preview-repository>Preview again</button>';
+  if (current.status === 'applied') action = policy.allow_push
+    ? '<button class="button primary" type="button" data-push-repository>Push exact branch to remote</button>'
+    : '<button class="button ghost" type="button" data-open-settings>Enable remote push in Setup</button>';
+  if (current.status === 'pushed') action = policy.allow_draft_pull_request
+    ? '<button class="button primary" type="button" data-pull-request-repository>Open draft pull request</button>'
+    : '<button class="button ghost" type="button" data-open-settings>Enable draft PRs in Setup</button>';
+  if (current.status === 'pull-request-opened') action = `<a class="button primary" href="${escapeHtml(current.pull_request_url)}" target="_blank" rel="noopener">Open draft pull request</a>`;
+  const commit = current.commit_sha ? `<div><dt>Exact commit</dt><dd><code>${escapeHtml(current.commit_sha)}</code></dd></div>` : '';
+  return `<section class="detection-repository ${blocked ? 'blocked' : ''}">
+    <header><div><span>REPOSITORY HANDOFF · ${escapeHtml(current.status.replaceAll('-', ' '))}</span><h4>${blocked ? 'Repository policy requires attention' : current.status === 'previewed' ? 'Review the exact repository diff' : 'Exact change-control identity'}</h4><p>Base and content identity remain fixed throughout this handoff. Any base movement or digest mismatch forces a new preview.</p></div>${action}</header>
+    <div class="repository-summary"><article><b>${Number(summary.added || 0)}</b><span>Added</span></article><article><b>${Number(summary.modified || 0)}</b><span>Modified</span></article><article><b>${Number(summary.unchanged || 0)}</b><span>Unchanged</span></article><article class="${Number(summary['protected-conflict'] || 0) ? 'warn' : ''}"><b>${Number(summary['protected-conflict'] || 0)}</b><span>Policy conflicts</span></article></div>
+    <dl class="repository-contract"><div><dt>Repository</dt><dd>${escapeHtml(current.repository_path)}</dd></div><div><dt>Approved base</dt><dd>${escapeHtml(current.base_ref)} · <code>${escapeHtml(current.base_commit)}</code></dd></div><div><dt>Isolated branch</dt><dd><code>${escapeHtml(current.branch_name)}</code></dd></div><div><dt>Preview digest</dt><dd><code>${escapeHtml(current.preview_sha256)}</code></dd></div>${commit}</dl>
+    ${reasons}
+    <details class="repository-file-diff" open><summary>Exact file plan · ${(current.files || []).length} files</summary><ul>${files}</ul></details>
+    <div class="repository-authority"><b>Authority boundary</b><span>${current.status === 'previewed' ? 'No repository mutation has occurred.' : 'The primary checkout was not changed.'} SignalRoom cannot deploy or enable this detection in Splunk.</span></div>
   </section>`;
 }
 
@@ -1716,7 +1829,7 @@ function renderDetectionDetail() {
   primaryActions.push('<button class="button ghost" data-detection-investigate>Pressure-test with local model</button>');
   panel.innerHTML = `
     <header class="detection-detail-header"><div><span class="detection-list-status ${escapeHtml(detection.status)}">${escapeHtml(detectionStatusLabel(detection.status))}</span><h3>${escapeHtml(content.title)}</h3><p>Version ${Number(detection.current_version)} · SHA-256 <code>${escapeHtml(detection.current_sha256)}</code></p></div><div>${primaryActions.join('')}</div></header>
-    <div class="detection-boundary"><b>Export authority only</b><span>SignalRoom can create a review package. It cannot deploy, enable, or write this search to Splunk.</span></div>
+    <div class="detection-boundary"><b>Separated authority</b><span>Exports remain local. Optional repository handoff requires an exact preview and explicit approval at each write boundary. SignalRoom cannot deploy, enable, or write this search to Splunk.</span></div>
     <form id="detectionForm"><div class="form-grid">
       <label class="full"><span>Detection title</span><input id="detectionTitle" required maxlength="240" value="${escapeHtml(content.title)}" ${lockAttribute}></label>
       <label class="full"><span>Intent and analyst outcome</span><textarea id="detectionDescription" rows="4" maxlength="10000" ${lockAttribute}>${escapeHtml(content.description)}</textarea></label>
@@ -1742,6 +1855,7 @@ function renderDetectionDetail() {
     ${detectionGateMarkup(detection)}
     ${reviewControls}
     ${detectionGitOpsMarkup(detection)}
+    ${detectionRepositoryMarkup(detection)}
     ${detectionHistoryMarkup(detection)}`;
   if (!locked) $('#detectionForm').addEventListener('submit', saveDetectionVersion);
 }
@@ -1841,6 +1955,49 @@ async function exportDetectionGitChange() {
     await loadDetections(); renderDetectionDetail();
     const link = document.createElement('a'); link.href = result.file.url; link.download = result.file.filename; document.body.appendChild(link); link.click(); link.remove();
     toast('Signed Git change verified locally and exported; pin its key fingerprint in repository policy');
+  } catch (error) { toast(error.message); }
+}
+
+async function previewDetectionRepository() {
+  const detection = state.activeDetection; if (!detection) return;
+  try {
+    state.repositoryHandoff = await api(`/api/detections/${encodeURIComponent(detection.id)}/repository-preview`, {method:'POST',body:JSON.stringify({expected_content_sha256:detection.current_sha256})});
+    renderDetectionDetail();
+    const blocked = state.repositoryHandoff.blocking_reasons?.length;
+    toast(blocked ? 'Repository preview found a protected policy conflict' : 'Exact repository preview ready for analyst approval');
+  } catch (error) { toast(error.message); }
+}
+
+async function applyDetectionRepository() {
+  const value = state.repositoryHandoff; if (!value || value.status !== 'previewed') return;
+  const approved = confirm(`Create this exact local Git branch and commit?\n\nRepository: ${value.repository_path}\nBase: ${value.base_ref} · ${value.base_commit}\nBranch: ${value.branch_name}\nPreview SHA-256: ${value.preview_sha256}\n\nThe primary checkout will remain unchanged. Nothing will be pushed and nothing will be deployed to Splunk.`);
+  if (!approved) return;
+  try {
+    state.repositoryHandoff = await api(`/api/detection-repository/handoffs/${encodeURIComponent(value.id)}/apply`, {method:'POST',body:JSON.stringify({expected_preview_sha256:value.preview_sha256})});
+    renderDetectionDetail();
+    toast('Approved local branch and commit created; primary checkout unchanged');
+  } catch (error) { toast(error.message); }
+}
+
+async function pushDetectionRepository() {
+  const value = state.repositoryHandoff; if (!value?.commit_sha) return;
+  const approved = confirm(`Push this exact detection commit to the configured remote?\n\nRemote: ${value.remote_name}\nBranch: ${value.branch_name}\nCommit: ${value.commit_sha}\n\nThis changes the remote Git repository. It will not open a pull request or deploy to Splunk.`);
+  if (!approved) return;
+  try {
+    state.repositoryHandoff = await api(`/api/detection-repository/handoffs/${encodeURIComponent(value.id)}/push`, {method:'POST',body:JSON.stringify({expected_commit_sha:value.commit_sha})});
+    renderDetectionDetail();
+    toast('Exact detection branch pushed; no pull request opened');
+  } catch (error) { toast(error.message); }
+}
+
+async function openDetectionRepositoryPullRequest() {
+  const value = state.repositoryHandoff; if (!value?.commit_sha) return;
+  const approved = confirm(`Open a DRAFT pull request for this exact pushed commit?\n\nRemote: ${value.remote_name}\nBranch: ${value.branch_name}\nCommit: ${value.commit_sha}\n\nThe pull request remains subject to repository review and CI. SignalRoom receives no Splunk deployment authority.`);
+  if (!approved) return;
+  try {
+    state.repositoryHandoff = await api(`/api/detection-repository/handoffs/${encodeURIComponent(value.id)}/pull-request`, {method:'POST',body:JSON.stringify({expected_commit_sha:value.commit_sha})});
+    renderDetectionDetail();
+    toast('Draft pull request opened for the exact pushed commit');
   } catch (error) { toast(error.message); }
 }
 
@@ -1949,6 +2106,7 @@ async function saveSettings(event) {
   settings.default_chat_model = $('#defaultModel').value; settings.security_reasoning_model = $('#securityModel').value;
   settings.specialist_runtime = $('#specialistRuntime').value;
   settings.huggingface_policy = $('#hfPolicy').value;
+  settings.detection_repository = repositorySettingsPayload();
   settings.models.forEach(model => {
     if (model.provider === 'ollama') model.endpoint = $('#ollamaEndpoint').value.trim() || 'http://localhost:11434';
     if (model.id === settings.default_chat_model) model.model = $('#generalModelId').value.trim() || model.model;
@@ -1958,7 +2116,7 @@ async function saveSettings(event) {
   });
   try {
     state.settings = await api('/api/settings', { method:'PUT', body:JSON.stringify({ settings, splunk_token:$('#splunkToken').value || null, huggingface_token:$('#hfToken').value || null }) });
-    hydrateSettings(); renderModels(); await loadModelReadiness(); $('#settingsModal').hidden = true; $('#splunkToken').value = ''; $('#hfToken').value = ''; toast('Workspace saved');
+    hydrateSettings(); renderModels(); await loadModelReadiness(); await loadDetectionRepositoryStatus(); $('#settingsModal').hidden = true; $('#splunkToken').value = ''; $('#hfToken').value = ''; toast('Workspace saved');
     if (state.settings.demo_mode && !demoWasEnabled) startDemoTour();
   } catch (error) { toast(error.message); }
 }
@@ -2064,6 +2222,10 @@ document.addEventListener('click', async event => {
   if (reviewDetectionButton) { await reviewDetection(reviewDetectionButton.dataset.reviewDetection); return; }
   if (event.target.closest('[data-export-detection]')) { await exportDetection(); return; }
   if (event.target.closest('[data-export-detection-git]')) { await exportDetectionGitChange(); return; }
+  if (event.target.closest('[data-preview-repository]')) { await previewDetectionRepository(); return; }
+  if (event.target.closest('[data-apply-repository]')) { await applyDetectionRepository(); return; }
+  if (event.target.closest('[data-push-repository]')) { await pushDetectionRepository(); return; }
+  if (event.target.closest('[data-pull-request-repository]')) { await openDetectionRepositoryPullRequest(); return; }
   if (event.target.closest('[data-retire-detection]')) { await retireDetection(); return; }
   if (event.target.closest('[data-delete-detection]')) { await deleteDetection(); return; }
   if (event.target.closest('[data-detection-investigate]')) { investigateDetection(); return; }
@@ -2233,7 +2395,7 @@ document.addEventListener('click', async event => {
   }
   const change = event.target.closest('[data-change-investigate]');
   if (change) openInvestigation('discovery', `Explain and validate this change since the previous discovery: ${change.dataset.changeCategory} ${change.dataset.changeInvestigate}. Determine whether it is a real posture change or a collection issue.`, false);
-  if (event.target.closest('#openSettings,#configureModels')) $('#settingsModal').hidden = false;
+  if (event.target.closest('#openSettings,#configureModels,[data-open-settings]')) $('#settingsModal').hidden = false;
   if (event.target.closest('#closeSettings')) $('#settingsModal').hidden = true;
   if (event.target.closest('#addArtifact')) openArtifactEditor();
   if (event.target.closest('.close-artifact')) { $('#artifactModal').hidden = true; state.editingArtifactId = null; }
@@ -2323,9 +2485,12 @@ $('#contextPrevious').addEventListener('click', () => { state.contextPage -= 1; 
 $('#contextNext').addEventListener('click', () => { state.contextPage += 1; renderArtifacts(state.contextItems); $('#contextView').scrollIntoView({ behavior:'smooth', block:'start' }); });
 $('#settingsForm').addEventListener('submit', saveSettings);
 $('#testSplunk').addEventListener('click', () => testConnection('splunk', null, $('#splunkTestResult')));
+$('#testRepository').addEventListener('click', testDetectionRepository);
 $('#checkModels').addEventListener('click', loadModelReadiness);
 $('#checkLocalModels').addEventListener('click', loadModelReadiness);
 $('#verifySplunkTls').addEventListener('change', updateTlsControls);
+$('#repositoryEnabled').addEventListener('change', updateRepositoryControls);
+$('#repositoryAllowPush').addEventListener('change', updateRepositoryControls);
 $('#contextSearch').addEventListener('input', async event => {
   const query = event.target.value.trim();
   state.contextPage = 1;

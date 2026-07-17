@@ -355,7 +355,21 @@
             <label class="full"><span>Hugging Face cloud usage policy</span><select id="hfPolicy"><option value="disabled">Disabled · never send evidence to hosted inference</option><option value="ask">Ask · require approval for every cloud question</option><option value="allow">Allowed · use hosted specialists automatically</option></select><small class="field-help">This policy applies only when the cloud runtime is selected. Local SecureBERT inference does not require cloud approval.</small></label>
           </div>
         </div>
-        <div class="form-section"><h3>Execution policy</h3><label class="switch-line"><span><b>Allow write-capable tools</b><small>Keep disabled for analyst workspaces; not implemented in this release</small></span><input type="checkbox" id="allowWrites" disabled><span class="switch-control" aria-hidden="true"></span></label></div>
+        <div class="form-section"><h3>Detection repository handoff</h3><p>Optionally move approved detections into a local Git repository through an exact diff preview. Repository writes, remote pushes, and draft pull requests each require a separate analyst action.</p>
+          <label class="switch-line"><span><b>Enable local repository handoff</b><small>Creates an isolated branch and commit only after approval; the primary checkout remains untouched</small></span><input type="checkbox" id="repositoryEnabled"><span class="switch-control" aria-hidden="true"></span></label>
+          <div class="form-grid" id="repositorySettings">
+            <label class="full"><span>Absolute repository root</span><input id="repositoryPath" placeholder="C:\security\detections or /srv/security/detections"><small class="field-help">SignalRoom requires the Git repository root—not a parent or nested directory.</small></label>
+            <label><span>Base branch or ref</span><input id="repositoryBaseRef" value="main" maxlength="240"></label>
+            <label><span>Branch prefix</span><input id="repositoryBranchPrefix" value="signalroom/" maxlength="120"></label>
+            <label><span>Git remote</span><input id="repositoryRemote" value="origin" maxlength="120"></label>
+            <label><span>Commit author name</span><input id="repositoryAuthorName" maxlength="160"></label>
+            <label class="full"><span>Commit author email</span><input id="repositoryAuthorEmail" type="email" maxlength="320"></label>
+            <label class="full switch-line nested-switch"><span><b>Allow explicit remote branch pushes</b><small>Disabled by default. Every push still requires a separate confirmation in Detections.</small></span><input type="checkbox" id="repositoryAllowPush"><span class="switch-control" aria-hidden="true"></span></label>
+            <label class="full switch-line nested-switch"><span><b>Allow explicit draft pull requests</b><small>Requires remote push permission, GitHub CLI authentication, and another separate confirmation.</small></span><input type="checkbox" id="repositoryAllowPullRequest"><span class="switch-control" aria-hidden="true"></span></label>
+          </div>
+          <div class="connection-test-row"><button class="button ghost small" type="button" id="testRepository">Inspect repository</button><span class="test-result" id="repositoryTestResult"></span></div>
+        </div>
+        <div class="form-section"><h3>Agent execution policy</h3><label class="switch-line"><span><b>Allow write-capable Splunk tools</b><small>Keep disabled for analyst workspaces; repository handoff has its own narrower controls above</small></span><input type="checkbox" id="allowWrites" disabled><span class="switch-control" aria-hidden="true"></span></label></div>
         <footer><span><i class="lock-icon">◆</i> Tokens are encrypted at rest and never returned by the API.</span><button class="button primary" type="submit">Save workspace</button></footer>
       </form>
     </section>

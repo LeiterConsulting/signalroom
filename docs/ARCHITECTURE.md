@@ -132,6 +132,20 @@ network calls and supports an externally pinned public-key fingerprint; the gene
 protected repository variable rather than trusting a fingerprint modified inside the same pull request. Git and
 Splunk mutations remain outside this service boundary.
 
+`DetectionRepositoryService` is a separate, opt-in authority boundary. It compares a temporary signed archive
+with a resolved immutable base commit and persists a 30-minute preview contract containing the repository path,
+base and content identities, generated branch, signing key, archive hash, and per-file plan. Protected policy
+controls and symbolic-link boundaries fail closed. Applying the exact digest creates a temporary Git worktree,
+verifies the signed archive again, and uses a no-checkout isolated index plus `hash-object`, `update-index`,
+`write-tree`, and `commit-tree` to construct and validate the exact commit before atomically creating the branch.
+Git hooks, content filters, filesystem monitors, and the `ext` protocol do not participate. The worktree is then
+removed while preserving the new local branch. The configured primary checkout is neither switched nor modified.
+
+Remote push and GitHub draft-PR creation are later state transitions with separate disabled-by-default settings
+and exact commit binding. Push verifies the remote ref after transfer. Draft PR creation requires that pushed
+identity, an authenticated local GitHub CLI, and an additional explicit action. Repository handoff never changes
+the generated disabled saved-search policy and does not cross the Splunk write boundary.
+
 ## Outbound delivery is a separate authority
 
 `AssuranceDeliveryService` owns a separately opt-in generic webhook policy and restart-safe delivery worker. A

@@ -11,6 +11,9 @@ from splunk_security_agent.schemas import (
     CaseUpdate,
     DetectionGateRunRequest,
     DetectionGitExportRequest,
+    DetectionRepositoryApprovalRequest,
+    DetectionRepositoryPreviewRequest,
+    DetectionRepositoryRemoteRequest,
     DetectionUpdate,
     DetectionValidationDraftRequest,
     ValidationTaskUpdate,
@@ -183,3 +186,58 @@ async def test_signed_git_change_export_is_audited(monkeypatch):
     assert result["authority"]["creates_git_commit"] is False
     assert result["authority"]["opens_pull_request"] is False
     assert audit.event_types == ["detection.git_change.exported"]
+
+
+@pytest.mark.asyncio
+async def test_repository_handoff_control_plane_is_audited(monkeypatch):
+    app_module = importlib.import_module("splunk_security_agent.app")
+    audit = AuditRecorder()
+    handoff = {
+        "id": "handoff-1",
+        "detection_id": "detection-1",
+        "version": 2,
+        "content_sha256": "a" * 64,
+        "preview_sha256": "b" * 64,
+        "base_commit": "c" * 40,
+        "branch_name": "signalroom/detection-v2",
+        "commit_sha": "d" * 40,
+        "remote_name": "origin",
+        "pull_request_url": "https://github.com/example/repo/pull/1",
+        "summary": {"added": 10, "modified": 0},
+        "blocking_reasons": [],
+    }
+    fake_repository = SimpleNamespace(
+        preview=lambda detection_id, expected: handoff,
+        apply=lambda handoff_id, expected: handoff,
+        push=lambda handoff_id, expected: handoff,
+        open_draft_pull_request=lambda handoff_id, expected: handoff,
+    )
+    monkeypatch.setattr(
+        app_module,
+        "services",
+        SimpleNamespace(audit=audit, detection_repository=fake_repository),
+    )
+
+    await app_module.preview_detection_repository_handoff(
+        "detection-1",
+        DetectionRepositoryPreviewRequest(expected_content_sha256="a" * 64),
+    )
+    await app_module.apply_detection_repository_handoff(
+        "handoff-1",
+        DetectionRepositoryApprovalRequest(expected_preview_sha256="b" * 64),
+    )
+    await app_module.push_detection_repository_handoff(
+        "handoff-1",
+        DetectionRepositoryRemoteRequest(expected_commit_sha="d" * 40),
+    )
+    await app_module.open_detection_repository_pull_request(
+        "handoff-1",
+        DetectionRepositoryRemoteRequest(expected_commit_sha="d" * 40),
+    )
+
+    assert audit.event_types == [
+        "detection.repository.previewed",
+        "detection.repository.committed",
+        "detection.repository.pushed",
+        "detection.repository.pull_request.opened",
+    ]

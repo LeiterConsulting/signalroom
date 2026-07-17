@@ -348,6 +348,39 @@ class DetectionService:
             detection_id,
             request.expected_content_sha256,
         )
+        stem = (
+            f"signalroom_git_change_{detection_id[:8]}_"
+            f"v{current['current_version']}"
+        )
+        path = self.export_dir / f"{stem}.zip"
+        current, path, verification, archive_sha256 = (
+            self.build_git_change_archive(
+                detection_id,
+                request.expected_content_sha256,
+                path,
+            )
+        )
+        result = self.store.record_export(
+            detection_id,
+            path.name,
+            current["current_sha256"],
+            archive_sha256,
+            export_kind="git-change",
+        )
+        assert result is not None
+        return result, path, verification
+
+    def build_git_change_archive(
+        self,
+        detection_id: str,
+        expected_content_sha256: str,
+        destination: Path | str,
+    ) -> tuple[dict[str, Any], Path, dict[str, Any], str]:
+        """Build and self-verify a signed change without recording an analyst export."""
+        current = self._exportable_detection(
+            detection_id,
+            expected_content_sha256,
+        )
         content = current["content"]
         gate = self._export_gate(current)
         if not gate:
@@ -424,11 +457,8 @@ class DetectionService:
             ),
             "CHANGE_REQUEST.md": self._change_request(current, key_id),
         }
-        stem = (
-            f"signalroom_git_change_{detection_id[:8]}_"
-            f"v{current['current_version']}"
-        )
-        path = self.export_dir / f"{stem}.zip"
+        path = Path(destination)
+        path.parent.mkdir(parents=True, exist_ok=True)
         with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as archive:
             for name, body in repository_files.items():
                 archive.writestr(name, body)
@@ -438,15 +468,7 @@ class DetectionService:
             path.unlink(missing_ok=True)
             raise
         archive_sha256 = hashlib.sha256(path.read_bytes()).hexdigest()
-        result = self.store.record_export(
-            detection_id,
-            path.name,
-            current["current_sha256"],
-            archive_sha256,
-            export_kind="git-change",
-        )
-        assert result is not None
-        return result, path, verification
+        return current, path, verification, archive_sha256
 
     def retire(self, detection_id: str) -> dict[str, Any] | None:
         return self.store.retire(detection_id)
