@@ -2449,6 +2449,26 @@ function renderSecurityPosture(result) {
     const synthesis = analysis.general_synthesis || {};
     const security = analysis.security_assessment || {};
     const entities = analysis.specialist_enrichment?.entities || [];
+    const entityValidation = analysis.specialist_enrichment?.entity_validation || {};
+    const suppressedEntities = Number(entityValidation.suppressed_count || 0);
+    const suppressionReasonLabels = {
+      'generic-catalog-term': ['generic catalog term', 'generic catalog terms'],
+      'missing-explicit-security-context': ['label missing explicit security context', 'labels missing explicit security context'],
+      'unvalidated-observable-format': ['unvalidated observable format', 'unvalidated observable formats'],
+      'below-minimum-confidence': ['label below minimum confidence', 'labels below minimum confidence'],
+      'below-semantic-confidence': ['semantic label below minimum confidence', 'semantic labels below minimum confidence'],
+      'invalid-or-fragmented-value': ['invalid or fragmented value', 'invalid or fragmented values'],
+      'unsupported-entity-type': ['unsupported entity type', 'unsupported entity types'],
+      'duplicate': ['duplicate label', 'duplicate labels'],
+      'output-limit': ['label beyond the display limit', 'labels beyond the display limit'],
+    };
+    const entitySuppressionReasons = Object.entries(entityValidation.reasons || {})
+      .map(([reason, count]) => {
+        const amount = Number(count);
+        const labels = suppressionReasonLabels[reason] || ['unsupported label', 'unsupported labels'];
+        return `${amount} ${labels[amount === 1 ? 0 : 1]}`;
+      })
+      .join(' · ');
     const matches = analysis.specialist_enrichment?.context_matches || [];
     const hypotheses = analysis.reconciliation?.risk_hypotheses || [];
     const opportunities = analysis.reconciliation?.detection_opportunities || [];
@@ -2456,6 +2476,7 @@ function renderSecurityPosture(result) {
     const passCards = passes.map(item => {
       const metrics = item.reused ? ['Reused exact input · 0 new inference'] : [`${Number(item.duration_seconds || 0).toFixed(1)}s`];
       if (item.result_count !== undefined) metrics.push(`${Number(item.result_count).toLocaleString()} results`);
+      if (item.suppressed_count) metrics.push(`${Number(item.suppressed_count).toLocaleString()} suppressed`);
       if (item.attempt_count) metrics.push(`${item.attempt_count} attempt${item.attempt_count === 1 ? '' : 's'}`);
       if (item.structured_mode) metrics.push(item.structured_mode);
       if (item.input_chars) metrics.push(`${Math.round(Number(item.input_chars) / 100) / 10}K input chars`);
@@ -2471,7 +2492,7 @@ function renderSecurityPosture(result) {
       ${priorities.length ? `<section class="model-team-section"><h4>Evidence-linked priorities</h4><div class="priority-list">${priorities.slice(0,8).map((item,index) => `<article class="${escapeHtml(item.validation_status || 'needs-validation')}"><span>${index+1}</span><div><header><b>${escapeHtml(item.title || 'Priority')}</b><em class="severity ${escapeHtml(item.severity || 'medium')}">${escapeHtml(item.severity || 'medium')}</em></header><p>${escapeHtml(item.why || '')}</p><small>Owner: ${escapeHtml(item.owner || 'Unassigned')} · Next: ${escapeHtml(item.next_step || 'Validate')}</small><div class="evidence-ref-row">${(item.evidence_refs || []).map(ref => `<code>${escapeHtml(ref)}</code>`).join('')}${item.validation_status === 'needs-validation' ? '<b>Needs evidence validation</b>' : ''}</div></div></article>`).join('')}</div></section>` : ''}
       ${hypotheses.length ? `<section class="model-team-section"><h4>Security hypotheses</h4><div class="model-intelligence-grid">${hypotheses.slice(0,6).map(item => `<article><span>${escapeHtml(item.confidence || 'low')} confidence</span><b>${escapeHtml(item.title)}</b><p>${escapeHtml(item.basis)}</p><small>${escapeHtml(item.validation)}</small><div class="evidence-ref-row">${(item.evidence_refs || []).map(ref => `<code>${escapeHtml(ref)}</code>`).join('')}</div></article>`).join('')}</div></section>` : ''}
       ${opportunities.length ? `<section class="model-team-section"><h4>Detection opportunities</h4><div class="model-intelligence-grid">${opportunities.slice(0,6).map(item => `<article><span>${escapeHtml(item.validation_status || 'needs-validation')}</span><b>${escapeHtml(item.title)}</b><p>${escapeHtml(item.rationale)}</p><small>${escapeHtml(item.validation)}</small><div class="evidence-ref-row">${(item.evidence_refs || []).map(ref => `<code>${escapeHtml(ref)}</code>`).join('')}</div></article>`).join('')}</div></section>` : ''}
-      ${(entities.length || matches.length) ? `<section class="model-team-section"><h4>SecureBERT enrichment</h4>${entities.length ? `<div class="discovery-entity-row">${entities.slice(0,20).map(item => `<span><b>${escapeHtml(item.type)}</b>${escapeHtml(item.value)}</span>`).join('')}</div>` : ''}${matches.length ? `<div class="discovery-context-links">${matches.slice(0,6).map(item => `<button data-open-artifact="${escapeHtml(item.id.split(':')[0])}"><b>${escapeHtml(item.title)}</b><span>${escapeHtml(item.source)} · ${Number(item.score || 0).toFixed(2)}</span></button>`).join('')}</div>` : ''}</section>` : ''}
+      ${(entities.length || matches.length || suppressedEntities) ? `<section class="model-team-section securebert-context"><h4>Validated SecureBERT context</h4><p class="entity-contract">Entity labels are candidates, not findings. SignalRoom promotes only concrete observables or semantic labels supported by explicit source evidence; a label never establishes maliciousness by itself.</p>${entities.length ? `<h5>Evidence-supported entity candidates</h5><div class="discovery-entity-row">${entities.slice(0,20).map(item => `<span title="${escapeHtml(item.evidence_excerpt || 'Validated from bounded discovery evidence')}"><b>${escapeHtml(item.type)}</b>${escapeHtml(item.value)}<small>${escapeHtml(item.evidence_ref || 'bounded evidence')} · ${Math.round(Number(item.confidence || 0) * 100)}%</small></span>`).join('')}</div>` : '<p class="entity-empty">No entity labels met the evidence-validation contract in this run.</p>'}${suppressedEntities ? `<details class="entity-suppression"><summary>${suppressedEntities} unsupported NER label${suppressedEntities === 1 ? '' : 's'} suppressed before synthesis and RAG</summary>${entitySuppressionReasons ? `<p>${escapeHtml(entitySuppressionReasons)}</p>` : ''}</details>` : ''}${matches.length ? `<h5>Related local context</h5><div class="discovery-context-links">${matches.slice(0,6).map(item => `<button data-open-artifact="${escapeHtml(item.id.split(':')[0])}"><b>${escapeHtml(item.title)}</b><span>${escapeHtml(item.source)} · ${Number(item.score || 0).toFixed(2)}</span></button>`).join('')}</div>` : ''}</section>` : ''}
       ${caveats.length ? `<details class="model-team-caveats"><summary>Model-team caveats and rejected claims (${caveats.length})</summary><ul>${caveats.map(item => `<li>${escapeHtml(item)}</li>`).join('')}</ul></details>` : ''}`;
   } else {
     $('#assessmentModel').textContent = analysis.strategy === 'deterministic-only' ? 'Quick · deterministic' : 'Deterministic fallback';

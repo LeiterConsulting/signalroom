@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import ipaddress
 import json
 import math
 import re
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
+from urllib.parse import urlsplit
 from uuid import uuid4
 
 from pydantic import BaseModel, Field, ValidationError
@@ -435,7 +437,7 @@ class DiscoveryPipeline:
         compact = self._compact_blueprint(blueprint, evidence_map)
         specialist_fingerprint = self._fingerprint(
             {
-                "contract": "securebert-discovery-v1",
+                "contract": "securebert-discovery-v2",
                 "deterministic": blueprint["fingerprints"]["deterministic"],
                 "context": self._context_revision(),
                 "runtime": settings.specialist_runtime,
@@ -1345,6 +1347,7 @@ class DiscoveryPipeline:
                 "status": "unavailable",
                 "reason": "Discovery specialists require the local Transformers runtime.",
                 "entities": [],
+                "entity_validation": self._empty_entity_validation(),
                 "context_matches": [],
                 "passes": [],
             }
@@ -1359,14 +1362,7 @@ class DiscoveryPipeline:
             progress=71,
             metrics={"roles": 2, "provider": "local-transformers"},
         )
-        ner_text = json.dumps(
-            {
-                "findings": compact.get("findings", []),
-                "detections": compact.get("detection_sample", []),
-                "knowledge": compact.get("knowledge_summary", {}),
-            },
-            default=str,
-        )[:12000]
+        ner_text = self._entity_evidence_text(compact)
         correlation_query = " ".join(
             [
                 *(item.get("title", "") for item in compact.get("findings", [])),
@@ -1386,13 +1382,15 @@ class DiscoveryPipeline:
             "securebert",
             "SecureBERT enrichment complete",
             (
-                f"Extracted {len(ner_result['entities'])} security entities and correlated "
-                f"{len(retrieval_result['matches'])} distinct local artifacts."
+                f"Promoted {len(ner_result['entities'])} evidence-supported entity candidates, "
+                f"suppressed {ner_result['validation']['suppressed_count']} unsupported labels, "
+                f"and correlated {len(retrieval_result['matches'])} distinct local artifacts."
             ),
             progress=76,
             status="complete",
             metrics={
                 "entities": len(ner_result["entities"]),
+                "entity_labels_suppressed": ner_result["validation"]["suppressed_count"],
                 "context_matches": len(retrieval_result["matches"]),
                 "hosted_calls": 0,
             },
@@ -1401,6 +1399,7 @@ class DiscoveryPipeline:
             "status": status,
             "provider": "local-transformers",
             "entities": ner_result["entities"],
+            "entity_validation": ner_result["validation"],
             "context_matches": retrieval_result["matches"],
             "passes": passes,
             "network_inference": False,
@@ -1414,6 +1413,7 @@ class DiscoveryPipeline:
         if not local_model_installed(self.config.local_model_path(profile_id)):
             return {
                 "entities": [],
+                "validation": self._empty_entity_validation(),
                 "pass": {
                     "role": "security-entity-extraction",
                     "status": "unavailable",
@@ -1425,10 +1425,14 @@ class DiscoveryPipeline:
             values: list[dict[str, Any]] = []
             provider = self.router.provider(profile_id)
             for chunk in self._text_chunks(text, 2800)[:4]:
-                values.extend(await provider.entities(chunk))
-            entities = self._normalize_discovery_entities(values)
+                extracted = await provider.entities(chunk)
+                for value in extracted:
+                    if isinstance(value, dict):
+                        values.append({**value, "_source_text": chunk})
+            entities, validation = self._normalize_discovery_entities(values)
             return {
                 "entities": entities,
+                "validation": validation,
                 "pass": {
                     "role": "security-entity-extraction",
                     "status": "complete",
@@ -1436,11 +1440,14 @@ class DiscoveryPipeline:
                     "profile": profile_id,
                     "duration_seconds": round((datetime.now(UTC) - started).total_seconds(), 2),
                     "result_count": len(entities),
+                    "raw_result_count": validation["raw_count"],
+                    "suppressed_count": validation["suppressed_count"],
                 },
             }
         except Exception as exc:
             return {
                 "entities": [],
+                "validation": self._empty_entity_validation(),
                 "pass": {
                     "role": "security-entity-extraction",
                     "status": "error",
@@ -1853,38 +1860,257 @@ class DiscoveryPipeline:
         }
 
     @staticmethod
-    def _normalize_discovery_entities(values: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        recognized_indicator = re.compile(
-            r"(?i)^(?:CVE-\d{4}-\d{4,}|(?:[0-9a-f]{2}:){5}[0-9a-f]{2}|"
-            r"(?:\d{1,3}\.){3}\d{1,3}|[0-9a-f]{32,64}|"
-            r"(?:[a-z0-9-]+\.)+[a-z]{2,63}|https?://\S+)$"
+    def _entity_evidence_text(compact: dict[str, Any]) -> str:
+        """Build a security-relevant NER packet without treating catalog names as prose."""
+        lines: list[str] = []
+        for index, finding in enumerate(compact.get("findings", []), 1):
+            if not isinstance(finding, dict):
+                continue
+            evidence_ref = str(finding.get("evidence_ref") or f"D{index}")
+            text = " ".join(
+                str(finding.get(key) or "").strip()
+                for key in ("title", "evidence", "next_step")
+            ).strip()
+            if text:
+                lines.append(f"[{evidence_ref}] {text}")
+
+        threat_language = re.compile(
+            r"(?i)\b(?:malware|ransomware|trojan|botnet|backdoor|rootkit|spyware|"
+            r"wiper|worm|threat actor|campaign|command[- ]and[- ]control|c2|"
+            r"vulnerabilit(?:y|ies)|exploit(?:ed|ation)?|zero[- ]day|ioc|"
+            r"indicator of compromise)\b"
         )
+        concrete_observable = re.compile(
+            r"(?i)(?:\bCVE-\d{4}-\d{4,}\b|https?://\S+|"
+            r"\b(?:\d{1,3}\.){3}\d{1,3}\b|\b[0-9a-f]{32,64}\b|"
+            r"\b(?:domain|url|uri|hostname|dest(?:ination)?|src_ip|source_ip)"
+            r"\s*[=:]\s*[a-z0-9][a-z0-9._:/-]+)"
+        )
+        for index, item in enumerate(compact.get("detection_sample", []), 1):
+            if not isinstance(item, dict):
+                continue
+            text = " ".join(
+                str(item.get(key) or "").strip()
+                for key in ("name", "search_preview")
+            ).strip()
+            if not text or not (threat_language.search(text) or concrete_observable.search(text)):
+                continue
+            evidence_ref = str(item.get("evidence_ref") or f"K{index}")
+            lines.append(f"[{evidence_ref}] {text}")
+        return "\n".join(lines)[:12000]
+
+    @staticmethod
+    def _empty_entity_validation() -> dict[str, Any]:
+        return {
+            "contract": "evidence-supported-entities-v1",
+            "raw_count": 0,
+            "accepted_count": 0,
+            "suppressed_count": 0,
+            "reasons": {},
+        }
+
+    @staticmethod
+    def _observable_kind(value: str) -> str:
+        if re.fullmatch(r"(?i)CVE-\d{4}-\d{4,}", value):
+            return "cve"
+        if re.fullmatch(r"(?i)(?:[0-9a-f]{2}:){5}[0-9a-f]{2}", value):
+            return "mac-address"
+        try:
+            ipaddress.ip_address(value)
+            return "ip-address"
+        except ValueError:
+            pass
+        if re.fullmatch(r"(?i)[0-9a-f]{32}|[0-9a-f]{40}|[0-9a-f]{64}", value):
+            return "cryptographic-hash"
+        if value.lower().startswith(("http://", "https://")):
+            parsed = urlsplit(value)
+            if parsed.scheme in {"http", "https"} and parsed.hostname:
+                return "url"
+        if re.fullmatch(
+            r"(?i)(?=.{4,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+"
+            r"[a-z]{2,63}",
+            value,
+        ):
+            return "domain"
+        return ""
+
+    @staticmethod
+    def _entity_source_context(item: dict[str, Any], value: str) -> tuple[str, str]:
+        source = str(item.get("_source_text") or "")
+        if not source:
+            return "", ""
+        start = item.get("start")
+        if not isinstance(start, int) or not 0 <= start < len(source):
+            start = source.lower().find(value.lower())
+        if start < 0:
+            start = 0
+        references = list(re.finditer(r"\[([A-Z]\d+)\]", source[: start + 1]))
+        active_reference = references[-1] if references else None
+        evidence_ref = active_reference.group(1) if active_reference else ""
+        excerpt_start = active_reference.start() if active_reference else max(0, start - 140)
+        next_reference = re.search(r"\[[A-Z]\d+\]", source[start + max(len(value), 1) :])
+        excerpt_end = (
+            start + max(len(value), 1) + next_reference.start()
+            if next_reference
+            else min(len(source), start + max(len(value), 1) + 220)
+        )
+        excerpt = re.sub(r"\s+", " ", source[excerpt_start:excerpt_end]).strip()
+        if len(excerpt) > 360:
+            excerpt = f"{excerpt[:357].rstrip()}…"
+        return evidence_ref, excerpt
+
+    @staticmethod
+    def _semantic_entity_supported(entity_type: str, value: str, context: str) -> bool:
+        without_value = re.sub(re.escape(value), " ", context, flags=re.IGNORECASE)
+        cues = {
+            "malware": (
+                r"(?i)\b(?:malware|ransomware|trojan|botnet|backdoor|rootkit|"
+                r"spyware|wiper|worm|malicious (?:code|payload)|malware family)\b"
+            ),
+            "vulnerability": (
+                r"(?i)\b(?:vulnerabilit(?:y|ies)|CVE|exploit(?:ed|ation)?|"
+                r"zero[- ]day|security flaw|remote code execution|RCE|patch)\b"
+            ),
+            "organization": (
+                r"(?i)\b(?:threat actor|APT|intrusion set|group|campaign|"
+                r"attribut(?:e|ed|ion)|organization|vendor|company|researcher)\b"
+            ),
+            "system": (
+                r"(?i)\b(?:operating system|platform|product|server|workstation|"
+                r"device|appliance|software|service|host)\b"
+            ),
+        }
+        cue = cues.get(entity_type)
+        return bool(cue and re.search(cue, without_value))
+
+    @staticmethod
+    def _normalize_discovery_entities(
+        values: list[dict[str, Any]],
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        """Promote only concrete observables or semantic labels supported by their source text."""
+        generic_terms = {
+            "alert",
+            "app",
+            "application",
+            "bucket",
+            "cloud",
+            "copy",
+            "data",
+            "dawn",
+            "detection",
+            "email",
+            "endpoint",
+            "event",
+            "events",
+            "field",
+            "host",
+            "index",
+            "indicator",
+            "malware",
+            "model",
+            "network",
+            "none",
+            "null",
+            "organization",
+            "scope",
+            "search",
+            "security",
+            "source",
+            "sourcetype",
+            "splunk",
+            "system",
+            "telemetry",
+            "trigger",
+            "unknown",
+            "vulnerability",
+        }
+        type_aliases = {
+            "ioc": "indicator",
+            "entity": "indicator",
+            "organisation": "organization",
+            "vuln": "vulnerability",
+        }
+        reasons: dict[str, int] = {}
+
+        def suppress(reason: str) -> None:
+            reasons[reason] = reasons.get(reason, 0) + 1
+
         merged: dict[tuple[str, str], dict[str, Any]] = {}
         for item in values:
             value = re.sub(r"\s*##", "", str(item.get("word") or "")).strip(" \"'[]{}(),")
-            entity_type = str(item.get("entity_group") or item.get("entity") or "entity").lower()
+            raw_type = str(item.get("entity_group") or item.get("entity") or "entity").lower()
+            entity_type = re.sub(r"^[bi]-", "", raw_type)
+            entity_type = type_aliases.get(entity_type, entity_type)
             score = float(item.get("score") or 0)
             if (
                 len(value) < 4
-                or score < 0.55
-                or value.lower() in {"none", "null", "splunk", "unknown"}
                 or any(marker in value for marker in ("\\", '"', "{", "}", "[", "]", ","))
             ):
+                suppress("invalid-or-fragmented-value")
                 continue
-            if entity_type in {"entity", "indicator", "ioc"} and not recognized_indicator.fullmatch(
-                value
-            ):
+            if not math.isfinite(score) or score < 0.55:
+                suppress("below-minimum-confidence")
                 continue
-            key = (entity_type, value.lower())
+            if value.lower() in generic_terms:
+                suppress("generic-catalog-term")
+                continue
+
+            evidence_ref, excerpt = DiscoveryPipeline._entity_source_context(item, value)
+            observable_kind = DiscoveryPipeline._observable_kind(value)
+            validation_basis = ""
+            promoted_type = entity_type
+            if entity_type == "indicator":
+                if not observable_kind:
+                    suppress("unvalidated-observable-format")
+                    continue
+                validation_basis = f"format:{observable_kind}"
+                promoted_type = "vulnerability" if observable_kind == "cve" else "observable"
+            elif entity_type == "vulnerability" and observable_kind == "cve":
+                validation_basis = "format:cve"
+            elif entity_type in {"malware", "vulnerability", "organization", "system"}:
+                if score < 0.75:
+                    suppress("below-semantic-confidence")
+                    continue
+                if not DiscoveryPipeline._semantic_entity_supported(
+                    entity_type, value, excerpt
+                ):
+                    suppress("missing-explicit-security-context")
+                    continue
+                validation_basis = "explicit-source-context"
+            else:
+                suppress("unsupported-entity-type")
+                continue
+
+            key = (promoted_type, value.lower())
             candidate = {
                 "value": value[:240],
-                "type": entity_type,
+                "type": promoted_type,
                 "confidence": round(score, 3),
                 "source": "local-transformers",
+                "evidence_ref": evidence_ref,
+                "evidence_excerpt": excerpt,
+                "validation": validation_basis,
             }
             if key not in merged or candidate["confidence"] > merged[key]["confidence"]:
+                if key in merged:
+                    suppress("duplicate")
                 merged[key] = candidate
-        return sorted(merged.values(), key=lambda item: item["confidence"], reverse=True)[:40]
+            else:
+                suppress("duplicate")
+        ranked_entities = sorted(
+            merged.values(), key=lambda item: item["confidence"], reverse=True
+        )
+        if len(ranked_entities) > 40:
+            reasons["output-limit"] = len(ranked_entities) - 40
+        entities = ranked_entities[:40]
+        validation = {
+            "contract": "evidence-supported-entities-v1",
+            "raw_count": len(values),
+            "accepted_count": len(entities),
+            "suppressed_count": sum(reasons.values()),
+            "reasons": reasons,
+        }
+        return entities, validation
 
     @staticmethod
     def _text_chunks(text: str, size: int) -> list[str]:

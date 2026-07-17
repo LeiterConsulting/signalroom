@@ -338,6 +338,124 @@ async def test_standard_discovery_runs_role_based_local_model_team(tmp_path):
     )
 
 
+def test_securebert_entity_validation_rejects_splunk_catalog_false_positives():
+    source = (
+        "[K1] BirdScope - Daily Species Richness "
+        "[K2] Bucket Copy Trigger "
+        "[K3] DMC Alert - Critical System Physical Memory Usage"
+    )
+
+    def prediction(value, entity_type, score):
+        start = source.index(value)
+        return {
+            "word": value,
+            "entity_group": entity_type,
+            "score": score,
+            "start": start,
+            "end": start + len(value),
+            "_source_text": source,
+        }
+
+    entities, validation = DiscoveryPipeline._normalize_discovery_entities(
+        [
+            prediction("BirdScope", "Malware", 0.994),
+            prediction("Bucket", "Malware", 0.899),
+            prediction("Trigger", "Malware", 0.98),
+            prediction("Copy", "System", 0.97),
+            prediction("DMC Alert", "System", 0.96),
+        ]
+    )
+
+    assert entities == []
+    assert validation["raw_count"] == 5
+    assert validation["accepted_count"] == 0
+    assert validation["suppressed_count"] == 5
+    assert validation["reasons"]["missing-explicit-security-context"] == 2
+    assert validation["reasons"]["generic-catalog-term"] == 3
+
+
+def test_securebert_entity_validation_preserves_supported_security_candidates():
+    source = (
+        "[D1] CVE-2026-1234 is an exploited vulnerability associated with Emotet malware. "
+        "The Windows server contacted 198.51.100.7 and callback.example. "
+        "Threat actor group ACME was named by the source."
+    )
+
+    def prediction(value, entity_type, score):
+        start = source.index(value)
+        return {
+            "word": value,
+            "entity_group": entity_type,
+            "score": score,
+            "start": start,
+            "end": start + len(value),
+            "_source_text": source,
+        }
+
+    entities, validation = DiscoveryPipeline._normalize_discovery_entities(
+        [
+            prediction("CVE-2026-1234", "Vulnerability", 0.99),
+            prediction("Emotet", "Malware", 0.96),
+            prediction("Windows", "System", 0.91),
+            prediction("198.51.100.7", "Indicator", 0.98),
+            prediction("callback.example", "Indicator", 0.94),
+            prediction("ACME", "Organization", 0.88),
+        ]
+    )
+
+    candidates = {(item["type"], item["value"]): item for item in entities}
+    assert set(candidates) == {
+        ("vulnerability", "CVE-2026-1234"),
+        ("malware", "Emotet"),
+        ("system", "Windows"),
+        ("observable", "198.51.100.7"),
+        ("observable", "callback.example"),
+        ("organization", "ACME"),
+    }
+    assert all(item["evidence_ref"] == "D1" for item in entities)
+    assert all(item["evidence_excerpt"].startswith("[D1]") for item in entities)
+    assert candidates[("observable", "198.51.100.7")]["validation"] == "format:ip-address"
+    assert validation["accepted_count"] == 6
+    assert validation["suppressed_count"] == 0
+
+
+def test_securebert_input_excludes_ordinary_catalog_names():
+    compact = {
+        "findings": [
+            {
+                "evidence_ref": "D1",
+                "title": "Stale telemetry detected",
+                "evidence": "Two sourcetypes have not reported.",
+                "next_step": "Validate collection health.",
+            }
+        ],
+        "detection_sample": [
+            {
+                "evidence_ref": "K1",
+                "name": "BirdScope - Daily Species Richness",
+                "search_preview": "index=birds | stats dc(species)",
+            },
+            {
+                "evidence_ref": "K2",
+                "name": "Bucket Copy Trigger",
+                "search_preview": "index=_internal | stats count",
+            },
+            {
+                "evidence_ref": "K3",
+                "name": "Emotet malware callback",
+                "search_preview": "dest=callback.example",
+            },
+        ],
+    }
+
+    text = DiscoveryPipeline._entity_evidence_text(compact)
+
+    assert "[D1] Stale telemetry detected" in text
+    assert "BirdScope" not in text
+    assert "Bucket Copy Trigger" not in text
+    assert "[K3] Emotet malware callback" in text
+
+
 async def test_discovery_model_pass_repairs_invalid_local_output_once(tmp_path):
     config = ConfigStore(tmp_path / "data")
     responses = [

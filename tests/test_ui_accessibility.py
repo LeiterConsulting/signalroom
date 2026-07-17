@@ -4,6 +4,7 @@ from pathlib import Path
 STATIC_ROOT = Path(__file__).parents[1] / "src" / "splunk_security_agent" / "static"
 INDEX_HTML = (STATIC_ROOT / "index.html").read_text(encoding="utf-8")
 STYLES_CSS = (STATIC_ROOT / "styles.css").read_text(encoding="utf-8")
+APP_JS = (STATIC_ROOT / "app.js").read_text(encoding="utf-8")
 
 
 def test_switches_use_the_shared_accessible_control() -> None:
@@ -28,3 +29,10 @@ def test_ui_uses_readable_system_type_scale() -> None:
     assert "DM Mono" not in STYLES_CSS
     assert '"Segoe UI Variable Text"' in STYLES_CSS
     assert "--font-mono:" in STYLES_CSS
+
+
+def test_discovery_presents_securebert_labels_as_validated_candidates() -> None:
+    assert "Validated SecureBERT context" in APP_JS
+    assert "Entity labels are candidates, not findings." in APP_JS
+    assert "suppressed before synthesis and RAG" in APP_JS
+    assert "<h4>SecureBERT enrichment</h4>" not in APP_JS
