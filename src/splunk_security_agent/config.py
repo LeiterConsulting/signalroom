@@ -152,10 +152,29 @@ class ConfigStore:
                     secrets[key] = value
             self.vault.save(secrets)
 
+    def delete_secrets(self, *names: str) -> None:
+        with self._lock:
+            secrets = self.vault.load()
+            for name in names:
+                secrets.pop(name, None)
+            self.vault.save(secrets)
+
+    def secret_is_environment_managed(self, name: str) -> bool:
+        env_names = {
+            "splunk_token": "SPLUNK_MCP_TOKEN",
+            "huggingface_token": "HF_TOKEN",
+            "delivery_webhook_url": "SIGNALROOM_WEBHOOK_URL",
+            "delivery_authorization": "SIGNALROOM_WEBHOOK_AUTHORIZATION",
+        }
+        env_name = env_names.get(name, "")
+        return bool(env_name and os.getenv(env_name, ""))
+
     def secret(self, name: str) -> str:
         env_names = {
             "splunk_token": "SPLUNK_MCP_TOKEN",
             "huggingface_token": "HF_TOKEN",
+            "delivery_webhook_url": "SIGNALROOM_WEBHOOK_URL",
+            "delivery_authorization": "SIGNALROOM_WEBHOOK_AUTHORIZATION",
         }
         return os.getenv(env_names.get(name, ""), "") or self.vault.load().get(name, "")
 

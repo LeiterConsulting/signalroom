@@ -6,7 +6,8 @@ const state = {
   modelRecommendations: {}, validations: [], editingValidationId: null,
   modelUpdates: null, modelCatalog: null, splunkModels: null,
   assurance: null, assurancePolicyDirty: false, connectionDiagnostics: null, queryIntelligence: null,
-  feedbackBenchmarks: null, goldenBenchmarks: null
+  feedbackBenchmarks: null, goldenBenchmarks: null, deliveryPolicyDirty: false,
+  deliveryPreview: null
 };
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => [...document.querySelectorAll(selector)];
@@ -1073,7 +1074,9 @@ function renderAssurancePackages(value) {
   $('#assurancePackages').innerHTML = packages.length ? packages.map(item => {
     const signals = item.signals || []; const taskCount = (item.validation_task_ids || []).length;
     const signalRows = signals.slice(0,4).map(signal => `<li><span class="severity ${escapeHtml(signal.severity)}">${escapeHtml(signal.severity)}</span><div><b>${escapeHtml(signal.title)}</b><small>${signal.consecutive_count >= 2 ? `${signal.consecutive_count} consecutive runs` : 'elevated immediately by severity'} · ${escapeHtml(signal.kind)}</small></div></li>`).join('');
-    const actions = item.status === 'review' ? `<button class="button primary small" data-review-assurance-package="${escapeHtml(item.id)}" ${taskCount ? '' : 'disabled'}>Review ${taskCount} draft${taskCount === 1 ? '' : 's'}</button><button class="button ghost small" data-investigate-assurance-package="${escapeHtml(item.id)}">Investigate</button><button class="button ghost small" data-case-assurance-package="${escapeHtml(item.id)}">Add to case</button><button class="button ghost small" data-close-assurance-package="${escapeHtml(item.id)}">Close package</button>` : `<button class="button ghost small" data-investigate-assurance-package="${escapeHtml(item.id)}">Revisit in Investigate</button>`;
+    const deliveryReady = value.delivery?.policy?.enabled && value.delivery?.destination?.configured;
+    const deliveryAction = deliveryReady ? `<button class="button ghost small" data-preview-assurance-delivery="${escapeHtml(item.id)}">Preview delivery</button>` : '';
+    const actions = item.status === 'review' ? `<button class="button primary small" data-review-assurance-package="${escapeHtml(item.id)}" ${taskCount ? '' : 'disabled'}>Review ${taskCount} draft${taskCount === 1 ? '' : 's'}</button><button class="button ghost small" data-investigate-assurance-package="${escapeHtml(item.id)}">Investigate</button><button class="button ghost small" data-case-assurance-package="${escapeHtml(item.id)}">Add to case</button>${deliveryAction}<button class="button ghost small" data-close-assurance-package="${escapeHtml(item.id)}">Close package</button>` : `<button class="button ghost small" data-investigate-assurance-package="${escapeHtml(item.id)}">Revisit in Investigate</button>`;
     return `<article class="assurance-package ${escapeHtml(item.status)} ${escapeHtml(item.severity)}"><header><div><span>${escapeHtml(item.status)} · ${escapeHtml(item.severity)}</span><h5>${escapeHtml(item.title)}</h5></div><b>${taskCount} draft${taskCount === 1 ? '' : 's'}</b></header><p>${escapeHtml(item.summary)}</p><ul>${signalRows}</ul><footer><time>${item.status === 'review' ? `Expires ${escapeHtml(assuranceTime(item.expires_at))}` : `${escapeHtml(item.status)} · ${escapeHtml(assuranceTime(item.closed_at || item.expires_at))}`}</time><div>${actions}</div></footer></article>`;
   }).join('') : '<div class="empty-inline compact-empty">No response package is open. Medium and low signals must repeat; high-severity signals package immediately.</div>';
 }
@@ -1108,6 +1111,110 @@ async function closeAssurancePackage(packageId) {
   catch (error) { toast(error.message); }
 }
 
+function hydrateDeliveryPolicy(value) {
+  if (!value?.policy || state.deliveryPolicyDirty) return;
+  const policy = value.policy;
+  $('#deliveryEnabled').checked = Boolean(policy.enabled);
+  $('#deliveryMode').value = policy.mode;
+  $('#deliverySeverity').value = policy.minimum_severity;
+  $('#deliveryLabel').value = policy.destination_label;
+  $('#deliveryRedaction').value = policy.redaction_level;
+  $('#deliveryAttempts').value = policy.max_attempts;
+  $('#deliveryBackoff').value = String(policy.retry_backoff_seconds);
+  $('#deliveryVerifyTls').checked = Boolean(policy.verify_tls);
+  $('#deliveryCaBundle').value = policy.ca_bundle || '';
+  $$('.delivery-categories input').forEach(input => { input.checked = (policy.signal_kinds || []).includes(input.value); });
+  $('#deliveryWebhookUrl').value = '';
+  $('#deliveryAuthorization').value = '';
+  $('#deliveryClearWebhookUrl').checked = false;
+  $('#deliveryClearAuthorization').checked = false;
+  $('#deliveryWebhookUrl').placeholder = value.destination?.configured ? 'Encrypted destination configured · leave blank to keep' : 'https://automation.example/hooks/signalroom';
+  $('#deliveryAuthorization').placeholder = value.destination?.authorization_configured ? 'Encrypted authorization configured · leave blank to keep' : 'Optional · Bearer …';
+}
+
+function renderDelivery(value) {
+  const delivery = value.delivery || {}; const policy = delivery.policy || {}; const destination = delivery.destination || {};
+  hydrateDeliveryPolicy(delivery);
+  const ready = Boolean(policy.enabled && destination.configured);
+  $('#deliveryStatus').textContent = ready ? `${policy.mode} · ${destination.origin}` : policy.enabled ? 'Destination required' : 'Disabled · local only';
+  $('#deliveryStatus').className = `subtle-pill ${ready ? 'ok' : policy.enabled ? 'warn' : ''}`;
+  $('#deliveryDestinationHint').textContent = destination.configured
+    ? `${destination.origin} · ${destination.transport} · ${destination.authorization_configured ? 'authorization configured' : 'no authorization header'}`
+    : 'No outbound destination configured';
+  const jobs = delivery.jobs || [];
+  $('#deliveryJobs').innerHTML = jobs.length ? jobs.slice(0,12).map(job => {
+    const action = job.status === 'failed'
+      ? `<button class="button ghost small" data-retry-delivery="${escapeHtml(job.id)}">Retry bounded batch</button>`
+      : ['queued','retrying'].includes(job.status)
+        ? `<button class="button ghost small" data-cancel-delivery="${escapeHtml(job.id)}">Cancel</button>`
+        : '';
+    const timing = job.status === 'delivered' ? `Delivered ${assuranceTime(job.delivered_at)}` : job.next_attempt_at ? `Next attempt ${assuranceTime(job.next_attempt_at)}` : assuranceTime(job.updated_at);
+    return `<article class="delivery-job ${escapeHtml(job.status)}"><header><span>${escapeHtml(job.approval_mode.replaceAll('-', ' '))}</span><b>${escapeHtml(job.status)}</b></header><p>Package <code>${escapeHtml(job.package_id.slice(0,8))}</code> → ${escapeHtml(job.destination_label)}</p><div><span>${job.attempt_count}/${job.max_attempts} attempts</span><span>HTTP ${job.http_status || '—'}</span><span>Hash <code>${escapeHtml(job.payload_sha256.slice(0,12))}</code></span></div>${job.last_error ? `<small>${escapeHtml(job.last_error)}</small>` : ''}<footer><time>${escapeHtml(timing)}</time>${action}</footer></article>`;
+  }).join('') : '<div class="empty-inline compact-empty">No outbound package has been approved. Preview an eligible response package to start.</div>';
+  const audit = value.audit || {}; const chain = audit.chain || {};
+  $('#auditChainStatus').textContent = chain.valid ? `${chain.event_count || 0} events · chain valid` : `Integrity break at event ${chain.broken_sequence || 'unknown'}`;
+  $('#auditChainStatus').className = chain.valid ? 'audit-valid' : 'audit-invalid';
+  $('#auditEvents').innerHTML = (audit.events || []).length ? audit.events.slice(0,12).map(item => `<article class="audit-event ${escapeHtml(item.outcome)}"><header><span>#${item.sequence} · ${escapeHtml(item.event_type)}</span><b>${escapeHtml(item.outcome)}</b></header><p>${escapeHtml(item.summary || item.action)}</p><footer><time>${escapeHtml(assuranceTime(item.created_at))}</time><code>${escapeHtml(item.event_hash.slice(0,12))}</code></footer></article>`).join('') : '<div class="empty-inline compact-empty">Audit events appear when control-plane decisions are made.</div>';
+}
+
+async function saveDeliveryPolicy(event) {
+  event.preventDefault();
+  const signalKinds = $$('.delivery-categories input:checked').map(input => input.value);
+  if (!signalKinds.length) { toast('Select at least one eligible signal category'); return; }
+  const payload = {
+    enabled:$('#deliveryEnabled').checked,
+    mode:$('#deliveryMode').value,
+    minimum_severity:$('#deliverySeverity').value,
+    signal_kinds:signalKinds,
+    redaction_level:$('#deliveryRedaction').value,
+    destination_label:$('#deliveryLabel').value.trim() || 'Primary webhook',
+    verify_tls:$('#deliveryVerifyTls').checked,
+    ca_bundle:$('#deliveryCaBundle').value.trim() || null,
+    max_attempts:Number($('#deliveryAttempts').value),
+    retry_backoff_seconds:Number($('#deliveryBackoff').value),
+    webhook_url:$('#deliveryWebhookUrl').value.trim() || null,
+    authorization_header:$('#deliveryAuthorization').value.trim() || null,
+    clear_webhook_url:$('#deliveryClearWebhookUrl').checked,
+    clear_authorization_header:$('#deliveryClearAuthorization').checked
+  };
+  try {
+    await api('/api/delivery/policy', {method:'PUT',body:JSON.stringify(payload)});
+    state.deliveryPolicyDirty = false; await loadAssurance(); toast('Outbound delivery policy saved');
+  } catch (error) { toast(error.message); }
+}
+
+async function previewAssuranceDelivery(packageId) {
+  try {
+    const preview = await api(`/api/assurance/packages/${encodeURIComponent(packageId)}/delivery/preview`, {method:'POST'});
+    state.deliveryPreview = preview;
+    $('#deliveryPreviewContract').innerHTML = `<span><b>${escapeHtml(preview.destination.label)}</b>${escapeHtml(preview.destination.origin)}</span><span><b>${preview.payload_bytes} bytes</b>${escapeHtml(preview.redaction_level)} redaction</span><span><b>SHA-256</b><code>${escapeHtml(preview.payload_sha256)}</code></span><span><b>Authority</b>Delivery only · no SPL execution</span>`;
+    $('#deliveryRedactions').innerHTML = preview.redactions.map(item => `<li>${escapeHtml(item)}</li>`).join('');
+    $('#deliveryPreviewPayload').textContent = JSON.stringify(preview.payload, null, 2);
+    $('#approveDelivery').textContent = preview.approval_required ? 'Approve exact payload and queue' : 'Queue exact payload under automatic policy';
+    $('#deliveryPreviewModal').hidden = false;
+  } catch (error) { toast(error.message); }
+}
+
+async function approveDeliveryPreview() {
+  const preview = state.deliveryPreview; if (!preview) return;
+  const button = $('#approveDelivery'); button.disabled = true; button.textContent = 'Queueing…';
+  try {
+    await api(`/api/assurance/packages/${encodeURIComponent(preview.package_id)}/delivery/approve`, {method:'POST',body:JSON.stringify({expected_payload_sha256:preview.payload_sha256})});
+    $('#deliveryPreviewModal').hidden = true; state.deliveryPreview = null; await loadAssurance(); toast('Exact redacted payload approved and queued');
+  } catch (error) { toast(error.message); }
+  finally { button.disabled = false; }
+}
+
+async function retryDelivery(jobId) {
+  try { await api(`/api/delivery/jobs/${encodeURIComponent(jobId)}/retry`, {method:'POST'}); await loadAssurance(); toast('Bounded delivery retry queued'); }
+  catch (error) { toast(error.message); }
+}
+
+async function cancelDelivery(jobId) {
+  try { await api(`/api/delivery/jobs/${encodeURIComponent(jobId)}/cancel`, {method:'POST'}); await loadAssurance(); toast('Outbound delivery cancelled'); }
+  catch (error) { toast(error.message); }
+}
+
 function hydrateAssurancePolicy(policy) {
   if (!policy || state.assurancePolicyDirty) return;
   $('#assuranceEnabled').checked = Boolean(policy.enabled);
@@ -1135,6 +1242,7 @@ function renderAssurance() {
   $('#assuranceScheduleStatus').textContent = policy.enabled ? `Next scheduled run · ${assuranceTime(policy.next_run_at)}` : 'Scheduling is off · manual runs remain available';
   $('#assuranceUsage').innerHTML = `<span><b>${usage.runs || 0}/${policy.max_runs_per_day || 0}</b> runs today</span><span><b>${usage.splunk_calls || 0}</b> Splunk calls today</span><span><b>${policy.max_splunk_calls_per_run || 0}</b> call ceiling</span><span><b>${escapeHtml(value.worker?.restart_recovery || 'unknown')}</b> restart policy</span>`;
   renderAssurancePackages(value);
+  renderDelivery(value);
   const panel = $('#assuranceProgress'); panel.hidden = !active;
   if (active) {
     panel.querySelector('.operation-label').textContent = active.label || 'Working';
@@ -1609,6 +1717,12 @@ document.addEventListener('click', async event => {
   if (caseAssurance) { caseAssurancePackage(caseAssurance.dataset.caseAssurancePackage); return; }
   const closeAssurance = event.target.closest('[data-close-assurance-package]');
   if (closeAssurance) { await closeAssurancePackage(closeAssurance.dataset.closeAssurancePackage); return; }
+  const previewDelivery = event.target.closest('[data-preview-assurance-delivery]');
+  if (previewDelivery) { await previewAssuranceDelivery(previewDelivery.dataset.previewAssuranceDelivery); return; }
+  const retryOutbound = event.target.closest('[data-retry-delivery]');
+  if (retryOutbound) { await retryDelivery(retryOutbound.dataset.retryDelivery); return; }
+  const cancelOutbound = event.target.closest('[data-cancel-delivery]');
+  if (cancelOutbound) { await cancelDelivery(cancelOutbound.dataset.cancelDelivery); return; }
   const copyToggle = event.target.closest('[data-toggle-copy]');
   if (copyToggle) {
     const card = copyToggle.closest('.evidence-card,.ledger-item');
@@ -1774,6 +1888,7 @@ document.addEventListener('click', async event => {
   if (event.target.closest('[data-add-case-item]')) openCaseItemModal();
   if (event.target.closest('.close-case-item')) { $('#caseItemModal').hidden = true; state.pendingCaseItem = null; state.editingCaseItemId = null; }
   if (event.target.closest('.close-case-picker')) { $('#casePickerModal').hidden = true; state.pendingCaseItem = null; }
+  if (event.target.closest('.close-delivery-preview')) { $('#deliveryPreviewModal').hidden = true; state.deliveryPreview = null; }
   if (event.target.closest('#pickerNewCase')) { $('#casePickerModal').hidden = true; $('#caseForm').reset(); $('#newCaseSeverity').value = 'medium'; $('#caseModal').hidden = false; }
   const pickedCase = event.target.closest('[data-pick-case]');
   if (pickedCase && state.pendingCaseItem) { $('#casePickerModal').hidden = true; await addItemToCase(pickedCase.dataset.pickCase, state.pendingCaseItem); setView('cases'); }
@@ -1819,10 +1934,13 @@ $('#closeEvidence').addEventListener('click', () => $('.evidence-panel').classLi
 $('#runDiscovery').addEventListener('click', runDiscovery);
 $('#runConnectionDiagnostics').addEventListener('click', runConnectionDiagnostics);
 $('#assuranceForm').addEventListener('submit', saveAssurancePolicy);
+$('#deliveryForm').addEventListener('submit', saveDeliveryPolicy);
+$('#approveDelivery').addEventListener('click', approveDeliveryPreview);
 $('#runAssuranceNow').addEventListener('click', runAssuranceNow);
 $('#cancelAssuranceRun').addEventListener('click', cancelAssuranceRun);
 $('#assuranceDepth').addEventListener('change', updateAssuranceBudgetHelp);
 $$('#assuranceForm input,#assuranceForm select').forEach(node => node.addEventListener('change', () => { state.assurancePolicyDirty = true; }));
+$$('#deliveryForm input,#deliveryForm select').forEach(node => node.addEventListener('change', () => { state.deliveryPolicyDirty = true; }));
 $('#scanSplunkModels').addEventListener('click', scanSplunkModels);
 $('#runGoldenBenchmark').addEventListener('click', runGoldenBenchmark);
 $('#contextPrevious').addEventListener('click', () => { state.contextPage -= 1; renderArtifacts(state.contextItems); $('#contextView').scrollIntoView({ behavior:'smooth', block:'start' }); });

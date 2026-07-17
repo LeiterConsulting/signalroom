@@ -14,9 +14,11 @@ from fastapi.staticfiles import StaticFiles
 
 from .agents import SecurityAgent
 from .assurance import AssuranceResponseService, AssuranceService, AssuranceStore
+from .audit import AuditStore
 from .benchmarks import GoldenBenchmarkService, GoldenBenchmarkStore
 from .cases import CaseCockpitService, CaseStore
 from .config import ConfigStore
+from .delivery import AssuranceDeliveryService, DeliveryStore
 from .discovery import DiscoveryPipeline
 from .feedback import AnalystFeedbackStore
 from .mcp_server import MCPServer
@@ -36,6 +38,8 @@ from .schemas import (
     CaseUpdate,
     ChatRequest,
     ConnectionTestRequest,
+    DeliveryApproval,
+    DeliveryPolicyUpdate,
     DiscoveryRequest,
     GoldenBenchmarkRunCreate,
     ModelActivateRequest,
@@ -77,7 +81,9 @@ class Services:
         self.case_cockpit = CaseCockpitService(
             self.cases, self.validation_store, self.evidence
         )
+        self.audit = AuditStore(DATA / "audit.db")
         self.assurance_store = AssuranceStore(DATA / "assurance.db")
+        self.delivery_store = DeliveryStore(DATA / "delivery.db")
         self.connection_diagnostics_store = ConnectionDiagnosticsStore(
             DATA / "connection_diagnostics.db"
         )
@@ -95,6 +101,12 @@ class Services:
         self._validations: ValidationService | None = None
         self.assurance_response = AssuranceResponseService(
             self.assurance_store, lambda: self.validations
+        )
+        self.delivery = AssuranceDeliveryService(
+            self.delivery_store,
+            self.assurance_store,
+            self.config,
+            self.audit,
         )
         self.assurance = AssuranceService(
             self.assurance_store,
@@ -116,7 +128,9 @@ class Services:
         )
 
     async def _assurance_complete(self, run_id: str, result: dict[str, Any]) -> None:
-        self.assurance_response.process(run_id, result)
+        package = self.assurance_response.process(run_id, result)
+        if package:
+            self.delivery.consider_package(package)
         if self._agent is not None:
             self._agent.invalidate_context_cache()
         self.model_setup.schedule_context_index()
@@ -212,9 +226,11 @@ async def lifespan(app: FastAPI):
         )
     services.model_setup.schedule_context_index()
     await services.assurance.start()
+    await services.delivery.start()
     try:
         yield
     finally:
+        await services.delivery.stop()
         await services.assurance.stop()
 
 
@@ -269,6 +285,21 @@ async def put_settings(update: SettingsUpdate) -> dict[str, Any]:
         huggingface_token=update.huggingface_token,
     )
     services.refresh(force=True)
+    services.audit.record(
+        "workspace.settings.updated",
+        "update",
+        target_type="workspace-settings",
+        target_id="primary",
+        summary="Local workspace settings were updated.",
+        metadata={
+            "configured": update.settings.configured,
+            "demo_mode": update.settings.demo_mode,
+            "splunk_name": update.settings.splunk.name,
+            "verify_tls": update.settings.splunk.verify_ssl,
+            "specialist_runtime": update.settings.specialist_runtime,
+            "huggingface_policy": update.settings.huggingface_policy,
+        },
+    )
     return services.config.public_payload()
 
 
@@ -368,9 +399,21 @@ async def pull_model(request: ModelPullRequest) -> dict[str, Any]:
 @app.post("/api/model-setup/activate")
 async def activate_model(request: ModelActivateRequest) -> dict[str, Any]:
     try:
-        return await services.model_setup.activate(
+        result = await services.model_setup.activate(
             request.profile_id, request.unload_other_signalroom_models
         )
+        services.audit.record(
+            "model.activated",
+            "activate",
+            target_type="model-profile",
+            target_id=request.profile_id,
+            summary="A local Ollama model profile was explicitly activated.",
+            metadata={
+                "unload_other_signalroom_models": request.unload_other_signalroom_models,
+                "executed_model": result.get("executed_model") or result.get("model") or "",
+            },
+        )
+        return result
     except KeyError as exc:
         raise HTTPException(404, str(exc)) from exc
     except Exception as exc:
@@ -516,6 +559,19 @@ async def accept_benchmark_baseline(run_id: str) -> dict[str, Any]:
     result = services.benchmark_store.accept_baseline(run_id)
     if result is None:
         raise HTTPException(409, "Only a completed, promotion-ready run can become the baseline")
+    services.audit.record(
+        "benchmark.baseline.accepted",
+        "accept",
+        target_type="benchmark-run",
+        target_id=run_id,
+        summary="A promotion-ready golden investigation run became the accepted baseline.",
+        metadata={
+            "profile_id": result["profile_id"],
+            "score": result["score"],
+            "suite_version": result["suite_version"],
+            "prompt_version": result["prompt_version"],
+        },
+    )
     return result
 
 
@@ -593,7 +649,10 @@ async def discovery_stream(request: DiscoveryRequest) -> StreamingResponse:
 
 @app.get("/api/assurance")
 async def assurance_overview() -> dict[str, Any]:
-    return services.assurance.overview()
+    result = services.assurance.overview()
+    result["delivery"] = services.delivery.overview()
+    result["audit"] = services.audit.overview(20)
+    return result
 
 
 @app.put("/api/assurance/policy")
@@ -602,7 +661,17 @@ async def update_assurance_policy(request: AssurancePolicyUpdate) -> dict[str, A
         services.assurance.update_policy(request)
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
-    return services.assurance.overview()
+    services.audit.record(
+        "assurance.policy.updated",
+        "update",
+        target_type="assurance-policy",
+        target_id="primary",
+        summary=(
+            f"Continuous assurance scheduling was {'enabled' if request.enabled else 'disabled'}."
+        ),
+        metadata=request.model_dump(mode="json"),
+    )
+    return await assurance_overview()
 
 
 @app.post("/api/assurance/runs", status_code=202)
@@ -611,6 +680,14 @@ async def create_assurance_run(request: AssuranceRunCreate) -> dict[str, Any]:
         run = services.assurance.enqueue(request.depth)
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from exc
+    services.audit.record(
+        "assurance.run.queued",
+        "queue",
+        target_type="assurance-run",
+        target_id=run.id,
+        summary=f"A manual {run.depth} continuous assurance run was queued.",
+        metadata={"depth": run.depth, "call_budget": run.call_budget},
+    )
     return run.model_dump(mode="json")
 
 
@@ -619,6 +696,14 @@ async def cancel_assurance_run(run_id: str) -> dict[str, Any]:
     run = await services.assurance.cancel(run_id)
     if run is None:
         raise HTTPException(404, "Continuous assurance run not found")
+    services.audit.record(
+        "assurance.run.cancelled",
+        "cancel",
+        target_type="assurance-run",
+        target_id=run_id,
+        outcome="cancelled",
+        summary="Continuous assurance cancellation was requested.",
+    )
     return run.model_dump(mode="json")
 
 
@@ -627,6 +712,14 @@ async def acknowledge_assurance_notification(notification_id: str) -> dict[str, 
     notification = services.assurance_store.acknowledge(notification_id)
     if notification is None:
         raise HTTPException(404, "Continuous assurance notification not found")
+    services.audit.record(
+        "assurance.notification.acknowledged",
+        "acknowledge",
+        target_type="assurance-notification",
+        target_id=notification_id,
+        summary="A local assurance notice was acknowledged.",
+        metadata={"category": notification["category"], "severity": notification["severity"]},
+    )
     return notification
 
 
@@ -635,7 +728,76 @@ async def close_assurance_package(package_id: str) -> dict[str, Any]:
     package = services.assurance_store.close_package(package_id)
     if package is None:
         raise HTTPException(404, "Assurance response package not found")
+    services.delivery.package_closed(package_id)
+    services.audit.record(
+        "assurance.package.closed",
+        "close",
+        target_type="assurance-package",
+        target_id=package_id,
+        summary="An assurance response package was closed by the local operator.",
+        metadata={"severity": package["severity"], "status": package["status"]},
+    )
     return package
+
+
+@app.get("/api/delivery")
+async def delivery_overview() -> dict[str, Any]:
+    return services.delivery.overview()
+
+
+@app.put("/api/delivery/policy")
+async def update_delivery_policy(request: DeliveryPolicyUpdate) -> dict[str, Any]:
+    try:
+        return services.delivery.update_policy(request)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.post("/api/assurance/packages/{package_id}/delivery/preview")
+async def preview_assurance_delivery(package_id: str) -> dict[str, Any]:
+    try:
+        return services.delivery.preview(package_id)
+    except KeyError as exc:
+        raise HTTPException(404, "Assurance response package not found") from exc
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@app.post("/api/assurance/packages/{package_id}/delivery/approve", status_code=202)
+async def approve_assurance_delivery(
+    package_id: str, request: DeliveryApproval
+) -> dict[str, Any]:
+    try:
+        return services.delivery.approve(package_id, request.expected_payload_sha256)
+    except KeyError as exc:
+        raise HTTPException(404, "Assurance response package not found") from exc
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@app.post("/api/delivery/jobs/{job_id}/retry", status_code=202)
+async def retry_assurance_delivery(job_id: str) -> dict[str, Any]:
+    try:
+        return services.delivery.retry(job_id)
+    except KeyError as exc:
+        raise HTTPException(404, "Delivery job not found") from exc
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@app.post("/api/delivery/jobs/{job_id}/cancel")
+async def cancel_assurance_delivery(job_id: str) -> dict[str, Any]:
+    try:
+        return services.delivery.cancel(job_id)
+    except KeyError as exc:
+        raise HTTPException(404, "Delivery job not found") from exc
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@app.get("/api/audit")
+async def audit_overview(limit: int = 100) -> dict[str, Any]:
+    return services.audit.overview(min(max(limit, 1), 500))
 
 
 @app.get("/api/validations")
@@ -651,7 +813,22 @@ async def query_intelligence(request: QueryIntelligenceRequest) -> dict[str, Any
 @app.post("/api/validations", status_code=201)
 async def create_validation(request: ValidationTaskCreate) -> dict[str, Any]:
     try:
-        return services.validations.create(request).model_dump(mode="json")
+        task = services.validations.create(request)
+        services.audit.record(
+            "validation.created",
+            "create",
+            target_type="validation-task",
+            target_id=task.id,
+            summary="A bounded read-only validation draft was created.",
+            metadata={
+                "query_fingerprint": task.query_fingerprint,
+                "row_limit": task.row_limit,
+                "earliest_time": task.earliest_time,
+                "latest_time": task.latest_time,
+                "assurance_package_id": task.assurance_package_id,
+            },
+        )
+        return task.model_dump(mode="json")
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
 
@@ -672,6 +849,14 @@ async def update_validation(task_id: str, request: ValidationTaskUpdate) -> dict
         raise HTTPException(409, str(exc)) from exc
     if task is None:
         raise HTTPException(404, "Validation task not found")
+    services.audit.record(
+        "validation.updated",
+        "update",
+        target_type="validation-task",
+        target_id=task_id,
+        summary="A validation draft was updated and any prior approval was invalidated.",
+        metadata={"query_fingerprint": task.query_fingerprint, "status": task.status},
+    )
     return task.model_dump(mode="json")
 
 
@@ -683,13 +868,50 @@ async def approve_validation(task_id: str) -> dict[str, Any]:
         raise HTTPException(409, str(exc)) from exc
     if task is None:
         raise HTTPException(404, "Validation task not found")
+    services.audit.record(
+        "validation.approved",
+        "approve",
+        target_type="validation-task",
+        target_id=task_id,
+        summary="The exact bounded read-only validation contract was approved once.",
+        metadata={
+            "query_fingerprint": task.query_fingerprint,
+            "approval_scope": task.approval_scope,
+            "expires_at": task.expires_at,
+        },
+    )
     return task.model_dump(mode="json")
 
 
 @app.post("/api/validations/{task_id}/run/stream")
 async def run_validation_stream(task_id: str) -> StreamingResponse:
     async def run(progress: Any) -> dict[str, Any]:
-        return (await services.validations.execute(task_id, progress)).model_dump(mode="json")
+        try:
+            task = await services.validations.execute(task_id, progress)
+            services.audit.record(
+                "validation.executed",
+                "execute",
+                target_type="validation-task",
+                target_id=task_id,
+                outcome=task.status,
+                summary=f"Approved validation finished with status {task.status}.",
+                metadata={
+                    "query_fingerprint": task.query_fingerprint,
+                    "result_count": task.result_count,
+                    "artifact_id": task.artifact_id,
+                },
+            )
+            return task.model_dump(mode="json")
+        except Exception as exc:
+            services.audit.record(
+                "validation.execution.failed",
+                "execute",
+                target_type="validation-task",
+                target_id=task_id,
+                outcome="error",
+                summary=f"Validation execution failed ({type(exc).__name__}).",
+            )
+            raise
 
     return _stream_response(run)
 
@@ -702,6 +924,14 @@ async def delete_validation(task_id: str) -> None:
     if current.status == "running":
         raise HTTPException(409, "Running validation tasks cannot be deleted")
     services.validation_store.delete(task_id)
+    services.audit.record(
+        "validation.deleted",
+        "delete",
+        target_type="validation-task",
+        target_id=task_id,
+        summary="A non-running validation task was deleted.",
+        metadata={"prior_status": current.status, "query_fingerprint": current.query_fingerprint},
+    )
 
 
 @app.get("/api/cases")
@@ -711,7 +941,16 @@ async def list_cases() -> list[dict[str, Any]]:
 
 @app.post("/api/cases", status_code=201)
 async def create_case(request: CaseCreate) -> dict[str, Any]:
-    return services.cases.create(request).model_dump(mode="json")
+    case = services.cases.create(request)
+    services.audit.record(
+        "case.created",
+        "create",
+        target_type="case",
+        target_id=case.id,
+        summary="A durable investigation case was created.",
+        metadata={"severity": case.severity, "owner": case.owner},
+    )
+    return case.model_dump(mode="json")
 
 
 @app.get("/api/cases/{case_id}")
@@ -735,6 +974,14 @@ async def update_case(case_id: str, request: CaseUpdate) -> dict[str, Any]:
     case = services.cases.update(case_id, request)
     if not case:
         raise HTTPException(404, "Case not found")
+    services.audit.record(
+        "case.updated",
+        "update",
+        target_type="case",
+        target_id=case_id,
+        summary="Investigation case metadata or status was updated.",
+        metadata={"status": case.status, "severity": case.severity, "owner": case.owner},
+    )
     return case.model_dump(mode="json")
 
 
@@ -742,6 +989,13 @@ async def update_case(case_id: str, request: CaseUpdate) -> dict[str, Any]:
 async def delete_case(case_id: str) -> None:
     if not services.cases.delete(case_id):
         raise HTTPException(404, "Case not found")
+    services.audit.record(
+        "case.deleted",
+        "delete",
+        target_type="case",
+        target_id=case_id,
+        summary="An investigation case and its local timeline were deleted.",
+    )
 
 
 @app.post("/api/cases/{case_id}/items", status_code=201)
@@ -749,6 +1003,14 @@ async def add_case_item(case_id: str, request: CaseItemCreate) -> dict[str, Any]
     item = services.cases.add_item(case_id, request)
     if not item:
         raise HTTPException(404, "Case not found")
+    services.audit.record(
+        "case.timeline-item.created",
+        "create",
+        target_type="case-item",
+        target_id=item.id,
+        summary="A case timeline item was added.",
+        metadata={"case_id": case_id, "kind": item.kind, "status": item.status},
+    )
     return item.model_dump(mode="json")
 
 
@@ -759,6 +1021,14 @@ async def update_case_item(
     item = services.cases.update_item(case_id, item_id, request)
     if not item:
         raise HTTPException(404, "Case timeline item not found")
+    services.audit.record(
+        "case.timeline-item.updated",
+        "update",
+        target_type="case-item",
+        target_id=item_id,
+        summary="A case timeline item was updated.",
+        metadata={"case_id": case_id, "kind": item.kind, "status": item.status},
+    )
     return item.model_dump(mode="json")
 
 
@@ -766,6 +1036,14 @@ async def update_case_item(
 async def delete_case_item(case_id: str, item_id: str) -> None:
     if not services.cases.delete_item(case_id, item_id):
         raise HTTPException(404, "Case timeline item not found")
+    services.audit.record(
+        "case.timeline-item.deleted",
+        "delete",
+        target_type="case-item",
+        target_id=item_id,
+        summary="A case timeline item was deleted.",
+        metadata={"case_id": case_id},
+    )
 
 
 @app.post("/api/cases/{case_id}/export")
@@ -773,6 +1051,14 @@ async def export_case(case_id: str, request: CaseExportRequest) -> dict[str, Any
     paths = services.cases.export(case_id, request.formats)
     if not paths:
         raise HTTPException(404, "Case not found")
+    services.audit.record(
+        "case.exported",
+        "export",
+        target_type="case",
+        target_id=case_id,
+        summary="A local case handoff package was exported.",
+        metadata={"formats": [path.suffix.lstrip(".") for path in paths]},
+    )
     return {
         "case_id": case_id,
         "files": [
@@ -815,6 +1101,14 @@ async def create_artifact(record: ArtifactCreate) -> dict[str, Any]:
     created = services.evidence.add(record)
     services.agent.invalidate_context_cache()
     services.model_setup.schedule_context_index()
+    services.audit.record(
+        "artifact.created",
+        "create",
+        target_type="artifact",
+        target_id=created.id,
+        summary="A local context artifact was created.",
+        metadata={"kind": created.kind, "source": created.source},
+    )
     return created.model_dump(mode="json")
 
 
@@ -825,6 +1119,14 @@ async def update_artifact(artifact_id: str, record: ArtifactUpdate) -> dict[str,
         raise HTTPException(404, "Artifact not found")
     services.agent.invalidate_context_cache()
     services.model_setup.schedule_context_index()
+    services.audit.record(
+        "artifact.updated",
+        "update",
+        target_type="artifact",
+        target_id=artifact_id,
+        summary="A local context artifact was updated.",
+        metadata={"kind": updated.kind, "source": updated.source},
+    )
     return updated.model_dump(mode="json")
 
 
@@ -847,6 +1149,14 @@ async def upload_artifact(file: Annotated[UploadFile, File()], kind: str = "refe
     created = services.evidence.add(record)
     services.agent.invalidate_context_cache()
     services.model_setup.schedule_context_index()
+    services.audit.record(
+        "artifact.uploaded",
+        "upload",
+        target_type="artifact",
+        target_id=created.id,
+        summary="A text artifact was uploaded to local context.",
+        metadata={"kind": created.kind, "filename": file.filename or ""},
+    )
     return created.model_dump(mode="json")
 
 
@@ -855,6 +1165,13 @@ async def delete_artifact(artifact_id: str) -> dict[str, bool]:
     if not services.evidence.delete(artifact_id):
         raise HTTPException(404, "Artifact not found")
     services.agent.invalidate_context_cache()
+    services.audit.record(
+        "artifact.deleted",
+        "delete",
+        target_type="artifact",
+        target_id=artifact_id,
+        summary="A local context artifact was deleted.",
+    )
     return {"deleted": True}
 
 

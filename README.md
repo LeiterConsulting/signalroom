@@ -20,6 +20,7 @@ This is a focused reimplementation inspired by [LeiterConsulting/splunk-discover
 - Deterministic SPL cost and reuse intelligence before approval, including safer staged contracts and exact-result reuse
 - Local analyst feedback and model/task outcome scorecards with no telemetry export
 - Versioned local golden investigations with isolated evidence, instrumented tool selection, durable baselines, and explicit promotion gates
+- Opt-in generic webhook delivery with exact redaction previews, hash-bound approval, idempotent retries, and a tamper-evident local audit chain
 - Ollama chat and tool-capable model support
 - Hugging Face chat, embedding, and token-classification adapters
 - Capability profiles for Foundation-Sec and SecureBERT 2.0
@@ -209,8 +210,10 @@ Invoke-RestMethod -Method Post -Uri http://localhost:8003/mcp -ContentType appli
 src/splunk_security_agent/
   agents/          evidence-first chat orchestration and SPL guardrails
   assurance/       durable scheduling, drift correlation, budgets, recovery, and response packages
+  audit/           append-only, hash-chained local control-plane events
   benchmarks/      isolated golden investigations, scoring, history, and promotion gates
   discovery/       inventory, coverage analysis, and artifact packaging
+  delivery/        redacted webhook policy, approval state, attempts, and retries
   cases/           durable case records, evidence cockpit, timelines, and handoff exports
   providers/       Ollama, local Transformers, Hugging Face cloud, and capability routing
   rag/             SQLite evidence and chunk retrieval
@@ -307,6 +310,15 @@ resolved. Repeated medium/low signals and first-seen high/critical signals creat
 Each package can pivot into Investigate, a case, or the validation queue. Continuous assurance never approves or
 executes proposed validation SPL automatically.
 
+Outbound response-package delivery is independently disabled by default. The first adapter is a generic HTTPS
+webhook (with loopback HTTP permitted only for local testing). Strict redaction sends package metadata and aggregate
+signal counts; standard redaction may additionally include bounded signal titles and subjects. Neither level includes
+raw events, SPL, validation identifiers, signal fingerprints, discovery run identifiers, Splunk credentials, or
+endpoint configuration. Manual mode binds approval to the exact payload SHA-256 and destination identity. Automatic
+mode must be separately enabled and applies severity/category policy before creating an idempotent delivery job.
+Attempt state, exponential backoff, explicit retry batches, and restart recovery are durable. Disabling delivery
+cancels queued work; saved destination and authorization secrets can also be explicitly removed.
+
 Ollama model switching is serialized to avoid local accelerator contention. Generative passes use deterministic,
 token-bounded structured output, strict local validation, and one visible repair/fallback attempt when necessary.
 The Discovery page shows the executed model, role, duration, input size, token ceiling, and validation mode. A
@@ -346,11 +358,14 @@ Assurance-generated drafts carry a seven-day expiry, a package reference, and a 
 Expiry invalidates an unexecuted draft or approval without modifying completed evidence. A recurring package reuses
 an existing live fingerprint instead of creating duplicate validation work.
 
-### Recommended next assurance increment
+### Local audit and recommended next increment
 
-Add separately opt-in outbound delivery for response-package summaries, with destination-specific redaction previews,
-retry state, and a durable audit event for every attempted delivery. Delivery must not grant recurring SPL authority;
-validation approval remains a per-contract analyst action.
+Major local control-plane decisions and every outbound delivery action are written to `data/audit.db` as an
+append-only SHA-256 hash chain. Audit metadata applies key-based secret redaction and the Discovery interface reports
+chain integrity. This is a tamper-evident local record, not an external immutable audit sink.
+
+The next assurance increment is destination adapters and guarded routing beyond the generic webhook, followed by
+cross-model tournament runs that compare promotion-ready profiles before changing an active model assignment.
 
 ### Context
 

@@ -132,6 +132,34 @@
               <div class="validation-section-heading"><div><span>ASSURANCE → RESPONSE</span><h4 id="assuranceResponseTitle">Reviewable response packages</h4></div><small>Local drafts · single execution · seven-day expiry</small></div>
               <div class="assurance-signal-counts" id="assuranceSignalCounts"></div>
               <div class="assurance-packages" id="assurancePackages"><div class="empty-inline compact-empty">Repeated drift or a high-severity signal will create a deduplicated review package here.</div></div>
+              <section class="delivery-workspace" aria-labelledby="deliveryTitle">
+                <header><div><span>CONTROLLED OUTBOUND DELIVERY</span><h4 id="deliveryTitle">Send the package—not the Splunk data</h4><p>Preview the exact redacted JSON, approve its hash, and track every bounded attempt locally. Delivery can never approve or execute validation SPL.</p></div><span class="subtle-pill" id="deliveryStatus">Disabled</span></header>
+                <details class="delivery-policy"><summary>Configure generic webhook policy</summary>
+                  <form id="deliveryForm">
+                    <label class="switch-line"><span><b>Enable outbound response delivery</b><small>Opt in separately from continuous assurance; nothing is sent while disabled</small></span><input type="checkbox" id="deliveryEnabled"><i></i></label>
+                    <div class="delivery-policy-grid">
+                      <label><span>Approval mode</span><select id="deliveryMode"><option value="manual">Manual · preview and approve every package</option><option value="automatic">Automatic · apply the policy to eligible packages</option></select></label>
+                      <label><span>Minimum severity</span><select id="deliverySeverity"><option value="critical">Critical</option><option value="high" selected>High</option><option value="medium">Medium</option><option value="low">Low</option></select></label>
+                      <label><span>Destination label</span><input id="deliveryLabel" maxlength="160" value="Primary webhook"></label>
+                      <label><span>Redaction</span><select id="deliveryRedaction"><option value="strict">Strict · counts only</option><option value="standard">Standard · bounded titles and subjects</option></select></label>
+                      <label class="full"><span>HTTPS webhook URL</span><input id="deliveryWebhookUrl" type="password" maxlength="4000" autocomplete="off" placeholder="Leave blank to keep the encrypted destination"><small>HTTPS required; loopback HTTP is accepted only for local testing.</small></label>
+                      <label class="full secret-revoke"><input id="deliveryClearWebhookUrl" type="checkbox"><span>Remove the saved webhook URL when this policy is saved</span></label>
+                      <label class="full"><span>Authorization header <em>optional</em></span><input id="deliveryAuthorization" type="password" maxlength="4000" autocomplete="off" placeholder="Leave blank to keep the encrypted value"><small>For example, <code>Bearer …</code>. Stored encrypted and never returned.</small></label>
+                      <label class="full secret-revoke"><input id="deliveryClearAuthorization" type="checkbox"><span>Remove the saved authorization header when this policy is saved</span></label>
+                      <label><span>Maximum attempts</span><input id="deliveryAttempts" type="number" min="1" max="8" value="3"></label>
+                      <label><span>Initial retry backoff</span><select id="deliveryBackoff"><option value="10">10 seconds</option><option value="60" selected>1 minute</option><option value="300">5 minutes</option><option value="900">15 minutes</option></select></label>
+                      <label class="full switch-line nested-switch"><span><b>Verify webhook TLS certificates</b><small>Recommended. A private CA path can be supplied for internal destinations.</small></span><input type="checkbox" id="deliveryVerifyTls" checked><i></i></label>
+                      <label class="full"><span>Private CA bundle path <em>optional</em></span><input id="deliveryCaBundle" maxlength="1000" placeholder="C:\certs\organization-ca.pem or /etc/ssl/org-ca.pem"></label>
+                    </div>
+                    <fieldset class="delivery-categories"><legend>Eligible signal categories</legend><label><input type="checkbox" value="finding" checked> Findings</label><label><input type="checkbox" value="coverage" checked> Coverage</label><label><input type="checkbox" value="inventory" checked> Inventory</label><label><input type="checkbox" value="mltk" checked> MLTK drift</label><label><input type="checkbox" value="collection" checked> Collection failures</label></fieldset>
+                    <footer><span id="deliveryDestinationHint">No outbound destination configured</span><button class="button primary small" type="submit">Save delivery policy</button></footer>
+                  </form>
+                </details>
+                <div class="delivery-columns">
+                  <section><div class="validation-section-heading"><div><span>DELIVERY QUEUE</span><h5>Approved and attempted packages</h5></div></div><div class="delivery-jobs" id="deliveryJobs"></div></section>
+                  <section><div class="validation-section-heading"><div><span>HASH-CHAINED LOCAL AUDIT</span><h5>Control-plane decisions</h5></div><small id="auditChainStatus">Checking chain</small></div><div class="audit-events" id="auditEvents"></div></section>
+                </div>
+              </section>
             </section>
             <div class="assurance-results-grid">
               <section aria-labelledby="assuranceNotificationsTitle"><div class="validation-section-heading"><div><span>DRIFT &amp; CONTROL NOTICES</span><h4 id="assuranceNotificationsTitle">Needs analyst attention</h4></div></div><div id="assuranceNotifications" class="assurance-notifications"></div></section>
@@ -364,6 +392,17 @@
       <header><div><p class="eyebrow" id="detailEyebrow">EVIDENCE DETAIL</p><h2 id="detailTitle">Why this is here</h2></div><button class="icon-button close-detail" aria-label="Close">×</button></header>
       <div class="detail-body"><div class="detail-summary" id="detailSummary"></div><div class="detail-content" id="detailContent"></div><div class="detail-provenance" id="detailProvenance"></div></div>
       <footer class="detail-actions" id="detailActions"></footer>
+    </section>
+  </div>
+  <div class="modal-backdrop" id="deliveryPreviewModal" hidden>
+    <section class="modal delivery-preview-modal" role="dialog" aria-modal="true" aria-labelledby="deliveryPreviewTitle">
+      <header><div><p class="eyebrow">EXACT OUTBOUND PAYLOAD</p><h2 id="deliveryPreviewTitle">Review redaction before approval</h2></div><button class="icon-button close-delivery-preview" aria-label="Close">×</button></header>
+      <div class="delivery-preview-body">
+        <div class="delivery-preview-contract" id="deliveryPreviewContract"></div>
+        <div class="delivery-redactions"><b>Content withheld from delivery</b><ul id="deliveryRedactions"></ul></div>
+        <pre id="deliveryPreviewPayload"></pre>
+      </div>
+      <footer class="detail-actions"><button class="button ghost close-delivery-preview" type="button">Cancel</button><button class="button primary" id="approveDelivery" type="button">Approve exact payload and queue</button></footer>
     </section>
   </div>
   <div class="demo-tour" id="demoTour" hidden>

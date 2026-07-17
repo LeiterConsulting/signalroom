@@ -17,7 +17,10 @@ The local prototype defaults to localhost, opt-in demo mode, local specialist ex
 - Splunk MLTK scans use only `listmodels`, retain local definition fingerprints, and perform zero model writes. Dependency comparisons are explicitly scoped to SignalRoom's configured Ollama endpoint.
 - Continuous assurance is opt-in, single-concurrency, and protected by hard per-run MCP call and UTC daily run ceilings. It stores local notifications but never sends them externally or auto-approves validation SPL.
 - Interrupted assurance runs restart as fresh read-only collections; explicit cancellation is persisted and prevents recovery from silently resuming work.
-- Assurance packages are local-only. Generated validation work is deduplicated, expires after seven days, and remains scoped to one explicitly approved execution.
+- Assurance packages remain local unless the separate outbound policy is enabled. Generated validation work is deduplicated, expires after seven days, and remains scoped to one explicitly approved execution.
+- Outbound response delivery is separately opt-in, requires HTTPS except for loopback testing, verifies TLS by default, does not follow redirects, binds manual approval to the exact redacted payload bytes and destination identity, and sends an idempotency key. Disabling delivery cancels pending jobs.
+- Strict delivery redaction exposes package metadata and aggregate signal counts. Standard redaction adds bounded titles and subjects but never raw results, SPL, validation identifiers, signal fingerprints, discovery run identifiers, credentials, or endpoint configuration.
+- Major local control-plane decisions and every delivery attempt are stored in an append-only SHA-256 hash-chained audit database with secret-key redaction.
 - Partial discovery cannot resolve an existing correlated signal; absence is treated as unknown until an authoritative collection covers that signal class.
 - Hugging Face cloud inference has a separate disabled/ask/allow policy and is never implied by local model installation.
 
@@ -28,8 +31,9 @@ The local prototype defaults to localhost, opt-in demo mode, local specialist ex
 - SPL command blocking is a guardrail, not a parser or authorization boundary. Enforce read-only roles in Splunk.
 - Model output can contain incorrect or unsafe recommendations. Human verification remains required.
 - Hugging Face model loading remains a supply-chain decision. Production deployments should add publisher/revision allowlists and artifact signatures around the recorded immutable revision.
-- The application does not yet emit a durable audit trail.
-- Outbound assurance notification delivery is not implemented; notices and response packages remain on the SignalRoom host.
+- The audit chain is local and tamper-evident, not remotely immutable. A fully compromised host can modify the database and application together; production should export verified events to a dedicated audit system.
+- The generic webhook adapter intentionally does not provide destination-specific Slack, Teams, email, ticketing, or SOAR formatting yet.
+- Enabling outbound delivery creates an explicit data-egress path. Operators must review destination ownership and redaction policy before enabling automatic mode.
 
 ## Recommended Splunk role
 

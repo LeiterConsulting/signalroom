@@ -38,6 +38,22 @@ Setup exposes a **Verify TLS certificates** toggle for the Splunk MCP connection
 
 For an internal certificate authority, keep verification enabled and provide the CA bundle path in Setup. For a trusted development endpoint using a self-signed certificate, verification can be disabled explicitly. Disabling verification preserves transport encryption but does not validate the server certificate or identity.
 
+## Outbound response webhook
+
+Outbound assurance delivery is configured independently on the Discovery page and is disabled by default. HTTPS is
+required except for loopback development endpoints. Certificate verification defaults on; internal destinations can
+use a private CA bundle or an explicit verification override. The webhook URL and optional complete Authorization
+header are encrypted in the same local vault used for other secrets and are never returned by the API. Both saved
+values can be explicitly removed in the interface. Environment-managed values must instead be removed from the
+process environment followed by a SignalRoom restart.
+
+Environment-managed deployments can supply these values without saving them through the interface:
+
+```text
+SIGNALROOM_WEBHOOK_URL=https://automation.example/hooks/signalroom
+SIGNALROOM_WEBHOOK_AUTHORIZATION=Bearer …
+```
+
 ## Windows
 
 ```powershell

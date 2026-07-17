@@ -1,0 +1,421 @@
+from __future__ import annotations
+
+import json
+import sqlite3
+from datetime import UTC, datetime
+from pathlib import Path
+from threading import RLock
+from typing import Any
+from uuid import uuid4
+
+from ..schemas import DeliveryPolicyUpdate
+
+DEFAULT_SIGNAL_KINDS = ["finding", "coverage", "inventory", "mltk", "collection"]
+
+
+def _now() -> str:
+    return datetime.now(UTC).isoformat()
+
+
+class DeliveryStore:
+    """Durable policy, approval, attempt, and retry state for outbound packages."""
+
+    def __init__(self, path: Path | str):
+        self.path = Path(path)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._lock = RLock()
+        self._initialize()
+
+    def connect(self) -> sqlite3.Connection:
+        connection = sqlite3.connect(self.path)
+        connection.row_factory = sqlite3.Row
+        return connection
+
+    def _initialize(self) -> None:
+        now = _now()
+        with self.connect() as db:
+            db.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS delivery_policy (
+                    id INTEGER PRIMARY KEY CHECK (id=1),
+                    enabled INTEGER NOT NULL,
+                    mode TEXT NOT NULL,
+                    minimum_severity TEXT NOT NULL,
+                    signal_kinds TEXT NOT NULL,
+                    redaction_level TEXT NOT NULL,
+                    destination_label TEXT NOT NULL,
+                    verify_tls INTEGER NOT NULL,
+                    ca_bundle TEXT NOT NULL,
+                    max_attempts INTEGER NOT NULL,
+                    retry_backoff_seconds INTEGER NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS delivery_jobs (
+                    id TEXT PRIMARY KEY,
+                    package_id TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    approval_mode TEXT NOT NULL,
+                    destination_label TEXT NOT NULL,
+                    destination_fingerprint TEXT NOT NULL,
+                    payload TEXT NOT NULL,
+                    payload_sha256 TEXT NOT NULL,
+                    idempotency_key TEXT NOT NULL UNIQUE,
+                    attempt_count INTEGER NOT NULL,
+                    max_attempts INTEGER NOT NULL,
+                    next_attempt_at TEXT,
+                    last_error TEXT NOT NULL,
+                    http_status INTEGER,
+                    created_at TEXT NOT NULL,
+                    approved_at TEXT NOT NULL,
+                    delivered_at TEXT,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_delivery_jobs_state
+                    ON delivery_jobs(status, next_attempt_at, created_at);
+                CREATE INDEX IF NOT EXISTS idx_delivery_jobs_package
+                    ON delivery_jobs(package_id, created_at DESC);
+                CREATE TABLE IF NOT EXISTS delivery_attempts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    job_id TEXT NOT NULL,
+                    attempt_number INTEGER NOT NULL,
+                    outcome TEXT NOT NULL,
+                    http_status INTEGER,
+                    error TEXT NOT NULL,
+                    started_at TEXT NOT NULL,
+                    completed_at TEXT NOT NULL,
+                    FOREIGN KEY(job_id) REFERENCES delivery_jobs(id) ON DELETE CASCADE
+                );
+                CREATE INDEX IF NOT EXISTS idx_delivery_attempts_job
+                    ON delivery_attempts(job_id, id DESC);
+                """
+            )
+            db.execute(
+                """INSERT OR IGNORE INTO delivery_policy
+                (id,enabled,mode,minimum_severity,signal_kinds,redaction_level,
+                destination_label,verify_tls,ca_bundle,max_attempts,retry_backoff_seconds,
+                updated_at)
+                VALUES (1,0,'manual','high',?,'strict','Primary webhook',1,'',3,60,?)""",
+                (json.dumps(DEFAULT_SIGNAL_KINDS), now),
+            )
+
+    def policy(self) -> dict[str, Any]:
+        with self.connect() as db:
+            row = db.execute("SELECT * FROM delivery_policy WHERE id=1").fetchone()
+        assert row is not None
+        return self._policy(row)
+
+    def update_policy(self, value: DeliveryPolicyUpdate) -> dict[str, Any]:
+        now = _now()
+        with self._lock, self.connect() as db:
+            db.execute(
+                """UPDATE delivery_policy SET enabled=?,mode=?,minimum_severity=?,
+                signal_kinds=?,redaction_level=?,destination_label=?,verify_tls=?,
+                ca_bundle=?,max_attempts=?,retry_backoff_seconds=?,updated_at=? WHERE id=1""",
+                (
+                    int(value.enabled),
+                    value.mode,
+                    value.minimum_severity,
+                    json.dumps(sorted(set(value.signal_kinds))),
+                    value.redaction_level,
+                    value.destination_label,
+                    int(value.verify_tls),
+                    value.ca_bundle or "",
+                    value.max_attempts,
+                    value.retry_backoff_seconds,
+                    now,
+                ),
+            )
+        return self.policy()
+
+    def approve(
+        self,
+        *,
+        package_id: str,
+        approval_mode: str,
+        destination_label: str,
+        destination_fingerprint: str,
+        payload: dict[str, Any],
+        payload_sha256: str,
+        idempotency_key: str,
+        max_attempts: int,
+    ) -> dict[str, Any]:
+        with self._lock, self.connect() as db:
+            existing = db.execute(
+                "SELECT * FROM delivery_jobs WHERE idempotency_key=?",
+                (idempotency_key,),
+            ).fetchone()
+            if existing:
+                existing_job_id = str(existing["id"])
+            else:
+                existing_job_id = ""
+            job_id = str(uuid4())
+            now = _now()
+            if existing_job_id:
+                job_id = existing_job_id
+            else:
+                db.execute(
+                    """INSERT INTO delivery_jobs
+                    (id,package_id,status,approval_mode,destination_label,destination_fingerprint,
+                    payload,payload_sha256,idempotency_key,attempt_count,max_attempts,next_attempt_at,
+                    last_error,http_status,created_at,approved_at,delivered_at,updated_at)
+                    VALUES (?,?,'queued',?,?,?,?,?,?,0,?,?,'',NULL,?,?,NULL,?)""",
+                    (
+                        job_id,
+                        package_id,
+                        approval_mode,
+                        destination_label,
+                        destination_fingerprint,
+                        json.dumps(
+                            payload, sort_keys=True, separators=(",", ":"), default=str
+                        ),
+                        payload_sha256,
+                        idempotency_key,
+                        max_attempts,
+                        now,
+                        now,
+                        now,
+                        now,
+                    ),
+                )
+        result = self.get(job_id)
+        assert result is not None
+        return result
+
+    def get(self, job_id: str) -> dict[str, Any] | None:
+        with self.connect() as db:
+            row = db.execute("SELECT * FROM delivery_jobs WHERE id=?", (job_id,)).fetchone()
+        return self._job_with_attempts(row) if row else None
+
+    def jobs(self, limit: int = 30) -> list[dict[str, Any]]:
+        with self.connect() as db:
+            rows = db.execute(
+                """SELECT * FROM delivery_jobs ORDER BY
+                CASE status WHEN 'sending' THEN 0 WHEN 'queued' THEN 1
+                WHEN 'retrying' THEN 2 ELSE 3 END, created_at DESC LIMIT ?""",
+                (min(max(limit, 1), 200),),
+            ).fetchall()
+        return [self._job_with_attempts(row) for row in rows]
+
+    def next_due(self) -> dict[str, Any] | None:
+        now = _now()
+        with self.connect() as db:
+            row = db.execute(
+                """SELECT * FROM delivery_jobs
+                WHERE status IN ('queued','retrying')
+                AND (next_attempt_at IS NULL OR next_attempt_at<=?)
+                ORDER BY created_at LIMIT 1""",
+                (now,),
+            ).fetchone()
+        return self._job_with_attempts(row) if row else None
+
+    def mark_sending(self, job_id: str) -> dict[str, Any] | None:
+        now = _now()
+        with self._lock, self.connect() as db:
+            changed = db.execute(
+                """UPDATE delivery_jobs SET status='sending',updated_at=?
+                WHERE id=? AND status IN ('queued','retrying')""",
+                (now, job_id),
+            ).rowcount
+        return self.get(job_id) if changed else None
+
+    def record_attempt(
+        self,
+        job_id: str,
+        *,
+        started_at: str,
+        outcome: str,
+        http_status: int | None,
+        error: str,
+        retryable: bool,
+        retry_backoff_seconds: int,
+    ) -> dict[str, Any] | None:
+        now = datetime.now(UTC)
+        completed_at = now.isoformat()
+        current = self.get(job_id)
+        if current is None:
+            return None
+        attempt_number = int(current["attempt_count"]) + 1
+        delivered = outcome == "delivered"
+        if delivered:
+            status = "delivered"
+            next_attempt_at = None
+        elif retryable and attempt_number < int(current["max_attempts"]):
+            status = "retrying"
+            delay = retry_backoff_seconds * (2 ** max(0, attempt_number - 1))
+            next_attempt_at = datetime.fromtimestamp(now.timestamp() + delay, UTC).isoformat()
+        else:
+            status = "failed"
+            next_attempt_at = None
+        with self._lock, self.connect() as db:
+            db.execute(
+                """INSERT INTO delivery_attempts
+                (job_id,attempt_number,outcome,http_status,error,started_at,completed_at)
+                VALUES (?,?,?,?,?,?,?)""",
+                (
+                    job_id,
+                    attempt_number,
+                    outcome,
+                    http_status,
+                    error[:1000],
+                    started_at,
+                    completed_at,
+                ),
+            )
+            db.execute(
+                """UPDATE delivery_jobs SET status=?,attempt_count=?,next_attempt_at=?,
+                last_error=?,http_status=?,delivered_at=?,updated_at=? WHERE id=?""",
+                (
+                    status,
+                    attempt_number,
+                    next_attempt_at,
+                    error[:1000],
+                    http_status,
+                    completed_at if delivered else None,
+                    completed_at,
+                    job_id,
+                ),
+            )
+        return self.get(job_id)
+
+    def retry(self, job_id: str, additional_attempts: int) -> dict[str, Any] | None:
+        current = self.get(job_id)
+        if current is None or current["status"] != "failed":
+            return None
+        now = _now()
+        with self._lock, self.connect() as db:
+            db.execute(
+                """UPDATE delivery_jobs SET status='queued',max_attempts=?,
+                next_attempt_at=?,last_error='',http_status=NULL,updated_at=? WHERE id=?""",
+                (
+                    int(current["attempt_count"]) + additional_attempts,
+                    now,
+                    now,
+                    job_id,
+                ),
+            )
+        return self.get(job_id)
+
+    def cancel(self, job_id: str, reason: str = "Cancelled by local operator") -> dict[str, Any] | None:
+        now = _now()
+        with self._lock, self.connect() as db:
+            changed = db.execute(
+                """UPDATE delivery_jobs SET status='cancelled',last_error=?,next_attempt_at=NULL,
+                updated_at=? WHERE id=? AND status IN ('queued','retrying','failed')""",
+                (reason[:1000], now, job_id),
+            ).rowcount
+        return self.get(job_id) if changed else None
+
+    def cancel_sending(self, job_id: str, reason: str) -> dict[str, Any] | None:
+        now = _now()
+        with self._lock, self.connect() as db:
+            changed = db.execute(
+                """UPDATE delivery_jobs SET status='cancelled',last_error=?,next_attempt_at=NULL,
+                updated_at=? WHERE id=? AND status='sending'""",
+                (reason[:1000], now, job_id),
+            ).rowcount
+        return self.get(job_id) if changed else None
+
+    def cancel_package(self, package_id: str, reason: str) -> int:
+        now = _now()
+        with self._lock, self.connect() as db:
+            changed = db.execute(
+                """UPDATE delivery_jobs SET status='cancelled',last_error=?,next_attempt_at=NULL,
+                updated_at=? WHERE package_id=? AND status IN ('queued','retrying','failed')""",
+                (reason[:1000], now, package_id),
+            ).rowcount
+        return int(changed)
+
+    def cancel_pending(self, reason: str) -> int:
+        now = _now()
+        with self._lock, self.connect() as db:
+            changed = db.execute(
+                """UPDATE delivery_jobs SET status='cancelled',last_error=?,next_attempt_at=NULL,
+                updated_at=? WHERE status IN ('queued','retrying','failed')""",
+                (reason[:1000], now),
+            ).rowcount
+        return int(changed)
+
+    def fail_without_attempt(self, job_id: str, error: str) -> dict[str, Any] | None:
+        now = _now()
+        with self._lock, self.connect() as db:
+            db.execute(
+                """UPDATE delivery_jobs SET status='failed',last_error=?,next_attempt_at=NULL,
+                updated_at=? WHERE id=?""",
+                (error[:1000], now, job_id),
+            )
+        return self.get(job_id)
+
+    def recover_interrupted(self) -> int:
+        now = _now()
+        with self._lock, self.connect() as db:
+            changed = db.execute(
+                """UPDATE delivery_jobs SET status='retrying',next_attempt_at=?,
+                last_error='Process restarted during delivery; retry remains idempotent.',
+                updated_at=? WHERE status='sending'""",
+                (now, now),
+            ).rowcount
+        return int(changed)
+
+    def attempts(self, job_id: str) -> list[dict[str, Any]]:
+        with self.connect() as db:
+            rows = db.execute(
+                """SELECT * FROM delivery_attempts WHERE job_id=?
+                ORDER BY attempt_number DESC""",
+                (job_id,),
+            ).fetchall()
+        return [
+            {
+                "id": int(row["id"]),
+                "attempt_number": int(row["attempt_number"]),
+                "outcome": row["outcome"],
+                "http_status": row["http_status"],
+                "error": row["error"],
+                "started_at": row["started_at"],
+                "completed_at": row["completed_at"],
+            }
+            for row in rows
+        ]
+
+    @staticmethod
+    def _policy(row: sqlite3.Row) -> dict[str, Any]:
+        return {
+            "enabled": bool(row["enabled"]),
+            "mode": row["mode"],
+            "minimum_severity": row["minimum_severity"],
+            "signal_kinds": json.loads(row["signal_kinds"]),
+            "redaction_level": row["redaction_level"],
+            "destination_label": row["destination_label"],
+            "verify_tls": bool(row["verify_tls"]),
+            "ca_bundle": row["ca_bundle"] or None,
+            "max_attempts": int(row["max_attempts"]),
+            "retry_backoff_seconds": int(row["retry_backoff_seconds"]),
+            "updated_at": row["updated_at"],
+        }
+
+    def _job_with_attempts(self, row: sqlite3.Row) -> dict[str, Any]:
+        value = self._job(row)
+        value["attempts"] = self.attempts(value["id"])
+        return value
+
+    @staticmethod
+    def _job(row: sqlite3.Row) -> dict[str, Any]:
+        return {
+            "id": row["id"],
+            "package_id": row["package_id"],
+            "status": row["status"],
+            "approval_mode": row["approval_mode"],
+            "destination_label": row["destination_label"],
+            "destination_fingerprint": row["destination_fingerprint"],
+            "payload": json.loads(row["payload"]),
+            "payload_sha256": row["payload_sha256"],
+            "idempotency_key": row["idempotency_key"],
+            "attempt_count": int(row["attempt_count"]),
+            "max_attempts": int(row["max_attempts"]),
+            "next_attempt_at": row["next_attempt_at"],
+            "last_error": row["last_error"],
+            "http_status": row["http_status"],
+            "created_at": row["created_at"],
+            "approved_at": row["approved_at"],
+            "delivered_at": row["delivered_at"],
+            "updated_at": row["updated_at"],
+        }

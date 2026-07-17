@@ -280,6 +280,37 @@ class AssuranceRunRecord(BaseModel):
     updated_at: str
 
 
+DeliverySignalKind = Literal["finding", "coverage", "inventory", "mltk", "collection"]
+DeliverySeverity = Literal["low", "medium", "high", "critical"]
+
+
+class DeliveryPolicyUpdate(BaseModel):
+    enabled: bool = False
+    mode: Literal["manual", "automatic"] = "manual"
+    minimum_severity: DeliverySeverity = "high"
+    signal_kinds: list[DeliverySignalKind] = Field(
+        default_factory=lambda: ["finding", "coverage", "inventory", "mltk", "collection"],
+        min_length=1,
+        max_length=5,
+    )
+    redaction_level: Literal["strict", "standard"] = "strict"
+    destination_label: str = Field(default="Primary webhook", min_length=1, max_length=160)
+    verify_tls: bool = True
+    ca_bundle: str | None = Field(default=None, max_length=1000)
+    max_attempts: int = Field(default=3, ge=1, le=8)
+    retry_backoff_seconds: int = Field(default=60, ge=10, le=3600)
+    webhook_url: str | None = Field(default=None, max_length=4000)
+    authorization_header: str | None = Field(default=None, max_length=4000)
+    clear_webhook_url: bool = False
+    clear_authorization_header: bool = False
+
+
+class DeliveryApproval(BaseModel):
+    expected_payload_sha256: str = Field(
+        min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$"
+    )
+
+
 ValidationStatus = Literal["draft", "approved", "running", "complete", "error", "expired"]
 
 
