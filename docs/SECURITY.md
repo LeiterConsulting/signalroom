@@ -22,6 +22,7 @@ The local prototype defaults to localhost, opt-in demo mode, local specialist ex
 - Strict delivery redaction exposes package metadata and aggregate signal counts. Standard redaction adds bounded titles and subjects but never raw results, SPL, validation identifiers, signal fingerprints, discovery run identifiers, credentials, or endpoint configuration.
 - Major local control-plane decisions and every delivery attempt are stored in an append-only SHA-256 hash-chained audit database with secret-key redaction.
 - Detection-as-code projects require completed preserved validation evidence. A deterministic exact-fingerprint promotion gate enforces outcome, field, count, and accepted-baseline drift contracts before hash-bound review; it never runs Splunk or approves a validation draft. Edits create immutable versions, approved projects are retained, and exports contain no raw result rows.
+- Git change bundles use a persistent local Ed25519 key, signed canonical manifests, complete detection-file hashing, and an offline verifier. Organizational trust requires pinning the key fingerprint outside the pull request; the generated CI workflow fails when that protected variable is absent and has read-only repository permissions.
 - Generated Splunk saved-search stanzas are disabled and unscheduled. SignalRoom never deploys or enables the exported detection and does not acquire Splunk write authority through this workflow.
 - Partial discovery cannot resolve an existing correlated signal; absence is treated as unknown until an authoritative collection covers that signal class.
 - Hugging Face cloud inference has a separate disabled/ask/allow policy and is never implied by local model installation.
@@ -34,6 +35,7 @@ The local prototype defaults to localhost, opt-in demo mode, local specialist ex
 - Model output can contain incorrect or unsafe recommendations. Human verification remains required.
 - Hugging Face model loading remains a supply-chain decision. Production deployments should add publisher/revision allowlists and artifact signatures around the recorded immutable revision.
 - The audit chain is local and tamper-evident, not remotely immutable. A fully compromised host can modify the database and application together; production should export verified events to a dedicated audit system.
+- The local detection signing key is only as trustworthy as the SignalRoom host and data directory. Back it up securely, restrict filesystem access, and verify its public-key fingerprint through an independent channel before pinning it in repository policy.
 - The generic webhook adapter intentionally does not provide destination-specific Slack, Teams, email, ticketing, or SOAR formatting yet.
 - Enabling outbound delivery creates an explicit data-egress path. Operators must review destination ownership and redaction policy before enabling automatic mode.
 

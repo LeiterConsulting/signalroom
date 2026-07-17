@@ -124,6 +124,14 @@ states that no deployment authority is present, records accepted gate provenance
 rows. Previously approved projects cannot be deleted; they can be retired while retaining their versions, gate
 runs, reviews, and export history.
 
+`DetectionSigningKey` lazily creates a persistent local Ed25519 key only when the first Git change is exported.
+The signed repository manifest binds the approved content hash, accepted promotion gate, authority boundary, and
+all detection file hashes. Canonical `detection.json` lets the verifier independently recompute that approved
+hash, while `detection.yml` remains the human-facing artifact. The generated standalone verifier performs no
+network calls and supports an externally pinned public-key fingerprint; the generated CI workflow requires that
+protected repository variable rather than trusting a fingerprint modified inside the same pull request. Git and
+Splunk mutations remain outside this service boundary.
+
 ## Outbound delivery is a separate authority
 
 `AssuranceDeliveryService` owns a separately opt-in generic webhook policy and restart-safe delivery worker. A

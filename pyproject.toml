@@ -35,6 +35,7 @@ dev = [
 splunk-security-agent = "splunk_security_agent.main:run"
 signalroom-models = "splunk_security_agent.model_setup:run"
 signalroom-eval = "splunk_security_agent.evaluation:run"
+signalroom-verify-detection = "splunk_security_agent.detections.gitops_verifier:run"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/splunk_security_agent"]

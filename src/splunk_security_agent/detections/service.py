@@ -17,6 +17,7 @@ from ..schemas import (
     DetectionCreate,
     DetectionExportRequest,
     DetectionGateRunRequest,
+    DetectionGitExportRequest,
     DetectionReviewRequest,
     DetectionUpdate,
     DetectionValidationDraftRequest,
@@ -25,6 +26,8 @@ from ..schemas import (
 )
 from ..splunk.guardrails import validate_read_only_spl
 from ..validation import ValidationService, ValidationStore
+from .gitops_verifier import verify_path
+from .signing import DetectionSigningKey
 from .store import DetectionStore
 
 CRON_PART = re.compile(r"^[0-9*/?,#LW-]+$")
@@ -48,6 +51,9 @@ class DetectionService:
         self.cases = cases
         self.export_dir = Path(export_dir)
         self.export_dir.mkdir(parents=True, exist_ok=True)
+        self.signing_key = DetectionSigningKey(
+            self.export_dir.parent / "detection_signing.key"
+        )
 
     def create(self, value: DetectionCreate) -> dict[str, Any]:
         task = self.validations.get(value.validation_task_id)
@@ -291,15 +297,10 @@ class DetectionService:
     def export(
         self, detection_id: str, request: DetectionExportRequest
     ) -> tuple[dict[str, Any], Path]:
-        current = self.store.get(detection_id)
-        if current is None:
-            raise KeyError("Detection not found")
-        if current["status"] != "approved":
-            raise ValueError("Only an approved detection version can be exported")
-        expected = request.expected_content_sha256
-        if expected != current["current_sha256"] or expected != current["approved_sha256"]:
-            raise ValueError("Approved detection content changed; review the current version")
-        self._validate(current["content"])
+        current = self._exportable_detection(
+            detection_id,
+            request.expected_content_sha256,
+        )
         content = current["content"]
         stem = f"signalroom_detection_{detection_id[:8]}_v{current['current_version']}"
         files = {
@@ -339,6 +340,113 @@ class DetectionService:
         )
         assert result is not None
         return result, path
+
+    def export_git_change(
+        self, detection_id: str, request: DetectionGitExportRequest
+    ) -> tuple[dict[str, Any], Path, dict[str, Any]]:
+        current = self._exportable_detection(
+            detection_id,
+            request.expected_content_sha256,
+        )
+        content = current["content"]
+        gate = self._export_gate(current)
+        if not gate:
+            raise ValueError(
+                "Git change export requires an accepted promotion gate for this version"
+            )
+        slug = self._slug(content["title"])
+        detection_root = f"detections/{slug}-{detection_id[:8]}"
+        detection_files = {
+            "detection.json": f"{DetectionStore.canonical(content)}\n",
+            "detection.yml": self._yaml(current),
+            "savedsearches.conf": self._savedsearch(content),
+            "README.md": self._readme(current),
+        }
+        key_id = self.signing_key.key_id()
+        manifest = {
+            "schema_version": "signalroom-detection-git-change/v1",
+            "detection_id": detection_id,
+            "version": current["current_version"],
+            "content_sha256": current["current_sha256"],
+            "source_validation_id": current["source_validation_id"],
+            "review": {
+                "status": current["status"],
+                "reviewer": current["reviewed_by"],
+                "reviewed_at": current["reviewed_at"],
+            },
+            "promotion_gate": gate,
+            "repository_policy": {
+                "minimum_gate_score": 80,
+                "requires_accepted_gate": True,
+                "requires_disabled_saved_search": True,
+                "requires_pinned_signing_key": True,
+            },
+            "authority": {
+                "deploys_to_splunk": False,
+                "enables_saved_search": False,
+                "contains_raw_results": False,
+                "creates_git_commit": False,
+                "opens_pull_request": False,
+            },
+            "signing": {
+                "algorithm": "Ed25519",
+                "key_id": key_id,
+                "signature_file": "manifest.sig",
+            },
+            "files": {
+                name: hashlib.sha256(value.encode()).hexdigest()
+                for name, value in detection_files.items()
+            },
+        }
+        signature = self.signing_key.sign(self._canonical_manifest(manifest))
+        repository_files: dict[str, str | bytes] = {
+            **{
+                f"{detection_root}/{name}": value
+                for name, value in detection_files.items()
+            },
+            f"{detection_root}/manifest.json": json.dumps(
+                manifest,
+                indent=2,
+                sort_keys=True,
+            ),
+            f"{detection_root}/manifest.sig": f"{signature}\n",
+            ".signalroom/signalroom.pub": self.signing_key.public_pem(),
+            ".signalroom/policy.json": json.dumps(
+                self._repository_policy(key_id),
+                indent=2,
+                sort_keys=True,
+            ),
+            ".github/workflows/signalroom-detection-policy.yml": self._workflow(),
+            "tools/verify_signalroom_detection.py": (
+                Path(__file__).with_name("gitops_verifier.py").read_text(
+                    encoding="utf-8"
+                )
+            ),
+            "CHANGE_REQUEST.md": self._change_request(current, key_id),
+        }
+        stem = (
+            f"signalroom_git_change_{detection_id[:8]}_"
+            f"v{current['current_version']}"
+        )
+        path = self.export_dir / f"{stem}.zip"
+        with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as archive:
+            for name, body in repository_files.items():
+                archive.writestr(name, body)
+        try:
+            verification = verify_path(path, key_id)
+        except Exception:
+            path.unlink(missing_ok=True)
+            raise
+        archive_sha256 = hashlib.sha256(path.read_bytes()).hexdigest()
+        result = self.store.record_export(
+            detection_id,
+            path.name,
+            current["current_sha256"],
+            archive_sha256,
+            export_kind="git-change",
+        )
+        assert result is not None
+        return result, path, verification
 
     def retire(self, detection_id: str) -> dict[str, Any] | None:
         return self.store.retire(detection_id)
@@ -393,6 +501,140 @@ class DetectionService:
                     },
                 ),
             )
+
+    def _exportable_detection(
+        self, detection_id: str, expected_sha256: str
+    ) -> dict[str, Any]:
+        current = self.store.get(detection_id)
+        if current is None:
+            raise KeyError("Detection not found")
+        if current["status"] != "approved":
+            raise ValueError("Only an approved detection version can be exported")
+        if (
+            expected_sha256 != current["current_sha256"]
+            or expected_sha256 != current["approved_sha256"]
+        ):
+            raise ValueError(
+                "Approved detection content changed; review the current version"
+            )
+        self._validate(current["content"])
+        return current
+
+    @staticmethod
+    def _canonical_manifest(manifest: dict[str, Any]) -> bytes:
+        return json.dumps(
+            manifest,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode()
+
+    @staticmethod
+    def _slug(value: str) -> str:
+        slug = re.sub(r"[^a-z0-9]+", "-", value.strip().lower()).strip("-")
+        return slug[:72] or "detection"
+
+    @staticmethod
+    def _repository_policy(key_id: str) -> dict[str, Any]:
+        return {
+            "schema_version": "signalroom-repository-policy/v1",
+            "trusted_key_sha256": key_id,
+            "trust_bootstrap": (
+                "Pin this fingerprint as the protected repository variable "
+                "SIGNALROOM_TRUSTED_KEY_SHA256. Do not trust a fingerprint changed "
+                "inside the same detection pull request."
+            ),
+            "minimum_gate_score": 80,
+            "require_approved_review": True,
+            "require_accepted_gate": True,
+            "require_disabled_saved_search": True,
+            "allow_raw_results": False,
+            "allow_splunk_deployment": False,
+        }
+
+    @staticmethod
+    def _workflow() -> str:
+        return """name: SignalRoom detection policy
+
+on:
+  pull_request:
+    paths:
+      - "detections/**"
+      - ".signalroom/**"
+      - "tools/verify_signalroom_detection.py"
+      - ".github/workflows/signalroom-detection-policy.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  verify-detection-change:
+    runs-on: ubuntu-latest
+    env:
+      SIGNALROOM_TRUSTED_KEY_SHA256: ${{ vars.SIGNALROOM_TRUSTED_KEY_SHA256 }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Require repository-pinned SignalRoom key
+        shell: bash
+        run: |
+          if [ -z "$SIGNALROOM_TRUSTED_KEY_SHA256" ]; then
+            echo "Set the protected repository variable SIGNALROOM_TRUSTED_KEY_SHA256."
+            exit 1
+          fi
+      - name: Install offline verifier dependency
+        run: python -m pip install "cryptography>=42,<47"
+      - name: Verify signed detection change
+        run: >-
+          python tools/verify_signalroom_detection.py .
+          --trusted-key-sha256 "$SIGNALROOM_TRUSTED_KEY_SHA256"
+"""
+
+    @staticmethod
+    def _change_request(detection: dict[str, Any], key_id: str) -> str:
+        content = detection["content"]
+        gate = DetectionService._export_gate(detection)
+        return "\n".join(
+            [
+                f"# Detection change · {content['title']}",
+                "",
+                "This repository-ready change was produced locally by SignalRoom. "
+                "It did not create a commit, open a pull request, or write to Splunk.",
+                "",
+                "## Review identity",
+                "",
+                f"- Detection: `{detection['id']}`",
+                f"- Version: {detection['current_version']}",
+                f"- Content SHA-256: `{detection['current_sha256']}`",
+                f"- Reviewer: {detection['reviewed_by']}",
+                f"- Reviewed: {detection['reviewed_at']}",
+                f"- Promotion gate: `{gate.get('id', '')}` · "
+                f"{gate.get('score', 0)}/100",
+                f"- Signing key SHA-256: `{key_id}`",
+                "",
+                "## Repository bootstrap",
+                "",
+                "1. Confirm the signing-key fingerprint with the SignalRoom operator "
+                "through a channel outside this change.",
+                "2. Store it as the protected repository variable "
+                "`SIGNALROOM_TRUSTED_KEY_SHA256`.",
+                "3. Protect the generated workflow, verifier, and `.signalroom` policy "
+                "with repository ownership rules.",
+                "4. Extract this ZIP at the repository root and review the resulting diff.",
+                "",
+                "## Analyst checklist",
+                "",
+                "- [ ] Confirm data ownership and target Splunk app.",
+                "- [ ] Confirm schedule, search concurrency, and suppression policy.",
+                "- [ ] Confirm required fields and accepted result-count drift.",
+                "- [ ] Obtain normal deployment approval outside SignalRoom.",
+                "",
+                "The saved-search stanza remains disabled and unscheduled.",
+                "",
+            ]
+        )
 
     @staticmethod
     def _tags(values: list[str]) -> list[str]:
@@ -671,11 +913,20 @@ class DetectionService:
             "id": gate["id"],
             "status": gate["status"],
             "score": gate["score"],
+            "content_sha256": gate["content_sha256"],
             "validation_task_id": gate["validation_task_id"],
             "baseline_gate_id": gate["baseline_gate_id"],
             "result_count": gate["result_count"],
             "baseline_result_count": gate["baseline_result_count"],
             "result_delta_percent": gate["result_delta_percent"],
+            "controls": [
+                {
+                    "id": item["id"],
+                    "status": item["status"],
+                    "blocking": item["blocking"],
+                }
+                for item in gate["controls"]
+            ],
             "accepted_at": gate["accepted_at"],
         }
 

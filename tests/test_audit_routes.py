@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -9,6 +10,7 @@ import pytest
 from splunk_security_agent.schemas import (
     CaseUpdate,
     DetectionGateRunRequest,
+    DetectionGitExportRequest,
     DetectionUpdate,
     DetectionValidationDraftRequest,
     ValidationTaskUpdate,
@@ -142,3 +144,42 @@ async def test_detection_gate_and_validation_handoff_are_audited(monkeypatch):
         "detection.gate.completed",
         "detection.validation.draft.created",
     ]
+
+
+@pytest.mark.asyncio
+async def test_signed_git_change_export_is_audited(monkeypatch):
+    app_module = importlib.import_module("splunk_security_agent.app")
+    audit = AuditRecorder()
+    detection = {
+        "id": "detection-1",
+        "current_version": 3,
+        "current_sha256": "a" * 64,
+        "status": "approved",
+    }
+    verification = {
+        "valid": True,
+        "trust": "pinned",
+        "key_id": "b" * 64,
+        "detections": [],
+    }
+    fake_services = SimpleNamespace(
+        audit=audit,
+        detections=SimpleNamespace(
+            export_git_change=lambda detection_id, request: (
+                detection,
+                Path("signalroom_git_change.zip"),
+                verification,
+            ),
+        ),
+    )
+    monkeypatch.setattr(app_module, "services", fake_services)
+
+    result = await app_module.export_detection_git_change(
+        detection["id"],
+        DetectionGitExportRequest(expected_content_sha256="a" * 64),
+    )
+
+    assert result["verification"]["valid"] is True
+    assert result["authority"]["creates_git_commit"] is False
+    assert result["authority"]["opens_pull_request"] is False
+    assert audit.event_types == ["detection.git_change.exported"]

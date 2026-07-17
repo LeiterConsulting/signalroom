@@ -75,6 +75,7 @@ class DetectionStore:
                     filename TEXT NOT NULL,
                     content_sha256 TEXT NOT NULL,
                     archive_sha256 TEXT NOT NULL,
+                    export_kind TEXT NOT NULL DEFAULT 'package',
                     created_at TEXT NOT NULL,
                     FOREIGN KEY(detection_id) REFERENCES detections(id) ON DELETE CASCADE
                 );
@@ -105,6 +106,15 @@ class DetectionStore:
                     ON detection_gate_runs(detection_id, created_at DESC);
                 """
             )
+            export_columns = {
+                str(row["name"])
+                for row in db.execute("PRAGMA table_info(detection_exports)").fetchall()
+            }
+            if "export_kind" not in export_columns:
+                db.execute(
+                    """ALTER TABLE detection_exports ADD COLUMN export_kind
+                    TEXT NOT NULL DEFAULT 'package'"""
+                )
 
     def create(
         self,
@@ -392,6 +402,7 @@ class DetectionStore:
         filename: str,
         content_sha256: str,
         archive_sha256: str,
+        export_kind: str = "package",
     ) -> dict[str, Any] | None:
         current = self.get(detection_id)
         if current is None:
@@ -400,8 +411,9 @@ class DetectionStore:
         with self._lock, self.connect() as db:
             db.execute(
                 """INSERT INTO detection_exports
-                (id,detection_id,version,filename,content_sha256,archive_sha256,created_at)
-                VALUES (?,?,?,?,?,?,?)""",
+                (id,detection_id,version,filename,content_sha256,archive_sha256,
+                export_kind,created_at)
+                VALUES (?,?,?,?,?,?,?,?)""",
                 (
                     str(uuid4()),
                     detection_id,
@@ -409,6 +421,7 @@ class DetectionStore:
                     filename,
                     content_sha256,
                     archive_sha256,
+                    export_kind,
                     now,
                 ),
             )

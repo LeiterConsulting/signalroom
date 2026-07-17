@@ -300,6 +300,26 @@ produces a ZIP with `detection.yml`, a disabled `savedsearches.conf` stanza, a r
 manifest containing the accepted gate provenance. The package contains no raw Splunk rows, sets `disabled = 1`
 and `enableSched = 0`, and grants SignalRoom no authority to deploy or enable the search in Splunk.
 
+An approved, gated version can also export a **Git change bundle**. SignalRoom signs its canonical manifest with
+a persistent local Ed25519 key and includes a standalone offline verifier, a read-only GitHub pull-request
+workflow, repository policy, and change-request checklist. The workflow fails closed until an administrator pins
+the out-of-band verified key fingerprint as the protected repository variable
+`SIGNALROOM_TRUSTED_KEY_SHA256`. SignalRoom does not initialize a repository, create a commit, push a branch, or
+open a pull request.
+
+Verify an extracted change or the ZIP directly:
+
+```bash
+signalroom-verify-detection ./repository \
+  --trusted-key-sha256 "$SIGNALROOM_TRUSTED_KEY_SHA256"
+signalroom-verify-detection signalroom_git_change_abcd1234_v2.zip \
+  --trusted-key-sha256 "$SIGNALROOM_TRUSTED_KEY_SHA256"
+```
+
+The verifier checks the pinned signing identity, Ed25519 signature, exact file inventory, every signed file hash,
+the recomputed canonical approved-content hash and accepted gate binding, gate score, raw-result boundary, and
+disabled/unscheduled Splunk stanza.
+
 ### Discovery
 
 Discovery is a read-only security-intelligence workflow rather than a count-only inventory. Quick establishes

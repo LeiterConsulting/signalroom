@@ -401,6 +401,12 @@ class DetectionExportRequest(BaseModel):
     )
 
 
+class DetectionGitExportRequest(BaseModel):
+    expected_content_sha256: str = Field(
+        min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$"
+    )
+
+
 class DetectionGateRunRequest(BaseModel):
     expected_content_sha256: str = Field(
         min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$"

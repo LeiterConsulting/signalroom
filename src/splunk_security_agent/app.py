@@ -44,6 +44,7 @@ from .schemas import (
     DetectionCreate,
     DetectionExportRequest,
     DetectionGateRunRequest,
+    DetectionGitExportRequest,
     DetectionReviewRequest,
     DetectionUpdate,
     DetectionValidationDraftRequest,
@@ -1176,6 +1177,53 @@ async def export_detection(
             "filename": path.name,
             "format": "zip",
             "url": f"/api/detection-exports/{path.name}",
+        },
+    }
+
+
+@app.post("/api/detections/{detection_id}/git-export")
+async def export_detection_git_change(
+    detection_id: str, request: DetectionGitExportRequest
+) -> dict[str, Any]:
+    try:
+        detection, path, verification = services.detections.export_git_change(
+            detection_id,
+            request,
+        )
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    services.audit.record(
+        "detection.git_change.exported",
+        "export",
+        target_type="detection",
+        target_id=detection_id,
+        summary=(
+            "A signed, repository-ready detection change with offline CI policy "
+            "verification was exported locally."
+        ),
+        metadata={
+            "version": detection["current_version"],
+            "content_sha256": detection["current_sha256"],
+            "filename": path.name,
+            "signing_key_sha256": verification["key_id"],
+            "verification": verification["valid"],
+            "trust": verification["trust"],
+        },
+    )
+    return {
+        "detection": detection,
+        "file": {
+            "filename": path.name,
+            "format": "zip",
+            "url": f"/api/detection-exports/{path.name}",
+        },
+        "verification": verification,
+        "authority": {
+            "creates_git_commit": False,
+            "opens_pull_request": False,
+            "deploys_to_splunk": False,
         },
     }
 

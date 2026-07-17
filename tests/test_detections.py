@@ -1,12 +1,19 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import sqlite3
 import zipfile
 
 import pytest
 
 from splunk_security_agent.cases import CaseStore
 from splunk_security_agent.detections import DetectionService, DetectionStore
+from splunk_security_agent.detections.gitops_verifier import (
+    VerificationError,
+    verify_change_bundle,
+    verify_path,
+)
 from splunk_security_agent.rag import EvidenceStore
 from splunk_security_agent.schemas import (
     ArtifactCreate,
@@ -14,6 +21,7 @@ from splunk_security_agent.schemas import (
     DetectionCreate,
     DetectionExportRequest,
     DetectionGateRunRequest,
+    DetectionGitExportRequest,
     DetectionReviewRequest,
     DetectionUpdate,
     DetectionValidationDraftRequest,
@@ -454,3 +462,240 @@ def test_gate_rejects_a_stale_content_hash(tmp_path):
                 expected_content_sha256=detection["current_sha256"]
             ),
         )
+
+
+def test_signed_git_change_is_ci_verifiable_and_policy_bound(tmp_path):
+    service, _, validations, evidence, _ = service_fixture(tmp_path)
+    source = completed_validation(validations, evidence)
+    assert source is not None
+    detection = service.create(
+        DetectionCreate(
+            validation_task_id=source.id,
+            title="Encoded PowerShell / CI policy",
+            severity="high",
+            security_domain="endpoint",
+            mitre_attack=["T1059.001"],
+        )
+    )
+    gate = service.run_gate(
+        detection["id"],
+        DetectionGateRunRequest(
+            expected_content_sha256=detection["current_sha256"]
+        ),
+    )
+    assert gate["status"] == "pass"
+    service.submit(detection["id"])
+    approved = service.review(
+        detection["id"],
+        DetectionReviewRequest(
+            decision="approve",
+            expected_content_sha256=detection["current_sha256"],
+            reviewer="Detection reviewer",
+        ),
+    )
+    assert approved is not None
+
+    exported, archive_path, self_check = service.export_git_change(
+        detection["id"],
+        DetectionGitExportRequest(
+            expected_content_sha256=detection["current_sha256"]
+        ),
+    )
+    assert exported["export_count"] == 1
+    assert exported["exports"][0]["export_kind"] == "git-change"
+    assert self_check["valid"] is True
+    assert self_check["trust"] == "pinned"
+    assert self_check["key_id"] == service.signing_key.key_id()
+    assert archive_path.exists()
+
+    with zipfile.ZipFile(archive_path) as archive:
+        names = set(archive.namelist())
+        manifest_name = next(
+            name for name in names if name.endswith("/manifest.json")
+        )
+        detection_root = manifest_name.rsplit("/", 1)[0]
+        assert names == {
+            ".github/workflows/signalroom-detection-policy.yml",
+            ".signalroom/policy.json",
+            ".signalroom/signalroom.pub",
+            "CHANGE_REQUEST.md",
+            f"{detection_root}/README.md",
+            f"{detection_root}/detection.json",
+            f"{detection_root}/detection.yml",
+            f"{detection_root}/manifest.json",
+            f"{detection_root}/manifest.sig",
+            f"{detection_root}/savedsearches.conf",
+            "tools/verify_signalroom_detection.py",
+        }
+        workflow = archive.read(
+            ".github/workflows/signalroom-detection-policy.yml"
+        ).decode()
+        assert "permissions:\n  contents: read" in workflow
+        assert "vars.SIGNALROOM_TRUSTED_KEY_SHA256" in workflow
+        assert "pull_request_target" not in workflow
+        manifest = json.loads(archive.read(manifest_name))
+        assert manifest["promotion_gate"]["id"] == gate["id"]
+        assert manifest["promotion_gate"]["accepted_at"]
+        assert manifest["authority"]["creates_git_commit"] is False
+        assert manifest["authority"]["opens_pull_request"] is False
+        assert manifest["authority"]["contains_raw_results"] is False
+        canonical_content = json.loads(
+            archive.read(f"{detection_root}/detection.json")
+        )
+        assert hashlib.sha256(
+            json.dumps(
+                canonical_content,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+            ).encode()
+        ).hexdigest() == manifest["content_sha256"]
+
+    repository = tmp_path / "repository"
+    with zipfile.ZipFile(archive_path) as archive:
+        archive.extractall(repository)
+    verified = verify_change_bundle(repository, service.signing_key.key_id())
+    assert verified["valid"] is True
+    assert verified["trust"] == "pinned"
+    assert verify_path(archive_path, service.signing_key.key_id())["valid"] is True
+    with pytest.raises(VerificationError, match="not the trusted repository key"):
+        verify_change_bundle(repository, "0" * 64)
+
+    detection_yaml = repository / manifest_name.replace("manifest.json", "detection.yml")
+    detection_yaml.write_text(
+        detection_yaml.read_text(encoding="utf-8") + "\n# tampered\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(VerificationError, match="hash mismatch"):
+        verify_change_bundle(repository, service.signing_key.key_id())
+
+    forged_repository = tmp_path / "forged-repository"
+    with zipfile.ZipFile(archive_path) as archive:
+        archive.extractall(forged_repository)
+    forged_manifest_path = next(
+        forged_repository.glob("detections/*/manifest.json")
+    )
+    forged_content_path = forged_manifest_path.parent / "detection.json"
+    forged_content = json.loads(forged_content_path.read_text(encoding="utf-8"))
+    forged_content["title"] = "Content changed after approval"
+    forged_content_path.write_text(
+        json.dumps(
+            forged_content,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    forged_manifest = json.loads(
+        forged_manifest_path.read_text(encoding="utf-8")
+    )
+    forged_manifest["files"]["detection.json"] = hashlib.sha256(
+        forged_content_path.read_bytes()
+    ).hexdigest()
+    forged_manifest_path.write_text(
+        json.dumps(forged_manifest, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+    (forged_manifest_path.parent / "manifest.sig").write_text(
+        f"{service.signing_key.sign(service._canonical_manifest(forged_manifest))}\n",
+        encoding="ascii",
+    )
+    with pytest.raises(
+        VerificationError,
+        match="canonical detection content hash is invalid",
+    ):
+        verify_change_bundle(forged_repository, service.signing_key.key_id())
+
+    extra_file_repository = tmp_path / "extra-file-repository"
+    with zipfile.ZipFile(archive_path) as archive:
+        archive.extractall(extra_file_repository)
+    extra_manifest = next(extra_file_repository.glob("detections/*/manifest.json"))
+    nested = extra_manifest.parent / "scripts" / "deploy.ps1"
+    nested.parent.mkdir()
+    nested.write_text("Write-Host unsafe", encoding="utf-8")
+    with pytest.raises(VerificationError, match="unexpected detection files"):
+        verify_change_bundle(extra_file_repository, service.signing_key.key_id())
+
+
+def test_signed_policy_rejects_an_enabled_saved_search(tmp_path):
+    service, _, validations, evidence, _ = service_fixture(tmp_path)
+    source = completed_validation(validations, evidence)
+    assert source is not None
+    detection = service.create(DetectionCreate(validation_task_id=source.id))
+    service.run_gate(
+        detection["id"],
+        DetectionGateRunRequest(
+            expected_content_sha256=detection["current_sha256"]
+        ),
+    )
+    service.submit(detection["id"])
+    service.review(
+        detection["id"],
+        DetectionReviewRequest(
+            decision="approve",
+            expected_content_sha256=detection["current_sha256"],
+            reviewer="Detection reviewer",
+        ),
+    )
+    _, archive_path, _ = service.export_git_change(
+        detection["id"],
+        DetectionGitExportRequest(
+            expected_content_sha256=detection["current_sha256"]
+        ),
+    )
+    repository = tmp_path / "enabled-repository"
+    with zipfile.ZipFile(archive_path) as archive:
+        archive.extractall(repository)
+    manifest_path = next(repository.glob("detections/*/manifest.json"))
+    saved_search = manifest_path.parent / "savedsearches.conf"
+    saved_search.write_text(
+        saved_search.read_text(encoding="utf-8").replace(
+            "disabled = 1",
+            "disabled = 0",
+        ),
+        encoding="utf-8",
+    )
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["files"]["savedsearches.conf"] = hashlib.sha256(
+        saved_search.read_bytes()
+    ).hexdigest()
+    manifest_path.write_text(
+        json.dumps(manifest, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+    (manifest_path.parent / "manifest.sig").write_text(
+        f"{service.signing_key.sign(service._canonical_manifest(manifest))}\n",
+        encoding="ascii",
+    )
+
+    with pytest.raises(
+        VerificationError,
+        match="saved search policy requires disabled = 1",
+    ):
+        verify_change_bundle(repository, service.signing_key.key_id())
+
+
+def test_detection_store_migrates_legacy_exports(tmp_path):
+    path = tmp_path / "legacy-detections.db"
+    with sqlite3.connect(path) as db:
+        db.execute(
+            """CREATE TABLE detection_exports (
+                id TEXT PRIMARY KEY,
+                detection_id TEXT NOT NULL,
+                version INTEGER NOT NULL,
+                filename TEXT NOT NULL,
+                content_sha256 TEXT NOT NULL,
+                archive_sha256 TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )"""
+        )
+
+    store = DetectionStore(path)
+    with store.connect() as db:
+        columns = {
+            str(row["name"])
+            for row in db.execute("PRAGMA table_info(detection_exports)").fetchall()
+        }
+    assert "export_kind" in columns
+    DetectionStore(path)

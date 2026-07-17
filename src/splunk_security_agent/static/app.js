@@ -7,7 +7,7 @@ const state = {
   modelUpdates: null, modelCatalog: null, splunkModels: null,
   assurance: null, assurancePolicyDirty: false, connectionDiagnostics: null, queryIntelligence: null,
   feedbackBenchmarks: null, goldenBenchmarks: null, deliveryPolicyDirty: false,
-  deliveryPreview: null, detections: [], activeDetection: null
+  deliveryPreview: null, detections: [], activeDetection: null, detectionGitExport: null
 };
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => [...document.querySelectorAll(selector)];
@@ -1634,6 +1634,7 @@ async function createDetectionFromValidation(validationId) {
 
 async function openDetection(detectionId, updateHash = true) {
   try {
+    if (state.activeDetection?.id !== detectionId) state.detectionGitExport = null;
     state.activeDetection = await api(`/api/detections/${encodeURIComponent(detectionId)}`);
     renderDetectionList(); renderDetectionDetail();
     if (updateHash) history.replaceState(null, '', `${location.pathname}#detections/${encodeURIComponent(detectionId)}`);
@@ -1643,9 +1644,22 @@ async function openDetection(detectionId, updateHash = true) {
 function detectionHistoryMarkup(detection) {
   const versions = (detection.versions || []).map(item => `<li><b>Version ${Number(item.version)}</b><code>${escapeHtml(item.content_sha256.slice(0, 12))}</code><time>${new Date(item.created_at).toLocaleString()}</time></li>`).join('');
   const reviews = (detection.reviews || []).map(item => `<li class="${escapeHtml(item.decision)}"><b>${escapeHtml(item.decision.replaceAll('-', ' '))}</b><span>${escapeHtml(item.reviewer)} · v${Number(item.version)}</span><p>${escapeHtml(item.note || 'No review note recorded.')}</p><time>${new Date(item.created_at).toLocaleString()}</time></li>`).join('');
-  const exports = (detection.exports || []).map(item => `<li><b>Exported v${Number(item.version)}</b><a href="/api/detection-exports/${encodeURIComponent(item.filename)}">${escapeHtml(item.filename)}</a><code>${escapeHtml(item.archive_sha256.slice(0, 12))}</code><time>${new Date(item.created_at).toLocaleString()}</time></li>`).join('');
+  const exports = (detection.exports || []).map(item => `<li><b>${item.export_kind === 'git-change' ? 'Git change bundle' : 'Review package'} · v${Number(item.version)}</b><a href="/api/detection-exports/${encodeURIComponent(item.filename)}">${escapeHtml(item.filename)}</a><code>${escapeHtml(item.archive_sha256.slice(0, 12))}</code><time>${new Date(item.created_at).toLocaleString()}</time></li>`).join('');
   const gates = (detection.gate_runs || []).map(item => `<li class="${escapeHtml(item.status)}"><b>${escapeHtml(item.status)} · ${Number(item.score)}/100</b><span>Version ${Number(item.version)} · ${Number(item.result_count).toLocaleString()} result${Number(item.result_count) === 1 ? '' : 's'}</span><code>${escapeHtml(item.content_sha256.slice(0, 12))}</code>${item.accepted_at ? '<em>Accepted baseline</em>' : ''}<time>${new Date(item.created_at).toLocaleString()}</time></li>`).join('');
   return `<div class="detection-history-grid"><section><h4>Immutable versions</h4><ol>${versions || '<li>No versions recorded.</li>'}</ol></section><section><h4>Promotion gates</h4><ol>${gates || '<li>No promotion gate has run.</li>'}</ol></section><section><h4>Review decisions</h4><ol>${reviews || '<li>No review decision yet.</li>'}</ol></section><section><h4>Local exports</h4><ol>${exports || '<li>No approved package exported.</li>'}</ol></section></div>`;
+}
+
+function detectionGitOpsMarkup(detection) {
+  if (detection.status !== 'approved') return '';
+  const result = state.detectionGitExport;
+  const current = result?.detection_id === detection.id && result?.content_sha256 === detection.current_sha256 ? result : null;
+  const verification = current ? `
+    <div class="detection-git-verification"><span>OFFLINE SELF-CHECK PASSED</span><b>Ed25519 · pinned-key capable</b><code>${escapeHtml(current.key_id)}</code><p>Confirm this fingerprint outside the pull request, then pin it as the protected repository variable <code>SIGNALROOM_TRUSTED_KEY_SHA256</code>.</p></div>` : '';
+  return `<section class="detection-gitops">
+    <header><div><span>GIT-NATIVE CHANGE CONTROL</span><h4>Signed repository change bundle</h4><p>Export the approved detection, accepted gate provenance, offline verifier, and a read-only pull-request workflow. SignalRoom will not create a commit, open a pull request, or deploy to Splunk.</p></div><button class="button primary" type="button" data-export-detection-git>Export Git change bundle</button></header>
+    <div class="detection-git-flow"><span>Approved detection</span><b>→</b><span>Signed manifest</span><b>→</b><span>Repository-pinned CI</span><b>→</b><span>Your deployment process</span></div>
+    ${verification}
+  </section>`;
 }
 
 function detectionGateMarkup(detection) {
@@ -1727,6 +1741,7 @@ function renderDetectionDetail() {
     <section class="detection-evidence-contract"><header><div><span>TRUST ANCHOR</span><h4>Completed validation evidence</h4></div><b>${Number(evidence.result_count).toLocaleString()} result${Number(evidence.result_count) === 1 ? '' : 's'}</b></header><dl><div><dt>Validation</dt><dd><code>${escapeHtml(evidence.source_validation_id)}</code></dd></div><div><dt>Query fingerprint</dt><dd><code>${escapeHtml(evidence.query_fingerprint)}</code></dd></div><div><dt>Artifact</dt><dd><code>${escapeHtml(evidence.artifact_id)}</code></dd></div><div><dt>Completed</dt><dd>${evidence.completed_at ? new Date(evidence.completed_at).toLocaleString() : 'unknown'}</dd></div><div><dt>Evidence references</dt><dd>${escapeHtml((evidence.evidence_refs || []).join(', ') || 'none')}</dd></div></dl></section>
     ${detectionGateMarkup(detection)}
     ${reviewControls}
+    ${detectionGitOpsMarkup(detection)}
     ${detectionHistoryMarkup(detection)}`;
   if (!locked) $('#detectionForm').addEventListener('submit', saveDetectionVersion);
 }
@@ -1810,6 +1825,22 @@ async function exportDetection() {
     state.activeDetection = result.detection; await loadDetections();
     const link = document.createElement('a'); link.href = result.file.url; link.download = result.file.filename; document.body.appendChild(link); link.click(); link.remove();
     toast('Approved disabled-by-default package exported');
+  } catch (error) { toast(error.message); }
+}
+
+async function exportDetectionGitChange() {
+  const detection = state.activeDetection; if (!detection) return;
+  try {
+    const result = await api(`/api/detections/${encodeURIComponent(detection.id)}/git-export`, {method:'POST',body:JSON.stringify({expected_content_sha256:detection.current_sha256})});
+    state.activeDetection = result.detection;
+    state.detectionGitExport = {
+      ...result.verification,
+      detection_id:detection.id,
+      content_sha256:detection.current_sha256
+    };
+    await loadDetections(); renderDetectionDetail();
+    const link = document.createElement('a'); link.href = result.file.url; link.download = result.file.filename; document.body.appendChild(link); link.click(); link.remove();
+    toast('Signed Git change verified locally and exported; pin its key fingerprint in repository policy');
   } catch (error) { toast(error.message); }
 }
 
@@ -2032,6 +2063,7 @@ document.addEventListener('click', async event => {
   const reviewDetectionButton = event.target.closest('[data-review-detection]');
   if (reviewDetectionButton) { await reviewDetection(reviewDetectionButton.dataset.reviewDetection); return; }
   if (event.target.closest('[data-export-detection]')) { await exportDetection(); return; }
+  if (event.target.closest('[data-export-detection-git]')) { await exportDetectionGitChange(); return; }
   if (event.target.closest('[data-retire-detection]')) { await retireDetection(); return; }
   if (event.target.closest('[data-delete-detection]')) { await deleteDetection(); return; }
   if (event.target.closest('[data-detection-investigate]')) { investigateDetection(); return; }
