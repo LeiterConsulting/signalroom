@@ -20,6 +20,8 @@ from .cases import CaseCockpitService, CaseStore
 from .config import ConfigStore
 from .delivery import AssuranceDeliveryService, DeliveryStore
 from .detections import (
+    DetectionDeploymentService,
+    DetectionDeploymentStore,
     DetectionRepositoryService,
     DetectionRepositoryStore,
     DetectionService,
@@ -47,6 +49,8 @@ from .schemas import (
     DeliveryApproval,
     DeliveryPolicyUpdate,
     DetectionCreate,
+    DetectionDeploymentCaseRequest,
+    DetectionDeploymentRefreshRequest,
     DetectionExportRequest,
     DetectionGateRunRequest,
     DetectionGitExportRequest,
@@ -113,6 +117,15 @@ class Services:
             self.detections,
             self.detection_repository_store,
             DATA / "detection_repository_runtime",
+        )
+        self.detection_deployment_store = DetectionDeploymentStore(
+            DATA / "detection_deployment.db"
+        )
+        self.detection_deployment = DetectionDeploymentService(
+            self.config,
+            self.detections,
+            self.detection_deployment_store,
+            lambda: self.splunk,
         )
         self.case_cockpit = CaseCockpitService(
             self.cases, self.validation_store, self.evidence
@@ -1024,7 +1037,98 @@ async def get_detection(detection_id: str) -> dict[str, Any]:
     detection = services.detection_store.get(detection_id)
     if detection is None:
         raise HTTPException(404, "Detection not found")
+    detection["deployment_verification"] = services.detection_deployment.latest(
+        detection_id,
+        detection["current_sha256"],
+    )
     return detection
+
+
+@app.get("/api/detections/{detection_id}/deployment-verification")
+async def get_detection_deployment_verification(
+    detection_id: str,
+) -> dict[str, Any] | None:
+    detection = services.detection_store.get(detection_id)
+    if detection is None:
+        raise HTTPException(404, "Detection not found")
+    return services.detection_deployment.latest(
+        detection_id,
+        detection["current_sha256"],
+    )
+
+
+@app.post("/api/detections/{detection_id}/deployment-verification/refresh")
+async def refresh_detection_deployment_verification(
+    detection_id: str,
+    request: DetectionDeploymentRefreshRequest,
+) -> dict[str, Any]:
+    try:
+        snapshot = await services.detection_deployment.refresh(
+            detection_id,
+            request.expected_content_sha256,
+            request.target_app,
+        )
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    services.audit.record(
+        "detection.deployment.observed",
+        "read",
+        target_type="detection",
+        target_id=detection_id,
+        outcome=snapshot["status"],
+        summary=(
+            "An explicit read-only Splunk MCP observation compared the approved "
+            "detection with deployed saved-search state."
+        ),
+        metadata={
+            "content_sha256": snapshot["content_sha256"],
+            "snapshot_sha256": snapshot["snapshot_sha256"],
+            "deployment_status": snapshot["status"],
+            "risk_level": snapshot["risk_level"],
+            "target_app": snapshot["target"]["app"],
+            "catalog_exhaustive": snapshot["collection"]["exhaustive"],
+            "changes_splunk": False,
+        },
+    )
+    return snapshot
+
+
+@app.post("/api/detections/{detection_id}/deployment-verification/case")
+async def preserve_detection_deployment_verification(
+    detection_id: str,
+    request: DetectionDeploymentCaseRequest,
+) -> dict[str, Any]:
+    try:
+        snapshot = services.detection_deployment.preserve_to_case(
+            detection_id,
+            request.expected_snapshot_sha256,
+        )
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    services.audit.record(
+        "detection.deployment.preserved",
+        "create",
+        target_type="case-item",
+        target_id=snapshot["case_item_id"],
+        outcome=snapshot["status"],
+        summary=(
+            "An exact Splunk deployment verification snapshot was preserved "
+            "in the linked case timeline."
+        ),
+        metadata={
+            "detection_id": detection_id,
+            "snapshot_sha256": snapshot["snapshot_sha256"],
+            "case_item_id": snapshot["case_item_id"],
+            "deployment_status": snapshot["status"],
+            "risk_level": snapshot["risk_level"],
+            "changes_splunk": False,
+        },
+    )
+    return snapshot
 
 
 @app.patch("/api/detections/{detection_id}")

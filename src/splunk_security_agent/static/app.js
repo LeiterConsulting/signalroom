@@ -775,8 +775,10 @@ function renderCaseDetail() {
   const item = state.activeCase;
   if (!item) return;
   const timeline = item.items.length ? item.items.map(entry => {
-    const repositoryLink = entry.metadata?.detection_repository_handoff_id && entry.metadata?.detection_id
-      ? `<button class="timeline-deep-link" data-open-repository-detection="${escapeHtml(entry.metadata.detection_id)}">Open detection handoff</button>`
+    const repositoryEvidence = entry.metadata?.detection_repository_handoff_id;
+    const deploymentEvidence = entry.metadata?.detection_deployment_snapshot_id;
+    const detectionLink = entry.metadata?.detection_id && (repositoryEvidence || deploymentEvidence)
+      ? `<button class="timeline-deep-link" data-open-repository-detection="${escapeHtml(entry.metadata.detection_id)}">${deploymentEvidence ? 'Open deployment verification' : 'Open detection handoff'}</button>`
       : '';
     return `
     <article class="timeline-item">
@@ -784,7 +786,7 @@ function renderCaseDetail() {
       <div class="timeline-card">
         <header><div><span>${escapeHtml(entry.kind)} · ${escapeHtml(entry.status)}</span><h4>${escapeHtml(entry.title)}</h4></div><span class="timeline-admin-actions"><button data-edit-case-item="${escapeHtml(entry.id)}">Edit</button><button data-delete-case-item="${escapeHtml(entry.id)}" aria-label="Remove ${escapeHtml(entry.title)}">Remove</button></span></header>
         <p>${escapeHtml(entry.content)}</p>
-        <footer><span>${escapeHtml(entry.source)} · ${escapeHtml(entry.confidence)} confidence</span>${repositoryLink}<time>${new Date(entry.occurred_at || entry.created_at).toLocaleString()}</time></footer>
+        <footer><span>${escapeHtml(entry.source)} · ${escapeHtml(entry.confidence)} confidence</span>${detectionLink}<time>${new Date(entry.occurred_at || entry.created_at).toLocaleString()}</time></footer>
       </div>
     </article>`;
   }).join('') : '<div class="case-timeline-empty"><b>The timeline is ready.</b><p>Add an analyst note, or preserve evidence directly from Investigate, Discovery, or Context.</p></div>';
@@ -1813,6 +1815,52 @@ function detectionRepositoryMarkup(detection) {
   </section>`;
 }
 
+function detectionDeploymentMarkup(detection) {
+  if (detection.status !== 'approved') return '';
+  const snapshot = detection.deployment_verification;
+  const targetApp = snapshot?.target?.app || '';
+  const refreshControl = `<div class="deployment-refresh-control">
+    <label><span>Target Splunk app <small>optional, but required when names collide</small></span><input id="deploymentTargetApp" maxlength="160" pattern="[A-Za-z0-9_.-]*" value="${escapeHtml(targetApp)}" placeholder="security_content"></label>
+    <button class="button primary" type="button" data-refresh-deployment>${snapshot ? 'Refresh explicitly' : 'Verify in Splunk'}</button>
+  </div>`;
+  if (!snapshot) {
+    return `<section class="detection-deployment empty">
+      <header><div><span>READ-ONLY SPLUNK DEPLOYMENT CHECK</span><h4>No live definition observation</h4><p>Compare this exact approved version with the saved-search catalog through one explicit Splunk MCP read. SignalRoom never polls or changes Splunk.</p></div>${refreshControl}</header>
+      <p class="deployment-live-status" data-deployment-live aria-live="polite">Ready to request up to 1,000 saved-search definitions. An incomplete catalog will remain inconclusive.</p>
+      <div class="deployment-authority"><b>Observation boundary</b><span>The MCP response can prove selected definition fields, not scheduler execution, alert firing, suppression, or notable-event creation.</span></div>
+    </section>`;
+  }
+  const observed = snapshot.observed || {};
+  const enabled = observed.disabled === false ? 'enabled' : observed.disabled === true ? 'disabled' : 'not observed';
+  const controls = (snapshot.controls || []).map(control => `<li class="${escapeHtml(control.status)}"><i aria-hidden="true"></i><div><b>${escapeHtml(control.label)}</b><p>${escapeHtml(control.detail)}</p></div><span>${escapeHtml(control.status.replaceAll('-', ' '))}</span></li>`).join('');
+  const candidates = (snapshot.candidates || []).length > 1
+    ? `<div class="deployment-candidates"><b>Matching identities require disambiguation</b><ul>${snapshot.candidates.map(item => `<li><span>${escapeHtml(item.name)}</span><code>${escapeHtml(item.app || 'app not reported')}</code></li>`).join('')}</ul></div>`
+    : '';
+  const unobserved = (snapshot.unobserved_controls || []).map(item => `<li>${escapeHtml(item)}</li>`).join('');
+  let caseAction = '<span class="deployment-case-note">Link this detection to a case to preserve the exact observation.</span>';
+  if (detection.case_id && snapshot.case_item_id) {
+    caseAction = `<button class="button ghost" type="button" data-open-deployment-case="${escapeHtml(detection.case_id)}">Open preserved case entry</button>`;
+  } else if (detection.case_id) {
+    caseAction = '<button class="button ghost" type="button" data-preserve-deployment>Preserve exact snapshot to case</button>';
+  }
+  return `<section class="detection-deployment ${escapeHtml(snapshot.risk_level)} ${escapeHtml(snapshot.status)}">
+    <header><div><span>SPLUNK DEPLOYMENT · ${escapeHtml(snapshot.risk_level)} RISK</span><h4>${escapeHtml(snapshot.status.replaceAll('-', ' '))}</h4><p>Observed ${new Date(snapshot.observed_at).toLocaleString()} · snapshot <code>${escapeHtml(snapshot.snapshot_sha256)}</code></p></div>${refreshControl}</header>
+    <p class="deployment-live-status" data-deployment-live aria-live="polite">This is the latest explicit observation. SignalRoom is not polling Splunk.</p>
+    <div class="deployment-state-grid">
+      <article><span>Definition</span><b>${escapeHtml(snapshot.status)}</b><small>${observed.definition_sha256 ? escapeHtml(observed.definition_sha256.slice(0, 12)) : 'not observed'}</small></article>
+      <article><span>Enabled state</span><b>${escapeHtml(enabled)}</b><small>Reported disabled = ${observed.disabled === true ? 'true' : observed.disabled === false ? 'false' : 'unknown'}</small></article>
+      <article><span>Splunk app</span><b>${escapeHtml(observed.app || 'not observed')}</b><small>${snapshot.target.app ? `Target: ${escapeHtml(snapshot.target.app)}` : 'No app scope requested'}</small></article>
+      <article><span>Catalog</span><b>${snapshot.collection.exhaustive ? 'exhaustive' : 'capped'}</b><small>${Number(snapshot.collection.returned).toLocaleString()} returned${snapshot.collection.total_rows == null ? '' : ` of ${Number(snapshot.collection.total_rows).toLocaleString()}`}</small></article>
+    </div>
+    <div class="deployment-recommendation"><b>Next analyst action</b><p>${escapeHtml(snapshot.recommended_action)}</p></div>
+    ${controls ? `<ul class="deployment-controls">${controls}</ul>` : ''}
+    ${candidates}
+    <details class="deployment-limitations"><summary>Controls this MCP response cannot prove</summary><ul>${unobserved}</ul><p>Use scheduler and alert-runtime telemetry as a separate evidence source.</p></details>
+    <footer>${caseAction}</footer>
+    <div class="deployment-authority"><b>Read-only authority</b><span>This observation did not deploy, enable, schedule, or change the saved search. A matching definition does not prove it ran or fired.</span></div>
+  </section>`;
+}
+
 function detectionGateMarkup(detection) {
   const gate = detection.latest_gate;
   const currentGate = gate && gate.content_sha256 === detection.current_sha256 ? gate : null;
@@ -1894,6 +1942,7 @@ function renderDetectionDetail() {
     ${reviewControls}
     ${detectionGitOpsMarkup(detection)}
     ${detectionRepositoryMarkup(detection)}
+    ${detectionDeploymentMarkup(detection)}
     ${detectionHistoryMarkup(detection)}`;
   if (!locked) $('#detectionForm').addEventListener('submit', saveDetectionVersion);
 }
@@ -2058,6 +2107,47 @@ async function preserveDetectionRepositoryReview() {
     state.repositoryHandoff = await api(`/api/detection-repository/handoffs/${encodeURIComponent(value.id)}/review-case`, {method:'POST',body:JSON.stringify({expected_snapshot_sha256:review.snapshot_sha256})});
     renderDetectionDetail();
     toast('Exact repository feedback preserved to the linked case');
+  } catch (error) { toast(error.message); }
+}
+
+async function refreshDetectionDeployment() {
+  const detection = state.activeDetection;
+  if (!detection || detection.status !== 'approved') return;
+  const button = document.querySelector('[data-refresh-deployment]');
+  const live = document.querySelector('[data-deployment-live]');
+  const targetApp = ($('#deploymentTargetApp')?.value || '').trim();
+  if (button) { button.disabled = true; button.textContent = 'Reading Splunk…'; }
+  if (live) live.textContent = 'Calling the read-only saved-search catalog through Splunk MCP; comparing exact SPL, app, schedule, dispatch bounds, and enabled state…';
+  try {
+    const snapshot = await api(`/api/detections/${encodeURIComponent(detection.id)}/deployment-verification/refresh`, {method:'POST',body:JSON.stringify({expected_content_sha256:detection.current_sha256,target_app:targetApp})});
+    detection.deployment_verification = snapshot;
+    renderDetectionDetail();
+    const messages = {
+      verified:'Exact deployed definition and enabled state verified',
+      'deployed-disabled':'Definition matches, but the saved search is disabled',
+      drifted:'Deployment drift requires review',
+      missing:'Saved search not observed in the complete catalog',
+      ambiguous:'Multiple matching definitions require a target app',
+      inconclusive:'Catalog was incomplete; deployment remains unknown'
+    };
+    toast(messages[snapshot.status] || `Deployment observation: ${snapshot.status}`);
+  } catch (error) {
+    if (button) { button.disabled = false; button.textContent = detection.deployment_verification ? 'Refresh explicitly' : 'Verify in Splunk'; }
+    if (live) live.textContent = `Verification stopped: ${error.message}`;
+    toast(error.message);
+  }
+}
+
+async function preserveDetectionDeployment() {
+  const detection = state.activeDetection;
+  const snapshot = detection?.deployment_verification;
+  if (!detection || !snapshot || snapshot.case_item_id) return;
+  const approved = confirm(`Preserve this exact Splunk deployment observation to the linked case?\n\nSnapshot SHA-256: ${snapshot.snapshot_sha256}\nStatus: ${snapshot.status}\nRisk: ${snapshot.risk_level}\n\nThis creates a local timeline item. It does not change Splunk.`);
+  if (!approved) return;
+  try {
+    detection.deployment_verification = await api(`/api/detections/${encodeURIComponent(detection.id)}/deployment-verification/case`, {method:'POST',body:JSON.stringify({expected_snapshot_sha256:snapshot.snapshot_sha256})});
+    renderDetectionDetail();
+    toast('Exact deployment observation preserved to the linked case');
   } catch (error) { toast(error.message); }
 }
 
@@ -2290,6 +2380,10 @@ document.addEventListener('click', async event => {
   if (event.target.closest('[data-preserve-repository-review]')) { await preserveDetectionRepositoryReview(); return; }
   const repositoryCase = event.target.closest('[data-open-repository-case]');
   if (repositoryCase) { setView('cases'); await openCase(repositoryCase.dataset.openRepositoryCase); return; }
+  if (event.target.closest('[data-refresh-deployment]')) { await refreshDetectionDeployment(); return; }
+  if (event.target.closest('[data-preserve-deployment]')) { await preserveDetectionDeployment(); return; }
+  const deploymentCase = event.target.closest('[data-open-deployment-case]');
+  if (deploymentCase) { setView('cases'); await openCase(deploymentCase.dataset.openDeploymentCase); return; }
   if (event.target.closest('[data-retire-detection]')) { await retireDetection(); return; }
   if (event.target.closest('[data-delete-detection]')) { await deleteDetection(); return; }
   if (event.target.closest('[data-detection-investigate]')) { investigateDetection(); return; }

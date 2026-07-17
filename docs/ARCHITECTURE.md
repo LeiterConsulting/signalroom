@@ -153,6 +153,14 @@ Head or branch drift from the approved handoff becomes a critical stop condition
 action binds one exact snapshot digest into the linked case timeline; the timeline item deep-links to the
 detection and states that repository merge is not deployment proof.
 
+`DetectionDeploymentService` closes the definition-observation loop without acquiring Splunk write authority.
+For one exact approved content hash, an explicit action requests the bounded `saved_searches` catalog through
+Splunk MCP and compares only returned fields: name, optional target app, normalized SPL, cron, dispatch bounds,
+and disabled state. `DetectionDeploymentStore` retains each result as an immutable SHA-256 snapshot. Duplicate
+identities fail closed, SPL drift is critical, and absence is classified as missing only when `total_rows` and
+`truncated` establish an exhaustive response. Scheduler execution, actions, suppression, and firing remain
+unobserved. Preserving a digest-bound result to a linked case is a separate local action.
+
 ## Outbound delivery is a separate authority
 
 `AssuranceDeliveryService` owns a separately opt-in generic webhook policy and restart-safe delivery worker. A

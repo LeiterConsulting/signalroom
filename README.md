@@ -339,6 +339,14 @@ When optional repository handoff is configured, the same signed artifact can pro
 **preview → approve → local commit → optional push → optional draft PR** workflow. Each transition is exact-hash
 bound and independently authorized; the export button itself remains a local packaging operation.
 
+After deployment through the organization’s normal process, **Verify in Splunk** performs one explicit read-only
+saved-search catalog request. SignalRoom compares the approved name, normalized SPL, target app when supplied,
+cron, dispatch bounds, and disabled state. The immutable result distinguishes verified, deployed-but-disabled,
+drifted, missing, ambiguous, and inconclusive outcomes. Absence is only called missing when Splunk reports an
+exhaustive catalog; capped responses remain unknown. The MCP contract does not expose scheduler execution, alert
+actions, suppression, firing, or notable-event behavior, so those controls remain visibly unobserved. An exact
+snapshot can be preserved to a linked case without granting deployment or enablement authority.
+
 Verify an extracted change or the ZIP directly:
 
 ```bash

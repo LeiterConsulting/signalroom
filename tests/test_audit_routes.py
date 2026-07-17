@@ -9,6 +9,8 @@ import pytest
 
 from splunk_security_agent.schemas import (
     CaseUpdate,
+    DetectionDeploymentCaseRequest,
+    DetectionDeploymentRefreshRequest,
     DetectionGateRunRequest,
     DetectionGitExportRequest,
     DetectionRepositoryApprovalRequest,
@@ -70,6 +72,9 @@ async def test_gets_do_not_create_mutation_audits_and_write_routes_do(monkeypatc
             update=lambda case_id, request: case,
         ),
         detection_store=SimpleNamespace(get=lambda detection_id: detection | {"current_version": 1}),
+        detection_deployment=SimpleNamespace(
+            latest=lambda detection_id, content_sha256: None
+        ),
         detections=SimpleNamespace(
             update=lambda detection_id, request: detection,
         ),
@@ -263,4 +268,58 @@ async def test_repository_handoff_control_plane_is_audited(monkeypatch):
         "detection.repository.pull_request.opened",
         "detection.repository.review.refreshed",
         "detection.repository.review.preserved",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_splunk_deployment_observation_and_case_preservation_are_audited(
+    monkeypatch,
+):
+    app_module = importlib.import_module("splunk_security_agent.app")
+    audit = AuditRecorder()
+    snapshot = {
+        "id": "deployment-1",
+        "detection_id": "detection-1",
+        "content_sha256": "a" * 64,
+        "snapshot_sha256": "b" * 64,
+        "case_item_id": "case-item-1",
+        "status": "drifted",
+        "risk_level": "critical",
+        "target": {"name": "PowerShell", "app": "security_content"},
+        "collection": {"exhaustive": True},
+    }
+
+    async def refresh(detection_id, expected_content_sha256, target_app):
+        return snapshot
+
+    fake_deployment = SimpleNamespace(
+        refresh=refresh,
+        preserve_to_case=lambda detection_id, expected: snapshot,
+    )
+    monkeypatch.setattr(
+        app_module,
+        "services",
+        SimpleNamespace(
+            audit=audit,
+            detection_deployment=fake_deployment,
+        ),
+    )
+
+    await app_module.refresh_detection_deployment_verification(
+        "detection-1",
+        DetectionDeploymentRefreshRequest(
+            expected_content_sha256="a" * 64,
+            target_app="security_content",
+        ),
+    )
+    await app_module.preserve_detection_deployment_verification(
+        "detection-1",
+        DetectionDeploymentCaseRequest(
+            expected_snapshot_sha256="b" * 64,
+        ),
+    )
+
+    assert audit.event_types == [
+        "detection.deployment.observed",
+        "detection.deployment.preserved",
     ]

@@ -460,6 +460,23 @@ class DetectionRepositoryCaseRequest(BaseModel):
     )
 
 
+class DetectionDeploymentRefreshRequest(BaseModel):
+    expected_content_sha256: str = Field(
+        min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$"
+    )
+    target_app: str = Field(
+        default="",
+        max_length=160,
+        pattern=r"^[A-Za-z0-9_.-]*$",
+    )
+
+
+class DetectionDeploymentCaseRequest(BaseModel):
+    expected_snapshot_sha256: str = Field(
+        min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$"
+    )
+
+
 class DetectionRepositoryTestRequest(BaseModel):
     settings: DetectionRepositorySettings
 
