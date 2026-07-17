@@ -222,6 +222,24 @@ class GoldenBenchmarkRunCreate(BaseModel):
     profile_id: str = Field(min_length=1, max_length=160)
 
 
+ModelAssignmentTarget = Literal["default_chat_model", "security_reasoning_model"]
+
+
+class ModelTournamentRunCreate(BaseModel):
+    profile_ids: list[str] = Field(min_length=2, max_length=8)
+    target: ModelAssignmentTarget = "security_reasoning_model"
+
+
+class ModelTournamentReviewRequest(BaseModel):
+    pair_id: str = Field(min_length=1, max_length=160)
+    choice: Literal["a", "b", "tie"]
+
+
+class ModelTournamentPromotionRequest(BaseModel):
+    profile_id: str = Field(min_length=1, max_length=160)
+    fingerprint: str = Field(min_length=64, max_length=64)
+
+
 class ArtifactCreate(BaseModel):
     title: str = Field(min_length=1, max_length=240)
     content: str = Field(min_length=1, max_length=2_000_000)

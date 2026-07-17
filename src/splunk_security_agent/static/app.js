@@ -6,7 +6,7 @@ const state = {
   modelRecommendations: {}, validations: [], editingValidationId: null,
   modelUpdates: null, modelCatalog: null, splunkModels: null,
   assurance: null, assurancePolicyDirty: false, connectionDiagnostics: null, queryIntelligence: null,
-  feedbackBenchmarks: null, goldenBenchmarks: null, deliveryPolicyDirty: false,
+  feedbackBenchmarks: null, goldenBenchmarks: null, selectedTournamentId: null, deliveryPolicyDirty: false,
   deliveryPreview: null, detections: [], activeDetection: null, detectionGitExport: null,
   repositoryStatus: null, repositoryHandoff: null
 };
@@ -877,6 +877,133 @@ function benchmarkTime(value) {
   return value ? new Date(value).toLocaleString() : 'not completed';
 }
 
+function tournamentTargetLabel(target) {
+  return target === 'default_chat_model' ? 'General investigation route' : 'Security reasoning route';
+}
+
+function renderTournamentRun(tournament, overview) {
+  if (!tournament) return '<div class="empty-inline compact-empty">Choose at least two local profiles to create a reviewable comparison.</div>';
+  const recommendation = tournament.recommendation || {};
+  const activePromotion = (overview.active_promotions || []).find(item => item.tournament_id === tournament.id);
+  const completedReviews = (tournament.review_pairs || []).filter(item => item.choice).length;
+  const ranking = (tournament.ranking || []).map(item => `
+    <article class="tournament-rank ${item.eligible ? 'eligible' : 'hold'} ${recommendation.profile_id === item.profile_id ? 'recommended' : ''}">
+      <header><span>#${item.rank} · ${item.eligible ? 'GATE PASSED' : 'HOLD'}</span><b>${Number(item.final_score || 0).toFixed(1)}</b></header>
+      <h4>${escapeHtml(item.label)}</h4><code>${escapeHtml(item.model)}</code>
+      <div><span><b>${Math.round(Number(item.score || 0))}</b>quality</span><span><b>${Math.round(Number(item.latency_score || 0))}</b>latency index</span><span><b>${item.blind_review_score == null ? '—' : Math.round(Number(item.blind_review_score))}</b>blind review</span><span><b>${Math.round(Number(item.pass_rate || 0) * 100)}%</b>pass rate</span></div>
+      ${(item.task_wins || []).length ? `<p class="tournament-task-wins">Task leader · ${(item.task_wins || []).map(value => escapeHtml(value)).join(' · ')}</p>` : ''}
+      ${(item.gate_blockers || []).length ? `<details><summary>${item.gate_blockers.length} promotion blocker${item.gate_blockers.length === 1 ? '' : 's'}</summary><ul>${item.gate_blockers.map(value => `<li>${escapeHtml(value)}</li>`).join('')}</ul></details>` : ''}
+    </article>`).join('');
+  const reviewPairs = (tournament.review_pairs || []).map(pair => {
+    const choiceLabel = pair.choice === 'a' ? 'Candidate A preferred' : pair.choice === 'b' ? 'Candidate B preferred' : pair.choice === 'tie' ? 'Equivalent / tie' : 'Review required';
+    const aIdentity = pair.identity_revealed ? ` · ${escapeHtml(pair.a_profile_id)}` : '';
+    const bIdentity = pair.identity_revealed ? ` · ${escapeHtml(pair.b_profile_id)}` : '';
+    const reviewActions = activePromotion ? '<span class="baseline-badge">Review locked by promotion</span>' : `<button class="button ghost small" data-tournament-review="${escapeHtml(tournament.id)}" data-pair-id="${escapeHtml(pair.id)}" data-choice="a">Prefer A</button><button class="button ghost small" data-tournament-review="${escapeHtml(tournament.id)}" data-pair-id="${escapeHtml(pair.id)}" data-choice="tie">Equivalent</button><button class="button ghost small" data-tournament-review="${escapeHtml(tournament.id)}" data-pair-id="${escapeHtml(pair.id)}" data-choice="b">Prefer B</button>`;
+    return `<article class="blind-comparison ${pair.choice ? 'reviewed' : ''}">
+      <header><div><span>${escapeHtml(pair.task_type)} · BLIND RESPONSE REVIEW</span><h5>${escapeHtml(pair.title)}</h5></div><b>${escapeHtml(choiceLabel)}</b></header>
+      <div class="blind-responses"><section><span>Candidate A${aIdentity}</span><p>${escapeHtml(pair.a_response || 'No response produced.')}</p></section><section><span>Candidate B${bIdentity}</span><p>${escapeHtml(pair.b_response || 'No response produced.')}</p></section></div>
+      <footer>${reviewActions}</footer>
+    </article>`;
+  }).join('');
+  const blockers = (recommendation.blockers || []).map(value => `<li>${escapeHtml(value)}</li>`).join('');
+  const promotionAction = recommendation.ready && recommendation.change_required && !activePromotion
+    ? `<button class="button primary" data-promote-tournament="${escapeHtml(tournament.id)}" data-profile-id="${escapeHtml(recommendation.profile_id)}" data-fingerprint="${escapeHtml(tournament.fingerprint)}">Promote reviewed winner</button>`
+    : activePromotion
+      ? `<button class="button ghost" data-rollback-promotion="${escapeHtml(activePromotion.id)}">Rollback to ${escapeHtml(activePromotion.previous_profile_id)}</button>`
+      : recommendation.ready
+        ? '<span class="baseline-badge">Current route remains the winner</span>'
+        : '';
+  return `<article class="tournament-decision ${recommendation.ready ? 'ready' : 'hold'}">
+    <header><div><span>${tournament.status === 'awaiting-review' ? 'BLIND REVIEW REQUIRED' : recommendation.ready ? 'REVIEWED WINNER' : tournament.status.toUpperCase()}</span><h4>${escapeHtml(tournamentTargetLabel(tournament.target))} · ${escapeHtml(recommendation.label_name || 'No eligible winner')}</h4></div><b>${recommendation.final_score == null ? '—' : Number(recommendation.final_score).toFixed(1)}</b></header>
+    <p>${escapeHtml(tournament.error || recommendation.label || 'Tournament is still running.')}</p>
+    <div class="tournament-boundary"><span><b>${(tournament.profile_ids || []).length}</b> local candidates</span><span><b>${completedReviews}/${(tournament.review_pairs || []).length}</b> blind reviews</span><span><b>0</b> external Splunk calls</span><span><b>${escapeHtml(tournament.suite_version)}</b> suite</span></div>
+    ${blockers ? `<div class="golden-reasons blockers"><b>Promotion blockers</b><ul>${blockers}</ul></div>` : ''}
+    <section class="tournament-ranking"><div class="validation-section-heading"><div><span>WEIGHTED LOCAL RANKING</span><h4>Quality, safety, latency, outcome evidence, and blind preference</h4></div></div><div>${ranking}</div></section>
+    ${reviewPairs ? `<section class="blind-review"><div class="validation-section-heading"><div><span>ANALYST COMPARISON</span><h4>Review the finalists without model labels</h4></div></div>${reviewPairs}</section>` : ''}
+    <footer><div><time>${escapeHtml(benchmarkTime(tournament.completed_at || tournament.created_at))}</time>${tournament.fingerprint ? `<code title="Exact promotion fingerprint">${escapeHtml(tournament.fingerprint)}</code>` : ''}</div>${promotionAction}</footer>
+  </article>`;
+}
+
+function updateTournamentAssignmentHelp() {
+  const overview = state.goldenBenchmarks?.tournament;
+  if (!overview) return;
+  const target = (overview.targets || []).find(item => item.id === $('#tournamentTarget').value);
+  const profile = (state.goldenBenchmarks?.profiles || []).find(item => item.id === target?.profile_id);
+  $('#tournamentCurrentAssignment').textContent = `Current · ${profile?.label || target?.profile_id || 'not assigned'}`;
+}
+
+function renderModelTournaments() {
+  const overview = state.goldenBenchmarks?.tournament; if (!overview) return;
+  const profiles = (state.goldenBenchmarks.profiles || []).filter(item => item.enabled);
+  const targetSelect = $('#tournamentTarget'); const priorTarget = targetSelect.value || 'security_reasoning_model';
+  targetSelect.innerHTML = (overview.targets || []).map(item => `<option value="${escapeHtml(item.id)}">${escapeHtml(item.label)}</option>`).join('');
+  if ([...targetSelect.options].some(option => option.value === priorTarget)) targetSelect.value = priorTarget;
+  updateTournamentAssignmentHelp();
+  const selectedProfiles = new Set($$('#tournamentProfiles input:checked').map(node => node.value));
+  $('#tournamentProfiles').innerHTML = profiles.map(profile => `<label><input type="checkbox" value="${escapeHtml(profile.id)}" ${selectedProfiles.size ? selectedProfiles.has(profile.id) ? 'checked' : '' : 'checked'}><span><b>${escapeHtml(profile.label)}</b><small>${escapeHtml(profile.model)}</small></span></label>`).join('');
+  const tournaments = overview.tournaments || [];
+  const selected = tournaments.find(item => item.id === state.selectedTournamentId) || tournaments[0];
+  if (selected) state.selectedTournamentId = selected.id;
+  $('#tournamentLatest').innerHTML = renderTournamentRun(selected, overview);
+  $('#tournamentStatus').textContent = (overview.active_promotions || []).length ? `${overview.active_promotions.length} promoted route${overview.active_promotions.length === 1 ? '' : 's'}` : selected ? selected.status.replaceAll('-', ' ') : 'No tournament yet';
+  $('#tournamentRunHistory').innerHTML = tournaments.length ? tournaments.map(item => `<button data-show-tournament="${escapeHtml(item.id)}"><span><b>${escapeHtml(tournamentTargetLabel(item.target))}</b><small>${escapeHtml(benchmarkTime(item.completed_at || item.created_at))} · ${(item.profile_ids || []).length} candidates</small></span><em class="${item.recommendation?.ready ? 'ready' : item.status === 'error' ? 'hold' : ''}">${item.recommendation?.ready ? `WINNER · ${escapeHtml(item.recommendation.profile_id)}` : escapeHtml(item.status.replaceAll('-', ' '))}</em></button>`).join('') : '<div class="empty-inline compact-empty">No model tournaments have been recorded.</div>';
+}
+
+async function runModelTournament() {
+  const profileIds = $$('#tournamentProfiles input:checked').map(node => node.value);
+  if (profileIds.length < 2) { toast('Select at least two local profiles'); return; }
+  const target = $('#tournamentTarget').value;
+  const button = $('#runModelTournament'); button.disabled = true; button.textContent = 'Running tournament…';
+  const progress = $('#tournamentProgress'); progress.hidden = false;
+  progress.querySelector('.operation-label').textContent = 'Preparing model tournament';
+  progress.querySelector('.operation-detail').textContent = 'Checking the selected local profiles.';
+  progress.querySelector('.operation-progress i').style.width = '0%'; progress.querySelector('.operation-steps').innerHTML = '';
+  progress.scrollIntoView({behavior:'smooth',block:'center'});
+  try {
+    const result = await streamApi('/api/benchmarks/tournaments/run/stream', {profile_ids:profileIds,target}, event => updateOperation(progress,event));
+    state.selectedTournamentId = result.id;
+    await loadGoldenBenchmarks();
+    toast(result.review_pairs?.length ? 'Tournament complete · blind finalist review is ready' : 'Tournament completed without two reviewable finalists');
+  } catch (error) { toast(error.message); await loadGoldenBenchmarks(); }
+  finally { button.disabled = false; button.textContent = 'Run tournament'; }
+}
+
+async function reviewTournamentPair(button) {
+  button.closest('.blind-comparison')?.querySelectorAll('button').forEach(node => { node.disabled = true; });
+  try {
+    await api(`/api/benchmarks/tournaments/${encodeURIComponent(button.dataset.tournamentReview)}/review`, {method:'POST',body:JSON.stringify({pair_id:button.dataset.pairId,choice:button.dataset.choice})});
+    state.selectedTournamentId = button.dataset.tournamentReview;
+    await loadGoldenBenchmarks();
+    toast('Blind comparison recorded locally');
+  } catch (error) { toast(error.message); await loadGoldenBenchmarks(); }
+}
+
+async function promoteModelTournament(button) {
+  const tournament = state.goldenBenchmarks?.tournament?.tournaments?.find(item => item.id === button.dataset.promoteTournament);
+  if (!tournament) return;
+  const approved = confirm(`Promote ${button.dataset.profileId} to ${tournamentTargetLabel(tournament.target)}?\n\nTournament fingerprint: ${button.dataset.fingerprint}\n\nThis changes local model routing and accepts the winning run as the regression baseline. Ollama will load the profile on its next request.`);
+  if (!approved) return;
+  button.disabled = true;
+  try {
+    const result = await api(`/api/benchmarks/tournaments/${encodeURIComponent(tournament.id)}/promote`, {method:'POST',body:JSON.stringify({profile_id:button.dataset.profileId,fingerprint:button.dataset.fingerprint})});
+    state.settings = result.settings; hydrateSettings(); renderModels(); await loadGoldenBenchmarks();
+    toast('Reviewed winner promoted · rollback remains available');
+  } catch (error) { toast(error.message); button.disabled = false; }
+}
+
+async function rollbackModelPromotion(button) {
+  const promotion = state.goldenBenchmarks?.tournament?.active_promotions?.find(item => item.id === button.dataset.rollbackPromotion);
+  if (!promotion) return;
+  const approved = confirm(`Rollback ${tournamentTargetLabel(promotion.target)} from ${promotion.profile_id} to ${promotion.previous_profile_id}?\n\nRollback is allowed only while routing and the accepted baseline still match this promotion.`);
+  if (!approved) return;
+  button.disabled = true;
+  try {
+    const result = await api(`/api/benchmarks/promotions/${encodeURIComponent(promotion.id)}/rollback`, {method:'POST',body:'{}'});
+    state.settings = result.settings; hydrateSettings(); renderModels(); await loadGoldenBenchmarks();
+    toast('Model routing and benchmark baseline rolled back');
+  } catch (error) { toast(error.message); button.disabled = false; }
+}
+
 function renderGoldenRun(run) {
   if (!run) return '<div class="empty-inline compact-empty">Run the suite to create a candidate promotion decision.</div>';
   const gate = run.gate || {}; const comparison = run.comparison || {}; const feedback = run.feedback || {};
@@ -891,6 +1018,7 @@ function renderGoldenRun(run) {
 
 function renderGoldenBenchmarks() {
   const value = state.goldenBenchmarks; if (!value) return;
+  renderModelTournaments();
   $('#goldenSuiteVersion').textContent = `Suite ${value.suite_version} · ${value.scenario_count} scenarios`;
   const select = $('#goldenProfile'); const selected = select.value || state.settings?.security_reasoning_model || '';
   select.innerHTML = (value.profiles || []).map(profile => `<option value="${escapeHtml(profile.id)}" ${!profile.enabled ? 'disabled' : ''}>${escapeHtml(profile.label)} · ${escapeHtml(profile.model)}</option>`).join('');
@@ -2520,6 +2648,19 @@ document.addEventListener('click', async event => {
     $('#detectionCandidatesPanel').scrollIntoView({behavior:'smooth',block:'start'});
     return;
   }
+  const tournamentReview = event.target.closest('[data-tournament-review]');
+  if (tournamentReview) { await reviewTournamentPair(tournamentReview); return; }
+  const tournamentPromotion = event.target.closest('[data-promote-tournament]');
+  if (tournamentPromotion) { await promoteModelTournament(tournamentPromotion); return; }
+  const tournamentRollback = event.target.closest('[data-rollback-promotion]');
+  if (tournamentRollback) { await rollbackModelPromotion(tournamentRollback); return; }
+  const showTournament = event.target.closest('[data-show-tournament]');
+  if (showTournament && state.goldenBenchmarks?.tournament) {
+    state.selectedTournamentId = showTournament.dataset.showTournament;
+    renderModelTournaments();
+    $('#tournamentLatest').scrollIntoView({behavior:'smooth',block:'start'});
+    return;
+  }
   const acceptGolden = event.target.closest('[data-accept-golden-baseline]');
   if (acceptGolden) { await acceptGoldenBaseline(acceptGolden.dataset.acceptGoldenBaseline); return; }
   const showGolden = event.target.closest('[data-show-golden-run]');
@@ -2769,6 +2910,8 @@ $('#assuranceDepth').addEventListener('change', updateAssuranceBudgetHelp);
 $$('#assuranceForm input,#assuranceForm select').forEach(node => node.addEventListener('change', () => { state.assurancePolicyDirty = true; }));
 $$('#deliveryForm input,#deliveryForm select').forEach(node => node.addEventListener('change', () => { state.deliveryPolicyDirty = true; }));
 $('#scanSplunkModels').addEventListener('click', scanSplunkModels);
+$('#runModelTournament').addEventListener('click', runModelTournament);
+$('#tournamentTarget').addEventListener('change', updateTournamentAssignmentHelp);
 $('#runGoldenBenchmark').addEventListener('click', runGoldenBenchmark);
 $('#contextPrevious').addEventListener('click', () => { state.contextPage -= 1; renderArtifacts(state.contextItems); $('#contextView').scrollIntoView({ behavior:'smooth', block:'start' }); });
 $('#contextNext').addEventListener('click', () => { state.contextPage += 1; renderArtifacts(state.contextItems); $('#contextView').scrollIntoView({ behavior:'smooth', block:'start' }); });

@@ -38,6 +38,13 @@ AssuranceService ── SQLite policy + runs + events + notices
 
 Profiles declare a model source, identifier, task, endpoint, provenance label, and context limit. The router chooses a security reasoning profile only for security-domain work. Embedding, reranking, and NER models are separate capabilities rather than pretend chat models. Broad FTS5 + bi-encoder candidates can be rescored by the optional local SecureBERT cross-encoder before evidence reaches chat or discovery synthesis. Hugging Face is the source for SecureBERT snapshots; `specialist_runtime` determines whether those capabilities execute locally through Transformers or through optional hosted inference.
 
+`ModelTournamentService` treats routing changes as a separate authority. It orchestrates multiple immutable golden
+runs, applies deterministic quality, latency, and established-feedback scoring, and constructs blind comparisons
+for the two highest-ranked complete profiles. A promotion fingerprint covers the suite, prompts, candidate model
+revisions and run IDs, blind-review mapping and decisions, prior route assignment, and reviewed winner. Promotion
+atomically changes the configured route and accepted regression baseline only after an exact fingerprint match.
+Rollback fails closed if either value has changed since promotion.
+
 ### Deterministic routes precede agentic behavior
 
 High-confidence asks use deterministic read-only MCP plans capped by `max_agent_steps`. Discovery,
@@ -191,8 +198,8 @@ SignalRoom is an MCP client of a Splunk MCP server and an MCP server to agent ho
 
 1. Authenticated multi-user sessions with RBAC and connection assignment
 2. Durable background discovery jobs with cancellation and restart recovery
-3. Model revision allowlists, artifact signatures, and evaluation gates
+3. Model revision allowlists and signed model artifacts around the implemented evaluation gates
 4. Search cost estimation, per-instance concurrency limits, and Splunk workload controls
-5. Durable evaluation history with analyst usefulness ratings and regression gates
+5. Broader operator-authored evaluation suites beyond the durable golden, tournament, and feedback history
 6. Audit events sent to a dedicated Splunk index
 7. Destination-specific ticketing and SOAR adapters with explicit authority contracts

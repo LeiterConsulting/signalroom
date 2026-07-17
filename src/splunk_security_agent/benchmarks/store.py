@@ -159,6 +159,13 @@ class GoldenBenchmarkStore:
         return result
 
     def accept_baseline(self, run_id: str) -> dict[str, Any] | None:
+        return self.set_baseline(run_id)
+
+    def set_baseline(self, run_id: str | None) -> dict[str, Any] | None:
+        if run_id is None:
+            with self._lock, self.connect() as db:
+                db.execute("UPDATE benchmark_runs SET is_baseline=0 WHERE is_baseline=1")
+            return None
         current = self.get(run_id)
         if current is None or current["status"] != "complete" or not current["gate"].get("ready"):
             return None

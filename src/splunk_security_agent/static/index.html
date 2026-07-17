@@ -270,6 +270,23 @@
         <section class="model-freshness" id="modelFreshness" aria-live="polite" hidden></section>
         <div class="routing-map"><span>Operator question</span><b aria-hidden="true">→</b><span>Task router</span><b aria-hidden="true">→</b><div><em>General agent</em><em>Security reasoning</em><em>Cyber retrieval</em><em>Evidence reranking</em><em>Entity extraction</em></div></div>
         <div class="model-grid" id="modelGrid"></div>
+        <section class="model-tournament" aria-labelledby="modelTournamentTitle">
+          <header><div><span>LOCAL MODEL TOURNAMENT</span><h3 id="modelTournamentTitle">Prove a routing change before promoting it</h3><p>Run selected Ollama profiles through identical synthetic investigations, compare the two finalists without model labels, and bind the reviewed winner to an exact promotion fingerprint. Configured Splunk and Hugging Face are never contacted.</p></div><span id="tournamentStatus" class="subtle-pill">No tournament yet</span></header>
+          <div class="tournament-controls">
+            <label><span>Routing assignment</span><select id="tournamentTarget"><option value="security_reasoning_model">Security reasoning route</option><option value="default_chat_model">General investigation route</option></select><small id="tournamentCurrentAssignment">Loading current assignment…</small></label>
+            <fieldset><legend>Local candidates</legend><div id="tournamentProfiles" class="tournament-profiles"></div></fieldset>
+            <div><button class="button primary" id="runModelTournament" type="button">Run tournament</button><small>Five scenarios per profile · sequential local inference · explicit promotion only</small></div>
+          </div>
+          <article class="operation-card tournament-operation" id="tournamentProgress" aria-live="polite" hidden>
+            <header><div><span class="operation-kicker">LOCAL CANDIDATE COMPARISON</span><h3 class="operation-label">Preparing model tournament</h3></div><span class="operation-elapsed">0s</span></header>
+            <p class="operation-detail">Checking the selected local profiles.</p>
+            <div class="operation-progress" role="progressbar" aria-label="Model tournament progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><i></i></div>
+            <div class="operation-metrics"></div><ol class="operation-steps"></ol>
+          </article>
+          <div id="tournamentLatest" class="tournament-latest"><div class="empty-inline compact-empty">Choose at least two local profiles to create a reviewable comparison.</div></div>
+          <details class="tournament-contract"><summary>Promotion and rollback authority</summary><ul><li>Every candidate receives the same versioned evidence and tool fixtures.</li><li>The two highest-ranked complete runs receive five blind response comparisons.</li><li>Promotion requires the reviewed winner, unchanged model revision, unchanged route, current suite and prompt versions, and the exact fingerprint.</li><li>Rollback is allowed only while the promoted route and accepted baseline remain unchanged.</li></ul></details>
+          <section class="tournament-history"><div class="validation-section-heading"><div><span>DURABLE TOURNAMENT HISTORY</span><h4>Reviewed comparisons and routing decisions</h4></div></div><div id="tournamentRunHistory"></div></section>
+        </section>
         <section class="golden-benchmarks" aria-labelledby="goldenBenchmarksTitle">
           <header><div><span>LOCAL GOLDEN INVESTIGATIONS</span><h3 id="goldenBenchmarksTitle">Promotion gate for models and prompts</h3><p>Run versioned synthetic investigations through the real agent, local model, evidence retrieval, and instrumented tool planner. Configured Splunk is never contacted.</p></div><span id="goldenSuiteVersion" class="subtle-pill">Loading suite</span></header>
           <div class="golden-controls"><label><span>Candidate profile</span><select id="goldenProfile"></select></label><div><button class="button primary" id="runGoldenBenchmark" type="button">Run five-scenario gate</button><small>Sequential local inference · 640-token comparison ceiling · zero external Splunk calls</small></div></div>

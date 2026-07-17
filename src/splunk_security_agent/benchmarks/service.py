@@ -81,7 +81,11 @@ class GoldenBenchmarkService:
         }
 
     async def run(
-        self, profile_id: str, progress: ProgressCallback | None = None
+        self,
+        profile_id: str,
+        progress: ProgressCallback | None = None,
+        *,
+        raise_errors: bool = True,
     ) -> dict[str, Any]:
         router = ModelRouter(self.config)
         profile = router.profile(profile_id)
@@ -225,8 +229,10 @@ class GoldenBenchmarkService:
             )
             return completed
         except Exception as exc:
-            self.store.fail(run["id"], str(exc))
-            raise
+            failed = self.store.fail(run["id"], str(exc))
+            if raise_errors:
+                raise
+            return failed
 
     @staticmethod
     def _score_scenario(

@@ -168,6 +168,30 @@ Runs, prompt and suite versions, per-control scores, synthetic responses, and ba
 `data/benchmarks.db`. Passing a gate does not automatically change any configured model or prompt. **Accept as
 baseline** is a separate analyst action so quality policy remains explicit and reviewable.
 
+### Local model tournament and controlled promotion
+
+**Models → Local model tournament** compares two or more enabled Ollama chat profiles without contacting the
+configured Splunk instance or Hugging Face. Every candidate runs the same versioned five-scenario suite. SignalRoom
+ranks completed runs using deterministic quality and safety results, relative local latency, and established
+analyst outcome evidence; directional feedback remains visible but does not influence the score. Task leaders are
+reported separately for triage, detection engineering, hunting, SPL review, and leadership briefing.
+
+The two highest-ranked complete candidates then enter five blind response comparisons. Candidate identities remain
+hidden until every comparison is recorded. Blind preference can adjust the finalist ranking by at most five points,
+so human review informs the decision without overriding a critical safety failure or a blocked promotion gate.
+Incomplete review produces no promotion fingerprint.
+
+After review, SignalRoom hashes the exact suite and prompt versions, candidate run IDs and model revisions, scores,
+blind pair mappings and choices, route target, prior assignment, and winner. **Promote reviewed winner** succeeds
+only when that 64-character fingerprint still matches, the winner still has a passing gate, the model revision and
+route assignment are unchanged, and the tournament has not already been promoted. Promotion changes only the chosen
+local routing assignment and accepts the winning run as the regression baseline; Ollama loads the profile on its
+next request. The previous route and baseline are retained for a guarded one-click rollback. A later manual route
+or baseline change disables automatic rollback rather than overwriting that newer operator decision.
+
+Tournament and promotion history is stored in `data/model_tournaments.db`. Every blind review, promotion, and
+rollback is also written to the local tamper-evident audit chain.
+
 For scripted setup, install SignalRoom and then explicitly install Ollama and download the configured profiles:
 
 ```powershell
@@ -453,8 +477,8 @@ Major local control-plane decisions and every outbound delivery action are writt
 append-only SHA-256 hash chain. Audit metadata applies key-based secret redaction and the Discovery interface reports
 chain integrity. This is a tamper-evident local record, not an external immutable audit sink.
 
-The next assurance increment is destination adapters and guarded routing beyond the generic webhook, followed by
-cross-model tournament runs that compare promotion-ready profiles before changing an active model assignment.
+The next assurance increment is destination adapters and guarded routing beyond the generic webhook. Cross-model
+tournaments now compare promotion-ready local profiles before an explicitly approved routing change.
 
 ### Context
 

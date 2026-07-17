@@ -15,7 +15,12 @@ from fastapi.staticfiles import StaticFiles
 from .agents import SecurityAgent
 from .assurance import AssuranceResponseService, AssuranceService, AssuranceStore
 from .audit import AuditStore
-from .benchmarks import GoldenBenchmarkService, GoldenBenchmarkStore
+from .benchmarks import (
+    GoldenBenchmarkService,
+    GoldenBenchmarkStore,
+    ModelTournamentService,
+    ModelTournamentStore,
+)
 from .cases import CaseCockpitService, CaseStore
 from .config import ConfigStore
 from .delivery import AssuranceDeliveryService, DeliveryStore
@@ -70,6 +75,9 @@ from .schemas import (
     GoldenBenchmarkRunCreate,
     ModelActivateRequest,
     ModelPullRequest,
+    ModelTournamentPromotionRequest,
+    ModelTournamentReviewRequest,
+    ModelTournamentRunCreate,
     QueryIntelligenceRequest,
     SettingsUpdate,
     ValidationTaskCreate,
@@ -100,6 +108,13 @@ class Services:
             self.feedback,
             self.benchmark_store,
             DATA / "benchmark_runtime",
+        )
+        self.tournament_store = ModelTournamentStore(DATA / "model_tournaments.db")
+        self.model_tournaments = ModelTournamentService(
+            self.config,
+            self.benchmarks,
+            self.benchmark_store,
+            self.tournament_store,
         )
         self.cases = CaseStore(DATA / "cases.db", DATA / "case_exports")
         self.validation_store = ValidationStore(DATA / "validations.db")
@@ -612,7 +627,10 @@ async def run_connection_diagnostics() -> StreamingResponse:
 
 @app.get("/api/benchmarks")
 async def benchmark_overview() -> dict[str, Any]:
-    return services.benchmarks.overview()
+    return {
+        **services.benchmarks.overview(),
+        "tournament": services.model_tournaments.overview(),
+    }
 
 
 @app.post("/api/benchmarks/run/stream")
@@ -643,6 +661,105 @@ async def accept_benchmark_baseline(run_id: str) -> dict[str, Any]:
             "score": result["score"],
             "suite_version": result["suite_version"],
             "prompt_version": result["prompt_version"],
+        },
+    )
+    return result
+
+
+@app.post("/api/benchmarks/tournaments/run/stream")
+async def run_model_tournament(request: ModelTournamentRunCreate) -> StreamingResponse:
+    if services.benchmark_lock.locked():
+        raise HTTPException(409, "A model benchmark or tournament is already in progress")
+
+    async def run(progress: Any) -> dict[str, Any]:
+        async with services.benchmark_lock:
+            return await services.model_tournaments.run(
+                request.profile_ids, request.target, progress
+            )
+
+    return _stream_response(run)
+
+
+@app.post("/api/benchmarks/tournaments/{tournament_id}/review")
+async def review_model_tournament(
+    tournament_id: str, request: ModelTournamentReviewRequest
+) -> dict[str, Any]:
+    try:
+        result = services.model_tournaments.review(
+            tournament_id, request.pair_id, request.choice
+        )
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    services.audit.record(
+        "model.tournament.reviewed",
+        "review",
+        target_type="model-tournament",
+        target_id=tournament_id,
+        summary="A blind finalist response comparison was recorded locally.",
+        metadata={
+            "pair_id": request.pair_id,
+            "choice": request.choice,
+            "review_complete": result["review_complete"],
+        },
+    )
+    return result
+
+
+@app.post("/api/benchmarks/tournaments/{tournament_id}/promote")
+async def promote_model_tournament(
+    tournament_id: str, request: ModelTournamentPromotionRequest
+) -> dict[str, Any]:
+    try:
+        result = services.model_tournaments.promote(
+            tournament_id, request.profile_id, request.fingerprint
+        )
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    services.refresh(force=True)
+    promotion = result["promotion"]
+    services.audit.record(
+        "model.tournament.promoted",
+        "promote",
+        target_type="model-promotion",
+        target_id=promotion["id"],
+        summary="An exact reviewed tournament winner changed a local routing assignment.",
+        metadata={
+            "tournament_id": tournament_id,
+            "target": promotion["target"],
+            "profile_id": promotion["profile_id"],
+            "previous_profile_id": promotion["previous_profile_id"],
+            "tournament_fingerprint": promotion["tournament_fingerprint"],
+            "promoted_run_id": promotion["promoted_run_id"],
+        },
+    )
+    return result
+
+
+@app.post("/api/benchmarks/promotions/{promotion_id}/rollback")
+async def rollback_model_promotion(promotion_id: str) -> dict[str, Any]:
+    try:
+        result = services.model_tournaments.rollback(promotion_id)
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    services.refresh(force=True)
+    promotion = result["promotion"]
+    services.audit.record(
+        "model.tournament.rolled-back",
+        "rollback",
+        target_type="model-promotion",
+        target_id=promotion_id,
+        summary="A model routing promotion and its accepted baseline were rolled back.",
+        metadata={
+            "tournament_id": promotion["tournament_id"],
+            "target": promotion["target"],
+            "profile_id": promotion["profile_id"],
+            "restored_profile_id": promotion["previous_profile_id"],
         },
     )
     return result
