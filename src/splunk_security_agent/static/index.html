@@ -19,6 +19,7 @@
         <button class="nav-item active" data-view="chat"><span class="nav-icon">⌁</span><span>Investigate</span></button>
         <button class="nav-item" data-view="discovery"><span class="nav-icon">◎</span><span>Discovery</span></button>
         <button class="nav-item" data-view="cases"><span class="nav-icon">▰</span><span>Cases</span><em id="caseCount">0</em></button>
+        <button class="nav-item" data-view="detections"><span class="nav-icon">⌾</span><span>Detections</span><em id="detectionCount">0</em></button>
         <button class="nav-item" data-view="context"><span class="nav-icon">▱</span><span>Context</span><em id="artifactCount">0</em></button>
         <button class="nav-item" data-view="models"><span class="nav-icon">◇</span><span>Models</span></button>
       </nav>
@@ -223,13 +224,39 @@
         </div>
       </section>
 
+      <section class="view" id="detectionsView">
+        <div class="context-toolbar detection-toolbar">
+          <div><p class="eyebrow">EVIDENCE → REVIEW → CODE</p><h2>Detection engineering workspace</h2><p>Promote a completed validation into a versioned, evidence-bound detection package. Every review is tied to the exact content hash; exports stay disabled and never write to Splunk.</p></div>
+          <button class="button primary" id="showDetectionCandidates">Use completed validation</button>
+        </div>
+        <div class="detection-metrics" id="detectionMetrics">
+          <article><span>DRAFTS</span><strong>0</strong><small>Editable versions</small></article>
+          <article><span>IN REVIEW</span><strong>0</strong><small>Exact hash pending</small></article>
+          <article><span>APPROVED</span><strong>0</strong><small>Export eligible</small></article>
+          <article><span>EXPORTED</span><strong>0</strong><small>Disabled packages</small></article>
+        </div>
+        <section class="detection-candidates-panel" id="detectionCandidatesPanel" aria-labelledby="detectionCandidatesTitle">
+          <header><div><span>TRUSTED STARTING POINTS</span><h3 id="detectionCandidatesTitle">Completed validations ready for engineering</h3><p>A detection draft can only begin after an approved search has run and its result—zero rows included—has been preserved as evidence.</p></div><small>No Splunk writes</small></header>
+          <div id="detectionCandidates" class="detection-candidates"></div>
+        </section>
+        <div class="detection-workspace">
+          <aside class="detection-list-panel" aria-label="Detection projects">
+            <div class="case-list-heading"><b>Detection projects</b><span id="detectionListCount">0 total</span></div>
+            <div class="detection-list" id="detectionList"></div>
+          </aside>
+          <section class="detection-detail" id="detectionDetail">
+            <div class="case-empty"><div class="empty-glyph">⌾</div><h3>Select a detection project</h3><p>Review its evidence contract, edit a new version, request independent review, or export an approved disabled-by-default package.</p></div>
+          </section>
+        </div>
+      </section>
+
       <section class="view" id="contextView">
         <div class="context-toolbar">
           <div><p class="eyebrow">MANAGED KNOWLEDGE</p><h2>Evidence library</h2><p>Context gives SignalRoom the local facts, runbooks, threat intelligence, and known-good SPL it can retrieve. Stored items are reusable investigation assets—not automatically trusted conclusions.</p></div>
           <div class="button-row"><button class="button ghost" id="uploadArtifact">Upload text</button><button class="button primary" id="addArtifact">Add artifact</button><input type="file" id="fileInput" hidden accept=".txt,.md,.json,.csv,.log,.spl"></div>
         </div>
         <div class="context-purpose"><b>What can I do here?</b><span>Open an item to inspect its full content and provenance.</span><span>Use it to start an investigation or validation search.</span><span>Search and filter the evidence available to RAG.</span></div>
-        <div class="context-filters" id="contextFilters"><button class="active" data-context-kind="all">All</button><button data-context-kind="discovery">Discoveries</button><button data-context-kind="runbook">Runbooks</button><button data-context-kind="threat-intel">Threat intel</button><button data-context-kind="spl">SPL library</button><button data-context-kind="reference">References</button></div>
+        <div class="context-filters" id="contextFilters"><button class="active" data-context-kind="all">All</button><button data-context-kind="discovery">Discoveries</button><button data-context-kind="detection">Detections</button><button data-context-kind="runbook">Runbooks</button><button data-context-kind="threat-intel">Threat intel</button><button data-context-kind="spl">SPL library</button><button data-context-kind="reference">References</button></div>
         <div class="search-row"><input id="contextSearch" type="search" placeholder="Search artifacts, indicators, techniques, or SPL…"><span id="contextResultCount">0 artifacts</span></div>
         <div class="artifact-grid" id="artifactGrid"></div>
         <nav class="pagination" id="contextPagination" aria-label="Evidence library pages" hidden><button class="button ghost small" id="contextPrevious">Previous</button><span id="contextPageStatus">Page 1 of 1</span><button class="button ghost small" id="contextNext">Next</button></nav>

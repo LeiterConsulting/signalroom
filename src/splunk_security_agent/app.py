@@ -19,6 +19,7 @@ from .benchmarks import GoldenBenchmarkService, GoldenBenchmarkStore
 from .cases import CaseCockpitService, CaseStore
 from .config import ConfigStore
 from .delivery import AssuranceDeliveryService, DeliveryStore
+from .detections import DetectionService, DetectionStore
 from .discovery import DiscoveryPipeline
 from .feedback import AnalystFeedbackStore
 from .mcp_server import MCPServer
@@ -40,6 +41,10 @@ from .schemas import (
     ConnectionTestRequest,
     DeliveryApproval,
     DeliveryPolicyUpdate,
+    DetectionCreate,
+    DetectionExportRequest,
+    DetectionReviewRequest,
+    DetectionUpdate,
     DiscoveryRequest,
     GoldenBenchmarkRunCreate,
     ModelActivateRequest,
@@ -78,6 +83,14 @@ class Services:
         self.cases = CaseStore(DATA / "cases.db", DATA / "case_exports")
         self.validation_store = ValidationStore(DATA / "validations.db")
         self.query_intelligence = QueryIntelligenceService(self.validation_store)
+        self.detection_store = DetectionStore(DATA / "detections.db")
+        self.detections = DetectionService(
+            self.detection_store,
+            self.validation_store,
+            self.evidence,
+            self.cases,
+            DATA / "detection_exports",
+        )
         self.case_cockpit = CaseCockpitService(
             self.cases, self.validation_store, self.evidence
         )
@@ -932,6 +945,213 @@ async def delete_validation(task_id: str) -> None:
         summary="A non-running validation task was deleted.",
         metadata={"prior_status": current.status, "query_fingerprint": current.query_fingerprint},
     )
+
+
+@app.get("/api/detections")
+async def list_detections() -> list[dict[str, Any]]:
+    return services.detection_store.list()
+
+
+@app.post("/api/detections", status_code=201)
+async def create_detection(request: DetectionCreate) -> dict[str, Any]:
+    try:
+        detection = services.detections.create(request)
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    services.audit.record(
+        "detection.created",
+        "create",
+        target_type="detection",
+        target_id=detection["id"],
+        summary="A versioned detection-as-code draft was created from completed evidence.",
+        metadata={
+            "source_validation_id": detection["source_validation_id"],
+            "version": detection["current_version"],
+            "content_sha256": detection["current_sha256"],
+        },
+    )
+    return detection
+
+
+@app.get("/api/detections/{detection_id}")
+async def get_detection(detection_id: str) -> dict[str, Any]:
+    detection = services.detection_store.get(detection_id)
+    if detection is None:
+        raise HTTPException(404, "Detection not found")
+    return detection
+
+
+@app.patch("/api/detections/{detection_id}")
+async def update_detection(
+    detection_id: str, request: DetectionUpdate
+) -> dict[str, Any]:
+    prior = services.detection_store.get(detection_id)
+    try:
+        detection = services.detections.update(detection_id, request)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    if detection is None:
+        raise HTTPException(404, "Detection not found")
+    if prior and detection["current_version"] == prior["current_version"]:
+        return detection
+    services.audit.record(
+        "detection.version.created",
+        "update",
+        target_type="detection",
+        target_id=detection_id,
+        summary="A new immutable detection version was created; prior approval was invalidated.",
+        metadata={
+            "prior_version": prior["current_version"] if prior else None,
+            "version": detection["current_version"],
+            "content_sha256": detection["current_sha256"],
+        },
+    )
+    return detection
+
+
+@app.post("/api/detections/{detection_id}/submit")
+async def submit_detection(detection_id: str) -> dict[str, Any]:
+    try:
+        detection = services.detections.submit(detection_id)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    if detection is None:
+        raise HTTPException(404, "Detection not found")
+    services.audit.record(
+        "detection.review.submitted",
+        "submit",
+        target_type="detection",
+        target_id=detection_id,
+        summary="An exact detection version was submitted for local review.",
+        metadata={
+            "version": detection["current_version"],
+            "content_sha256": detection["current_sha256"],
+        },
+    )
+    return detection
+
+
+@app.post("/api/detections/{detection_id}/review")
+async def review_detection(
+    detection_id: str, request: DetectionReviewRequest
+) -> dict[str, Any]:
+    try:
+        detection = services.detections.review(detection_id, request)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    if detection is None:
+        raise HTTPException(404, "Detection not found")
+    services.audit.record(
+        f"detection.review.{request.decision}",
+        "review",
+        target_type="detection",
+        target_id=detection_id,
+        outcome=detection["status"],
+        summary=(
+            "The exact detection version was approved for local export."
+            if request.decision == "approve"
+            else "The detection version was returned for changes."
+        ),
+        metadata={
+            "version": detection["current_version"],
+            "content_sha256": detection["current_sha256"],
+            "reviewer": request.reviewer,
+        },
+    )
+    if request.decision == "approve":
+        services.agent.invalidate_context_cache()
+        services.model_setup.schedule_context_index()
+    return detection
+
+
+@app.post("/api/detections/{detection_id}/export")
+async def export_detection(
+    detection_id: str, request: DetectionExportRequest
+) -> dict[str, Any]:
+    try:
+        detection, path = services.detections.export(detection_id, request)
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    services.audit.record(
+        "detection.exported",
+        "export",
+        target_type="detection",
+        target_id=detection_id,
+        summary="An approved, disabled-by-default detection package was exported locally.",
+        metadata={
+            "version": detection["current_version"],
+            "content_sha256": detection["current_sha256"],
+            "filename": path.name,
+        },
+    )
+    return {
+        "detection": detection,
+        "file": {
+            "filename": path.name,
+            "format": "zip",
+            "url": f"/api/detection-exports/{path.name}",
+        },
+    }
+
+
+@app.post("/api/detections/{detection_id}/retire")
+async def retire_detection(detection_id: str) -> dict[str, Any]:
+    try:
+        detection = services.detections.retire(detection_id)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    if detection is None:
+        raise HTTPException(404, "Detection not found")
+    services.audit.record(
+        "detection.retired",
+        "retire",
+        target_type="detection",
+        target_id=detection_id,
+        summary="An approved local detection project was retired.",
+        metadata={
+            "version": detection["current_version"],
+            "content_sha256": detection["current_sha256"],
+        },
+    )
+    return detection
+
+
+@app.delete("/api/detections/{detection_id}", status_code=204)
+async def delete_detection(detection_id: str) -> None:
+    current = services.detection_store.get(detection_id)
+    if current is None:
+        raise HTTPException(404, "Detection not found")
+    try:
+        services.detections.delete(detection_id)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    services.audit.record(
+        "detection.deleted",
+        "delete",
+        target_type="detection",
+        target_id=detection_id,
+        summary="An unapproved local detection draft was deleted.",
+        metadata={
+            "prior_status": current["status"],
+            "version": current["current_version"],
+            "content_sha256": current["current_sha256"],
+        },
+    )
+
+
+@app.get("/api/detection-exports/{filename}")
+async def download_detection_export(filename: str) -> FileResponse:
+    if Path(filename).name != filename or Path(filename).suffix != ".zip":
+        raise HTTPException(404, "Detection export not found")
+    root = (DATA / "detection_exports").resolve()
+    path = (root / filename).resolve()
+    if path.parent != root or not path.exists():
+        raise HTTPException(404, "Detection export not found")
+    return FileResponse(path, filename=filename, media_type="application/zip")
 
 
 @app.get("/api/cases")

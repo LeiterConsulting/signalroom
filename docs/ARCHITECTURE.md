@@ -104,6 +104,18 @@ cap of 500 are enforced at creation, edit, approval, and execution. Successful r
 interrupted run returns to `approved` after restart, preserving intent without silently rerunning Splunk. Assurance
 drafts add a package ID, single-execution scope, and expiry; an expired unexecuted task cannot be approved or run.
 
+### Detection-as-code starts from observed evidence
+
+`DetectionService` accepts only a completed validation whose preserved artifact is still available. The initial
+project captures the exact validated SPL, time contract, query fingerprint, result count, and stable evidence
+references. Every edit appends an immutable version and clears any prior approval. Review decisions are accepted
+only while the project is in review and only when the submitted SHA-256 matches the current canonical content.
+
+Approval indexes a bounded detection document into local RAG and can add a decision to a linked case. Export is a
+local packaging operation, not a Splunk mutation: the generated saved-search stanza is disabled, the manifest
+states that no deployment authority is present, and raw validation result rows are excluded. Previously approved
+projects cannot be deleted; they can be retired while retaining their versions, reviews, and export history.
+
 ## Outbound delivery is a separate authority
 
 `AssuranceDeliveryService` owns a separately opt-in generic webhook policy and restart-safe delivery worker. A
@@ -127,5 +139,5 @@ SignalRoom is an MCP client of a Splunk MCP server and an MCP server to agent ho
 3. Model revision allowlists, artifact signatures, and evaluation gates
 4. Search cost estimation, per-instance concurrency limits, and Splunk workload controls
 5. Durable evaluation history with analyst usefulness ratings and regression gates
-6. Detection-as-code export and review workflow
-7. Audit events sent to a dedicated Splunk index
+6. Audit events sent to a dedicated Splunk index
+7. Destination-specific ticketing and SOAR adapters with explicit authority contracts

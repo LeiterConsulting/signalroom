@@ -7,7 +7,7 @@ const state = {
   modelUpdates: null, modelCatalog: null, splunkModels: null,
   assurance: null, assurancePolicyDirty: false, connectionDiagnostics: null, queryIntelligence: null,
   feedbackBenchmarks: null, goldenBenchmarks: null, deliveryPolicyDirty: false,
-  deliveryPreview: null
+  deliveryPreview: null, detections: [], activeDetection: null
 };
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => [...document.querySelectorAll(selector)];
@@ -82,12 +82,17 @@ const DEMO_TOUR_STEPS = [
     value:'Value: defensible handoffs with ownership, status, severity, timestamps, and evidence provenance.'
   },
   {
-    view:'models', target:'#modelGrid', eyebrow:'6 · ROUTE LOCALLY', title:'Use the right local specialist deliberately',
+    view:'detections', target:'#detectionsView', eyebrow:'6 · ENGINEER', title:'Turn observed evidence into reviewed detection code',
+    body:'Completed validations can become versioned detection projects. Editing creates a new immutable version, review binds to the exact content hash, and approved exports remain disabled until your normal change process deploys them.',
+    value:'Value: evidence-linked detection engineering without granting SignalRoom write access to Splunk.'
+  },
+  {
+    view:'models', target:'#modelGrid', eyebrow:'7 · ROUTE LOCALLY', title:'Use the right local specialist deliberately',
     body:'Ollama handles chat and Foundation-Sec reasoning. SecureBERT retrieval and entity extraction run through locally installed Transformers profiles. SignalRoom shows which capability actually executed.',
     value:'Value: task-appropriate cybersecurity models without sending investigation evidence to hosted inference.'
   },
   {
-    view:'models', target:'#openSettings', eyebrow:'7 · INSTALL OR USE CLOUD', title:'Install locally first; enable cloud deliberately',
+    view:'models', target:'#openSettings', eyebrow:'8 · INSTALL OR USE CLOUD', title:'Install locally first; enable cloud deliberately',
     body:'Setup installs SecureBERT from Hugging Face into local storage with one click. If hosted inference is desired instead, select the cloud runtime and choose Disabled, Ask for every question, or Allowed. Discovery reasoning remains on Ollama.',
     value:'Value: local domain-aware retrieval and entity recognition by default, with cloud available only through an explicit runtime and policy choice.'
   }
@@ -260,6 +265,7 @@ function setView(name) {
     chat: ['INVESTIGATION WORKSPACE', 'Ask, inspect, verify.'],
     discovery: ['ENVIRONMENT DISCOVERY', 'Map the security surface.'],
     cases: ['INVESTIGATION OPERATIONS', 'Preserve the case record.'],
+    detections: ['DETECTION ENGINEERING', 'Prove, review, package.'],
     context: ['RAG & ARTIFACTS', 'Curate the evidence base.'],
     models: ['MODEL CAPABILITIES', 'Route work to specialists.']
   };
@@ -270,6 +276,7 @@ function setView(name) {
   $('#newConversation').hidden = name !== 'chat';
   if (name === 'context') loadArtifacts();
   if (name === 'cases') loadCases();
+  if (name === 'detections') loadDetections();
   if (name === 'models') { renderModels(); loadFeedbackBenchmarks(); loadGoldenBenchmarks(); }
   if (name === 'discovery') loadValidations();
 }
@@ -1375,7 +1382,13 @@ function renderValidations() {
       actions.push(`<button class="button primary small" data-approve-validation="${escapeHtml(task.id)}">Approve exact query</button>`);
     }
     if (task.status === 'approved') actions.push(`<button class="button primary small" data-run-validation="${escapeHtml(task.id)}">Run approved validation</button>`);
-    if (task.status === 'complete') actions.push(`<button class="button primary small" data-inspect-validation="${escapeHtml(task.id)}">Inspect preserved result</button>`);
+    if (task.status === 'complete') {
+      const detection = state.detections.find(item => item.source_validation_id === task.id);
+      actions.push(`<button class="button primary small" data-inspect-validation="${escapeHtml(task.id)}">Inspect preserved result</button>`);
+      actions.push(detection
+        ? `<button class="button ghost small" data-open-detection="${escapeHtml(detection.id)}">Open detection v${Number(detection.current_version)}</button>`
+        : `<button class="button ghost small" data-create-detection="${escapeHtml(task.id)}">Create detection draft</button>`);
+    }
     if (task.status !== 'running') actions.push(`<button class="button ghost small validation-delete" data-delete-validation="${escapeHtml(task.id)}">Delete</button>`);
     const assuranceMeta = task.assurance_package_id ? `<span>Assurance package <code>${escapeHtml(task.assurance_package_id.slice(0, 8))}</code></span><span>${escapeHtml(task.approval_scope.replaceAll('-', ' '))}</span>${task.expires_at ? `<span>Expires ${escapeHtml(assuranceTime(task.expires_at))}</span>` : ''}` : '';
     return `<article class="validation-task ${escapeHtml(task.status)}" data-validation-id="${escapeHtml(task.id)}">
@@ -1500,6 +1513,10 @@ function openValidationResult(task) {
     { label:'Continue investigation', kind:'prompt', mode:'triage', prompt:`Continue the investigation using the preserved validation titled "${task.title}" (${task.source_finding_ref || task.id}). Distinguish what the result observed from what it does not prove, then recommend the next bounded check.` }
   ];
   if (artifact) actions.push({ label:'Open evidence artifact', kind:'artifact', target:artifact.id });
+  const detection = state.detections.find(item => item.source_validation_id === task.id);
+  actions.push(detection
+    ? { label:`Open detection v${detection.current_version}`, kind:'detection', target:detection.id }
+    : { label:'Create detection draft', kind:'detection-create', target:task.id });
   actions.push({ label:'Add result to case', kind:'case-item', item:{ kind:'evidence', title:task.title, content:`Approved SPL:\n${task.spl}\n\nWindow: ${task.earliest_time} to ${task.latest_time}\nRows returned: ${task.result_count}\nArtifact: ${task.artifact_id}`, source:'SignalRoom validation queue', confidence:'high', status:'observed', metadata:{ validation_id:task.id, artifact_id:task.artifact_id, query_fingerprint:task.query_fingerprint, evidence_refs:task.evidence_refs } } });
   showDetail({
     eyebrow:'OBSERVED · APPROVED VALIDATION', title:task.title,
@@ -1515,6 +1532,242 @@ async function deleteValidation(taskId) {
   if (!confirm(`Delete validation task “${task.title}”? Preserved evidence artifacts are not deleted.`)) return;
   try { await api(`/api/validations/${encodeURIComponent(taskId)}`, { method:'DELETE' }); await loadValidations(); toast('Validation task deleted'); }
   catch (error) { toast(error.message); }
+}
+
+function detectionStatusLabel(status) {
+  return ({
+    draft:'Draft · editable',
+    'in-review':'In review · exact hash',
+    approved:'Approved · export eligible',
+    'changes-requested':'Changes requested',
+    retired:'Retired · retained'
+  })[status] || status;
+}
+
+function detectionForValidation(validationId) {
+  return state.detections.find(item => item.source_validation_id === validationId);
+}
+
+function renderDetectionCandidates() {
+  const container = $('#detectionCandidates'); if (!container) return;
+  const complete = state.validations.filter(task => task.status === 'complete');
+  const available = complete.filter(task => !detectionForValidation(task.id));
+  $('#showDetectionCandidates').disabled = !available.length;
+  container.innerHTML = available.length ? available.map(task => `
+    <article>
+      <div><span>COMPLETED VALIDATION</span><h4>${escapeHtml(task.title)}</h4><p>${Number(task.result_count).toLocaleString()} row${Number(task.result_count) === 1 ? '' : 's'} preserved · ${escapeHtml(task.earliest_time)} → ${escapeHtml(task.latest_time)}</p></div>
+      <div><code>${escapeHtml(task.query_fingerprint.slice(0, 12))}</code><button class="button primary small" data-create-detection="${escapeHtml(task.id)}">Create version 1</button></div>
+    </article>`).join('') : `<div class="empty-inline compact-empty">${complete.length ? 'Every completed validation already has a detection project.' : 'No completed validation is available yet. Run and preserve a bounded validation first.'}</div>`;
+}
+
+function renderDetectionMetrics() {
+  const counts = { draft:0, review:0, approved:0, exported:0 };
+  state.detections.forEach(item => {
+    if (['draft','changes-requested'].includes(item.status)) counts.draft += 1;
+    if (item.status === 'in-review') counts.review += 1;
+    if (item.status === 'approved') counts.approved += 1;
+    if (Number(item.export_count || 0) > 0) counts.exported += 1;
+  });
+  const cards = $('#detectionMetrics').children;
+  [counts.draft, counts.review, counts.approved, counts.exported].forEach((value,index) => { cards[index].querySelector('strong').textContent = value; });
+}
+
+function renderDetectionList() {
+  const container = $('#detectionList'); if (!container) return;
+  $('#detectionCount').textContent = state.detections.length;
+  $('#detectionListCount').textContent = `${state.detections.length} total`;
+  container.innerHTML = state.detections.length ? state.detections.map(item => {
+    const content = item.content || {}; const classification = content.classification || {};
+    return `<button class="detection-list-item ${state.activeDetection?.id === item.id ? 'active' : ''}" data-open-detection="${escapeHtml(item.id)}">
+      <span class="detection-list-status ${escapeHtml(item.status)}">${escapeHtml(detectionStatusLabel(item.status))}</span>
+      <b>${escapeHtml(content.title || 'Untitled detection')}</b>
+      <small>${escapeHtml(classification.severity || 'medium')} · v${Number(item.current_version)} · ${Number(item.export_count || 0)} export${Number(item.export_count || 0) === 1 ? '' : 's'}</small>
+    </button>`;
+  }).join('') : '<div class="empty-inline compact-empty">No detection projects yet.</div>';
+}
+
+function renderDetections() {
+  renderDetectionMetrics();
+  renderDetectionCandidates();
+  renderDetectionList();
+  renderValidations();
+}
+
+async function loadDetections() {
+  try {
+    const activeId = state.activeDetection?.id;
+    state.detections = await api('/api/detections');
+    if (activeId) state.activeDetection = await api(`/api/detections/${encodeURIComponent(activeId)}`).catch(() => null);
+    renderDetections();
+    if (state.activeDetection) renderDetectionDetail();
+  } catch (error) { toast(`Detections: ${error.message}`); }
+}
+
+async function createDetectionFromValidation(validationId) {
+  const task = state.validations.find(item => item.id === validationId);
+  if (!task || task.status !== 'complete') return;
+  try {
+    const detection = await api('/api/detections', {
+      method:'POST',
+      body:JSON.stringify({
+        validation_task_id:task.id,
+        case_id:task.case_id || null,
+        title:task.title,
+        description:task.rationale,
+        severity:'medium',
+        security_domain:'threat',
+        cron_schedule:'*/5 * * * *',
+        throttle_seconds:3600,
+        tags:['signalroom'],
+        mitre_attack:[]
+      })
+    });
+    state.activeDetection = detection;
+    await loadDetections();
+    navigateView('detections');
+    await openDetection(detection.id);
+    toast('Detection version 1 created from preserved evidence');
+  } catch (error) { toast(error.message); }
+}
+
+async function openDetection(detectionId, updateHash = true) {
+  try {
+    state.activeDetection = await api(`/api/detections/${encodeURIComponent(detectionId)}`);
+    renderDetectionList(); renderDetectionDetail();
+    if (updateHash) history.replaceState(null, '', `${location.pathname}#detections/${encodeURIComponent(detectionId)}`);
+  } catch (error) { toast(error.message); }
+}
+
+function detectionHistoryMarkup(detection) {
+  const versions = (detection.versions || []).map(item => `<li><b>Version ${Number(item.version)}</b><code>${escapeHtml(item.content_sha256.slice(0, 12))}</code><time>${new Date(item.created_at).toLocaleString()}</time></li>`).join('');
+  const reviews = (detection.reviews || []).map(item => `<li class="${escapeHtml(item.decision)}"><b>${escapeHtml(item.decision.replaceAll('-', ' '))}</b><span>${escapeHtml(item.reviewer)} · v${Number(item.version)}</span><p>${escapeHtml(item.note || 'No review note recorded.')}</p><time>${new Date(item.created_at).toLocaleString()}</time></li>`).join('');
+  const exports = (detection.exports || []).map(item => `<li><b>Exported v${Number(item.version)}</b><a href="/api/detection-exports/${encodeURIComponent(item.filename)}">${escapeHtml(item.filename)}</a><code>${escapeHtml(item.archive_sha256.slice(0, 12))}</code><time>${new Date(item.created_at).toLocaleString()}</time></li>`).join('');
+  return `<div class="detection-history-grid"><section><h4>Immutable versions</h4><ol>${versions || '<li>No versions recorded.</li>'}</ol></section><section><h4>Review decisions</h4><ol>${reviews || '<li>No review decision yet.</li>'}</ol></section><section><h4>Local exports</h4><ol>${exports || '<li>No approved package exported.</li>'}</ol></section></div>`;
+}
+
+function renderDetectionDetail() {
+  const detection = state.activeDetection; const panel = $('#detectionDetail');
+  if (!detection) {
+    panel.innerHTML = '<div class="case-empty"><div class="empty-glyph">⌾</div><h3>Select a detection project</h3><p>Review its evidence contract, edit a new version, request independent review, or export an approved disabled-by-default package.</p></div>';
+    return;
+  }
+  const content = detection.content; const schedule = content.schedule; const classification = content.classification; const evidence = content.evidence;
+  const locked = ['in-review','retired'].includes(detection.status);
+  const lockAttribute = locked ? 'disabled' : '';
+  const reviewControls = detection.status === 'in-review' ? `
+    <section class="detection-review-box"><header><div><span>INDEPENDENT REVIEW</span><h4>Decide on version ${Number(detection.current_version)}</h4></div><code>${escapeHtml(detection.current_sha256)}</code></header>
+      <div class="form-grid"><label><span>Reviewer</span><input id="detectionReviewer" maxlength="160" value="Local reviewer"></label><label class="full"><span>Review note</span><textarea id="detectionReviewNote" rows="3" maxlength="10000" placeholder="Record evidence, tuning, ownership, or deployment concerns."></textarea></label></div>
+      <footer><button class="button ghost" data-review-detection="request-changes">Request changes</button><button class="button primary" data-review-detection="approve">Approve exact version</button></footer>
+    </section>` : '';
+  const primaryActions = [];
+  if (['draft','changes-requested'].includes(detection.status)) {
+    primaryActions.push('<button class="button primary" data-submit-detection>Submit exact version for review</button>');
+    primaryActions.push('<button class="button danger" data-delete-detection>Delete unapproved draft</button>');
+  }
+  if (detection.status === 'approved') {
+    primaryActions.push('<button class="button primary" data-export-detection>Export disabled package</button>');
+    primaryActions.push('<button class="button ghost" data-retire-detection>Retire project</button>');
+  }
+  primaryActions.push('<button class="button ghost" data-detection-investigate>Pressure-test with local model</button>');
+  panel.innerHTML = `
+    <header class="detection-detail-header"><div><span class="detection-list-status ${escapeHtml(detection.status)}">${escapeHtml(detectionStatusLabel(detection.status))}</span><h3>${escapeHtml(content.title)}</h3><p>Version ${Number(detection.current_version)} · SHA-256 <code>${escapeHtml(detection.current_sha256)}</code></p></div><div>${primaryActions.join('')}</div></header>
+    <div class="detection-boundary"><b>Export authority only</b><span>SignalRoom can create a review package. It cannot deploy, enable, or write this search to Splunk.</span></div>
+    <form id="detectionForm"><div class="form-grid">
+      <label class="full"><span>Detection title</span><input id="detectionTitle" required maxlength="240" value="${escapeHtml(content.title)}" ${lockAttribute}></label>
+      <label class="full"><span>Intent and analyst outcome</span><textarea id="detectionDescription" rows="4" maxlength="10000" ${lockAttribute}>${escapeHtml(content.description)}</textarea></label>
+      <label class="full"><span>Detection SPL</span><textarea id="detectionSearch" class="spl-editor" rows="8" required maxlength="20000" spellcheck="false" ${lockAttribute}>${escapeHtml(content.search)}</textarea></label>
+      <label><span>Cron schedule</span><input id="detectionCron" required maxlength="120" value="${escapeHtml(schedule.cron)}" ${lockAttribute}></label>
+      <label><span>Throttle seconds</span><input id="detectionThrottle" type="number" min="0" max="86400" value="${Number(schedule.throttle_seconds)}" ${lockAttribute}></label>
+      <label><span>Earliest time</span><input id="detectionEarliest" required maxlength="64" value="${escapeHtml(schedule.earliest_time)}" ${lockAttribute}></label>
+      <label><span>Latest time</span><input id="detectionLatest" required maxlength="64" value="${escapeHtml(schedule.latest_time)}" ${lockAttribute}></label>
+      <label><span>Severity</span><select id="detectionSeverity" ${lockAttribute}>${['informational','low','medium','high','critical'].map(value => `<option value="${value}" ${classification.severity === value ? 'selected' : ''}>${value[0].toUpperCase()+value.slice(1)}</option>`).join('')}</select></label>
+      <label><span>Owner</span><input id="detectionOwner" maxlength="160" value="${escapeHtml(classification.owner)}" ${lockAttribute}></label>
+      <label><span>Security domain</span><input id="detectionDomain" maxlength="120" value="${escapeHtml(classification.security_domain)}" ${lockAttribute}></label>
+      <label><span>MITRE ATT&amp;CK techniques</span><input id="detectionMitre" maxlength="1000" value="${escapeHtml((classification.mitre_attack || []).join(', '))}" placeholder="T1059.001, T1021" ${lockAttribute}></label>
+      <label class="full"><span>Tags</span><input id="detectionTags" maxlength="2000" value="${escapeHtml((classification.tags || []).join(', '))}" ${lockAttribute}></label>
+    </div>${locked ? '' : `<footer><span>Saving creates immutable version ${Number(detection.current_version)+1} and invalidates any prior approval.</span><button class="button primary" type="submit">Save new version</button></footer>`}</form>
+    <section class="detection-evidence-contract"><header><div><span>TRUST ANCHOR</span><h4>Completed validation evidence</h4></div><b>${Number(evidence.result_count).toLocaleString()} result${Number(evidence.result_count) === 1 ? '' : 's'}</b></header><dl><div><dt>Validation</dt><dd><code>${escapeHtml(evidence.source_validation_id)}</code></dd></div><div><dt>Query fingerprint</dt><dd><code>${escapeHtml(evidence.query_fingerprint)}</code></dd></div><div><dt>Artifact</dt><dd><code>${escapeHtml(evidence.artifact_id)}</code></dd></div><div><dt>Completed</dt><dd>${evidence.completed_at ? new Date(evidence.completed_at).toLocaleString() : 'unknown'}</dd></div><div><dt>Evidence references</dt><dd>${escapeHtml((evidence.evidence_refs || []).join(', ') || 'none')}</dd></div></dl></section>
+    ${reviewControls}
+    ${detectionHistoryMarkup(detection)}`;
+  if (!locked) $('#detectionForm').addEventListener('submit', saveDetectionVersion);
+}
+
+async function saveDetectionVersion(event) {
+  event.preventDefault(); const detection = state.activeDetection; if (!detection) return;
+  const payload = {
+    title:$('#detectionTitle').value.trim(),
+    description:$('#detectionDescription').value.trim(),
+    search:$('#detectionSearch').value.trim(),
+    cron_schedule:$('#detectionCron').value.trim(),
+    throttle_seconds:Number($('#detectionThrottle').value),
+    earliest_time:$('#detectionEarliest').value.trim(),
+    latest_time:$('#detectionLatest').value.trim(),
+    severity:$('#detectionSeverity').value,
+    owner:$('#detectionOwner').value.trim() || 'Unassigned',
+    security_domain:$('#detectionDomain').value.trim() || 'threat',
+    mitre_attack:$('#detectionMitre').value.split(',').map(value => value.trim()).filter(Boolean),
+    tags:$('#detectionTags').value.split(',').map(value => value.trim()).filter(Boolean)
+  };
+  try {
+    state.activeDetection = await api(`/api/detections/${encodeURIComponent(detection.id)}`, {method:'PATCH',body:JSON.stringify(payload)});
+    await loadDetections(); toast(`Detection version ${state.activeDetection.current_version} saved; review is required`);
+  } catch (error) { toast(error.message); }
+}
+
+async function submitDetection() {
+  const detection = state.activeDetection; if (!detection) return;
+  if (!confirm(`Submit version ${detection.current_version} for exact-content review?\n\nSHA-256: ${detection.current_sha256}`)) return;
+  try {
+    state.activeDetection = await api(`/api/detections/${encodeURIComponent(detection.id)}/submit`, {method:'POST',body:'{}'});
+    await loadDetections(); toast('Detection submitted for exact-hash review');
+  } catch (error) { toast(error.message); }
+}
+
+async function reviewDetection(decision) {
+  const detection = state.activeDetection; if (!detection) return;
+  const reviewer = $('#detectionReviewer').value.trim() || 'Local reviewer';
+  const note = $('#detectionReviewNote').value.trim();
+  if (decision === 'approve' && !confirm(`Approve exact detection version ${detection.current_version} for export?\n\nSHA-256: ${detection.current_sha256}\n\nThis does not deploy or enable the search in Splunk.`)) return;
+  try {
+    state.activeDetection = await api(`/api/detections/${encodeURIComponent(detection.id)}/review`, {method:'POST',body:JSON.stringify({decision,expected_content_sha256:detection.current_sha256,reviewer,note})});
+    await Promise.all([loadDetections(), loadArtifacts(), loadCases()]);
+    toast(decision === 'approve' ? 'Exact detection version approved and indexed locally' : 'Detection returned for changes');
+  } catch (error) { toast(error.message); }
+}
+
+async function exportDetection() {
+  const detection = state.activeDetection; if (!detection) return;
+  try {
+    const result = await api(`/api/detections/${encodeURIComponent(detection.id)}/export`, {method:'POST',body:JSON.stringify({expected_content_sha256:detection.current_sha256})});
+    state.activeDetection = result.detection; await loadDetections();
+    const link = document.createElement('a'); link.href = result.file.url; link.download = result.file.filename; document.body.appendChild(link); link.click(); link.remove();
+    toast('Approved disabled-by-default package exported');
+  } catch (error) { toast(error.message); }
+}
+
+async function retireDetection() {
+  const detection = state.activeDetection; if (!detection) return;
+  if (!confirm(`Retire “${detection.content.title}”? Its versions, reviews, exports, and evidence links will be retained.`)) return;
+  try {
+    state.activeDetection = await api(`/api/detections/${encodeURIComponent(detection.id)}/retire`, {method:'POST',body:'{}'});
+    await loadDetections(); toast('Detection project retired and retained');
+  } catch (error) { toast(error.message); }
+}
+
+async function deleteDetection() {
+  const detection = state.activeDetection; if (!detection) return;
+  if (!confirm(`Delete unapproved detection draft “${detection.content.title}”? Its source validation and evidence artifact will remain.`)) return;
+  try {
+    await api(`/api/detections/${encodeURIComponent(detection.id)}`, {method:'DELETE'});
+    state.activeDetection = null; await loadDetections(); renderDetectionDetail();
+    history.replaceState(null, '', `${location.pathname}#detections`); toast('Unapproved detection draft deleted');
+  } catch (error) { toast(error.message); }
+}
+
+function investigateDetection() {
+  const detection = state.activeDetection; if (!detection) return;
+  const content = detection.content;
+  openInvestigation('detection', `Pressure-test this versioned detection using local-first security reasoning. Assess required telemetry and fields, false positives, evasion paths, schedule and throttle risk, and test coverage. Separate evidence-backed observations from recommendations. Do not deploy or enable anything.\n\nDetection: ${content.title}\nVersion: ${detection.current_version}\nContent SHA-256: ${detection.current_sha256}\nIntent: ${content.description}\nSPL:\n${content.search}\nDispatch: ${content.schedule.earliest_time} to ${content.schedule.latest_time} on ${content.schedule.cron}\nSource validation: ${content.evidence.source_validation_id}\nEvidence artifact: ${content.evidence.artifact_id}`, false);
 }
 
 function renderSecurityPosture(result) {
@@ -1681,6 +1934,10 @@ function handleDeepLink() {
     const id = decodeURIComponent(location.hash.slice('#cases/'.length));
     setView('cases'); openCase(id, false).catch(error => toast(error.message));
   } else if (location.hash === '#cases') setView('cases');
+  else if (location.hash.startsWith('#detections/')) {
+    const id = decodeURIComponent(location.hash.slice('#detections/'.length));
+    setView('detections'); openDetection(id, false).catch(error => toast(error.message));
+  } else if (location.hash === '#detections') setView('detections');
   else if (location.hash === '#discovery') setView('discovery');
   else if (location.hash === '#models') setView('models');
   else if (location.hash === '#context') setView('context');
@@ -1692,11 +1949,26 @@ function handleDeepLink() {
 
 function navigateView(name) {
   setView(name);
-  const hashes = { chat:'#investigate', discovery:'#discovery', cases:'#cases', context:'#context', models:'#models' };
+  const hashes = { chat:'#investigate', discovery:'#discovery', cases:'#cases', detections:'#detections', context:'#context', models:'#models' };
   history.replaceState(null, '', `${location.pathname}${hashes[name] || '#investigate'}`);
 }
 
 document.addEventListener('click', async event => {
+  const openDetectionButton = event.target.closest('[data-open-detection]');
+  if (openDetectionButton) { setView('detections'); await openDetection(openDetectionButton.dataset.openDetection); return; }
+  const createDetectionButton = event.target.closest('[data-create-detection]');
+  if (createDetectionButton) { await createDetectionFromValidation(createDetectionButton.dataset.createDetection); return; }
+  if (event.target.closest('[data-submit-detection]')) { await submitDetection(); return; }
+  const reviewDetectionButton = event.target.closest('[data-review-detection]');
+  if (reviewDetectionButton) { await reviewDetection(reviewDetectionButton.dataset.reviewDetection); return; }
+  if (event.target.closest('[data-export-detection]')) { await exportDetection(); return; }
+  if (event.target.closest('[data-retire-detection]')) { await retireDetection(); return; }
+  if (event.target.closest('[data-delete-detection]')) { await deleteDetection(); return; }
+  if (event.target.closest('[data-detection-investigate]')) { investigateDetection(); return; }
+  if (event.target.closest('#showDetectionCandidates')) {
+    $('#detectionCandidatesPanel').scrollIntoView({behavior:'smooth',block:'start'});
+    return;
+  }
   const acceptGolden = event.target.closest('[data-accept-golden-baseline]');
   if (acceptGolden) { await acceptGoldenBaseline(acceptGolden.dataset.acceptGoldenBaseline); return; }
   const showGolden = event.target.closest('[data-show-golden-run]');
@@ -1824,6 +2096,8 @@ document.addEventListener('click', async event => {
     const action = state.detailActions[Number(detailAction.dataset.detailAction)];
     if (action.kind === 'prompt') { closeDetail(); openInvestigation(action.mode || 'auto', action.prompt, false); }
     if (action.kind === 'artifact') { closeDetail(); setView('context'); openArtifactDetail(action.target); }
+    if (action.kind === 'detection') { closeDetail(); setView('detections'); await openDetection(action.target); }
+    if (action.kind === 'detection-create') { closeDetail(); await createDetectionFromValidation(action.target); }
     if (action.kind === 'context-search') { closeDetail(); setView('context'); $('#contextSearch').value = action.target; $('#contextSearch').dispatchEvent(new Event('input')); }
     if (action.kind === 'discovery') { closeDetail(); setView('discovery'); }
     if (action.kind === 'case-item') { closeDetail(); openCasePicker(action.item); }
@@ -2018,4 +2292,4 @@ document.addEventListener('keydown', event => {
   else if (!$('#caseModal').hidden) { $('#caseModal').hidden = true; state.pendingCaseItem = null; }
 });
 
-Promise.all([loadSettings(), loadArtifacts(), loadCases(), loadLatestDiscovery(), loadValidations(), loadModelCatalog(), loadSplunkModels(), loadAssurance(), loadConnectionDiagnostics(), loadFeedbackBenchmarks(), loadGoldenBenchmarks()]).then(() => { renderPromptTree(); renderValidations(); handleDeepLink(); setInterval(loadAssurance, 3000); }).catch(error => toast(error.message));
+Promise.all([loadSettings(), loadArtifacts(), loadCases(), loadLatestDiscovery(), loadValidations(), loadDetections(), loadModelCatalog(), loadSplunkModels(), loadAssurance(), loadConnectionDiagnostics(), loadFeedbackBenchmarks(), loadGoldenBenchmarks()]).then(() => { renderPromptTree(); renderValidations(); renderDetections(); handleDeepLink(); setInterval(loadAssurance, 3000); }).catch(error => toast(error.message));

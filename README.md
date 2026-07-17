@@ -21,6 +21,7 @@ This is a focused reimplementation inspired by [LeiterConsulting/splunk-discover
 - Local analyst feedback and model/task outcome scorecards with no telemetry export
 - Versioned local golden investigations with isolated evidence, instrumented tool selection, durable baselines, and explicit promotion gates
 - Opt-in generic webhook delivery with exact redaction previews, hash-bound approval, idempotent retries, and a tamper-evident local audit chain
+- Evidence-bound detection-as-code projects with immutable versions, exact-hash review, case linkage, and disabled-by-default Splunk packages
 - Ollama chat and tool-capable model support
 - Hugging Face chat, embedding, and token-classification adapters
 - Capability profiles for Foundation-Sec and SecureBERT 2.0
@@ -214,6 +215,7 @@ src/splunk_security_agent/
   benchmarks/      isolated golden investigations, scoring, history, and promotion gates
   discovery/       inventory, coverage analysis, and artifact packaging
   delivery/        redacted webhook policy, approval state, attempts, and retries
+  detections/      evidence-bound versions, exact-hash review, and safe local exports
   cases/           durable case records, evidence cockpit, timelines, and handoff exports
   providers/       Ollama, local Transformers, Hugging Face cloud, and capability routing
   rag/             SQLite evidence and chunk retrieval
@@ -277,6 +279,19 @@ cardinality estimate—the actual query still requires explicit, single-use appr
 Each model-backed Investigate response can be rated **Useful**, **Incorrect**, or **Missing evidence**. Ratings
 and optional notes stay in `data/feedback.db`. The Models page aggregates outcomes by local profile and task;
 samples under ten ratings are explicitly labeled directional rather than presented as an accuracy claim.
+
+### Detection engineering
+
+The **Detections** workspace promotes a completed validation—not a hypothesis or an unexecuted SPL draft—into
+a versioned detection project. The source validation fingerprint, preserved artifact, result count, completion
+time, and evidence references remain attached as the trust anchor. Editing creates an immutable new version and
+clears prior approval.
+
+Submitting a version for review freezes its current SHA-256. An approval or changes-requested decision must name
+that exact hash. Approved versions are indexed into local Context and, when linked to a case, recorded as a case
+decision. Export produces a ZIP with `detection.yml`, a disabled `savedsearches.conf` stanza, a review README, and
+a file-hash manifest. The package contains no raw Splunk rows, sets `disabled = 1` and `enableSched = 0`, and grants
+SignalRoom no authority to deploy or enable the search in Splunk.
 
 ### Discovery
 

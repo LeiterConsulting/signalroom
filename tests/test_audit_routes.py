@@ -6,7 +6,7 @@ from typing import Any
 
 import pytest
 
-from splunk_security_agent.schemas import CaseUpdate, ValidationTaskUpdate
+from splunk_security_agent.schemas import CaseUpdate, DetectionUpdate, ValidationTaskUpdate
 
 
 class AuditRecorder:
@@ -39,6 +39,12 @@ async def test_gets_do_not_create_mutation_audits_and_write_routes_do(monkeypatc
         severity="high",
         owner="Analyst",
     )
+    detection = {
+        "id": "detection-1",
+        "current_version": 2,
+        "current_sha256": "a" * 64,
+        "status": "draft",
+    }
     fake_services = SimpleNamespace(
         audit=audit,
         validation_store=SimpleNamespace(get=lambda task_id: validation),
@@ -50,20 +56,29 @@ async def test_gets_do_not_create_mutation_audits_and_write_routes_do(monkeypatc
             get=lambda case_id: case,
             update=lambda case_id, request: case,
         ),
+        detection_store=SimpleNamespace(get=lambda detection_id: detection | {"current_version": 1}),
+        detections=SimpleNamespace(
+            update=lambda detection_id, request: detection,
+        ),
     )
     monkeypatch.setattr(app_module, "services", fake_services)
 
     await app_module.get_validation(validation.id)
     await app_module.get_case(case.id)
+    await app_module.get_detection(detection["id"])
 
     assert audit.event_types == []
 
     await app_module.update_validation(validation.id, ValidationTaskUpdate(title="Updated"))
     await app_module.approve_validation(validation.id)
     await app_module.update_case(case.id, CaseUpdate(status="monitoring"))
+    await app_module.update_detection(
+        detection["id"], DetectionUpdate(title="Updated detection")
+    )
 
     assert audit.event_types == [
         "validation.updated",
         "validation.approved",
         "case.updated",
+        "detection.version.created",
     ]

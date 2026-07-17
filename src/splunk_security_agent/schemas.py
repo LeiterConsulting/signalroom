@@ -349,6 +349,53 @@ class QueryIntelligenceRequest(BaseModel):
     exclude_task_id: str = Field(default="", max_length=120)
 
 
+DetectionSeverity = Literal["informational", "low", "medium", "high", "critical"]
+
+
+class DetectionCreate(BaseModel):
+    validation_task_id: str = Field(min_length=1, max_length=120)
+    case_id: str | None = Field(default=None, max_length=120)
+    title: str = Field(default="", max_length=240)
+    description: str = Field(default="", max_length=10000)
+    owner: str = Field(default="Unassigned", max_length=160)
+    severity: DetectionSeverity = "medium"
+    security_domain: str = Field(default="threat", max_length=120)
+    cron_schedule: str = Field(default="*/5 * * * *", min_length=9, max_length=120)
+    throttle_seconds: int = Field(default=3600, ge=0, le=86400)
+    tags: list[str] = Field(default_factory=list, max_length=32)
+    mitre_attack: list[str] = Field(default_factory=list, max_length=32)
+
+
+class DetectionUpdate(BaseModel):
+    title: str | None = Field(default=None, min_length=1, max_length=240)
+    description: str | None = Field(default=None, max_length=10000)
+    search: str | None = Field(default=None, min_length=1, max_length=20000)
+    owner: str | None = Field(default=None, max_length=160)
+    severity: DetectionSeverity | None = None
+    security_domain: str | None = Field(default=None, max_length=120)
+    cron_schedule: str | None = Field(default=None, min_length=9, max_length=120)
+    earliest_time: str | None = Field(default=None, min_length=2, max_length=64)
+    latest_time: str | None = Field(default=None, min_length=1, max_length=64)
+    throttle_seconds: int | None = Field(default=None, ge=0, le=86400)
+    tags: list[str] | None = Field(default=None, max_length=32)
+    mitre_attack: list[str] | None = Field(default=None, max_length=32)
+
+
+class DetectionReviewRequest(BaseModel):
+    decision: Literal["approve", "request-changes"]
+    expected_content_sha256: str = Field(
+        min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$"
+    )
+    reviewer: str = Field(default="Local reviewer", min_length=1, max_length=160)
+    note: str = Field(default="", max_length=10000)
+
+
+class DetectionExportRequest(BaseModel):
+    expected_content_sha256: str = Field(
+        min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$"
+    )
+
+
 class ValidationTaskRecord(ValidationTaskCreate):
     id: str
     status: ValidationStatus
