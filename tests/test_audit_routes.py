@@ -6,7 +6,13 @@ from typing import Any
 
 import pytest
 
-from splunk_security_agent.schemas import CaseUpdate, DetectionUpdate, ValidationTaskUpdate
+from splunk_security_agent.schemas import (
+    CaseUpdate,
+    DetectionGateRunRequest,
+    DetectionUpdate,
+    DetectionValidationDraftRequest,
+    ValidationTaskUpdate,
+)
 
 
 class AuditRecorder:
@@ -81,4 +87,58 @@ async def test_gets_do_not_create_mutation_audits_and_write_routes_do(monkeypatc
         "validation.approved",
         "case.updated",
         "detection.version.created",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_detection_gate_and_validation_handoff_are_audited(monkeypatch):
+    app_module = importlib.import_module("splunk_security_agent.app")
+    audit = AuditRecorder()
+    detection = {
+        "id": "detection-1",
+        "current_version": 3,
+        "current_sha256": "a" * 64,
+        "status": "draft",
+    }
+    gate = {
+        "id": "gate-1",
+        "version": 3,
+        "content_sha256": "a" * 64,
+        "status": "fail",
+        "score": 15,
+        "validation_task_id": "",
+        "baseline_gate_id": "",
+        "result_count": 0,
+        "result_delta_percent": None,
+    }
+    task = Record(
+        id="validation-1",
+        status="draft",
+        query_fingerprint="fingerprint",
+    )
+    fake_services = SimpleNamespace(
+        audit=audit,
+        detection_store=SimpleNamespace(get=lambda detection_id: detection),
+        detections=SimpleNamespace(
+            run_gate=lambda detection_id, request: gate,
+            create_validation_draft=lambda detection_id, request: (task, False),
+        ),
+    )
+    monkeypatch.setattr(app_module, "services", fake_services)
+
+    gate_result = await app_module.run_detection_gate(
+        detection["id"],
+        DetectionGateRunRequest(expected_content_sha256="a" * 64),
+    )
+    draft_result = await app_module.create_detection_validation_draft(
+        detection["id"],
+        DetectionValidationDraftRequest(expected_content_sha256="a" * 64),
+    )
+
+    assert gate_result["gate"]["status"] == "fail"
+    assert draft_result["validation"]["status"] == "draft"
+    assert draft_result["reused"] is False
+    assert audit.event_types == [
+        "detection.gate.completed",
+        "detection.validation.draft.created",
     ]

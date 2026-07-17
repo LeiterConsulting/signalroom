@@ -287,11 +287,18 @@ a versioned detection project. The source validation fingerprint, preserved arti
 time, and evidence references remain attached as the trust anchor. Editing creates an immutable new version and
 clears prior approval.
 
-Submitting a version for review freezes its current SHA-256. An approval or changes-requested decision must name
-that exact hash. Approved versions are indexed into local Context and, when linked to a case, recorded as a case
-decision. Export produces a ZIP with `detection.yml`, a disabled `savedsearches.conf` stanza, a review README, and
-a file-hash manifest. The package contains no raw Splunk rows, sets `disabled = 1` and `enableSched = 0`, and grants
-SignalRoom no authority to deploy or enable the search in Splunk.
+Before review, a deterministic promotion gate binds the exact content SHA-256 to a completed validation with the
+same SPL, time window, and row limit. It enforces the expected zero/nonzero outcome, required result fields,
+optional result-count ceiling, preserved evidence availability, and result-count drift from the last accepted
+baseline. Missing evidence never triggers Splunk automatically: SignalRoom creates an editable validation draft
+that still requires the analyst's normal approve-and-run flow.
+
+Submitting a passing version for review freezes its current SHA-256. An approval or changes-requested decision
+must name that exact hash, and approval atomically accepts the passing gate as the next regression baseline.
+Approved versions are indexed into local Context and, when linked to a case, recorded as a case decision. Export
+produces a ZIP with `detection.yml`, a disabled `savedsearches.conf` stanza, a review README, and a file-hash
+manifest containing the accepted gate provenance. The package contains no raw Splunk rows, sets `disabled = 1`
+and `enableSched = 0`, and grants SignalRoom no authority to deploy or enable the search in Splunk.
 
 ### Discovery
 

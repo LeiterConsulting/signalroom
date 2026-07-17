@@ -111,10 +111,18 @@ project captures the exact validated SPL, time contract, query fingerprint, resu
 references. Every edit appends an immutable version and clears any prior approval. Review decisions are accepted
 only while the project is in review and only when the submitted SHA-256 matches the current canonical content.
 
+The promotion gate is deterministic and reads only durable local state. It requires an exact completed validation
+fingerprint, available artifact, expected outcome, required fields, configured count limits, and acceptable drift
+from the last accepted gate. It never executes Splunk. When exact evidence is absent, the service can create or
+reuse a bounded validation draft, but approval and execution remain separate analyst actions. Submission requires
+a passing gate, and final approval accepts that exact gate in the same database transaction as the hash-bound
+review decision.
+
 Approval indexes a bounded detection document into local RAG and can add a decision to a linked case. Export is a
 local packaging operation, not a Splunk mutation: the generated saved-search stanza is disabled, the manifest
-states that no deployment authority is present, and raw validation result rows are excluded. Previously approved
-projects cannot be deleted; they can be retired while retaining their versions, reviews, and export history.
+states that no deployment authority is present, records accepted gate provenance, and excludes raw validation
+rows. Previously approved projects cannot be deleted; they can be retired while retaining their versions, gate
+runs, reviews, and export history.
 
 ## Outbound delivery is a separate authority
 

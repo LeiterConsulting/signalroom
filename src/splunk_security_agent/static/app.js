@@ -1578,10 +1578,12 @@ function renderDetectionList() {
   $('#detectionListCount').textContent = `${state.detections.length} total`;
   container.innerHTML = state.detections.length ? state.detections.map(item => {
     const content = item.content || {}; const classification = content.classification || {};
+    const gate = item.latest_gate;
+    const gateLabel = gate ? `gate ${gate.status} ${Number(gate.score)}/100` : 'gate not run';
     return `<button class="detection-list-item ${state.activeDetection?.id === item.id ? 'active' : ''}" data-open-detection="${escapeHtml(item.id)}">
       <span class="detection-list-status ${escapeHtml(item.status)}">${escapeHtml(detectionStatusLabel(item.status))}</span>
       <b>${escapeHtml(content.title || 'Untitled detection')}</b>
-      <small>${escapeHtml(classification.severity || 'medium')} · v${Number(item.current_version)} · ${Number(item.export_count || 0)} export${Number(item.export_count || 0) === 1 ? '' : 's'}</small>
+      <small>${escapeHtml(classification.severity || 'medium')} · v${Number(item.current_version)} · ${escapeHtml(gateLabel)} · ${Number(item.export_count || 0)} export${Number(item.export_count || 0) === 1 ? '' : 's'}</small>
     </button>`;
   }).join('') : '<div class="empty-inline compact-empty">No detection projects yet.</div>';
 }
@@ -1642,7 +1644,34 @@ function detectionHistoryMarkup(detection) {
   const versions = (detection.versions || []).map(item => `<li><b>Version ${Number(item.version)}</b><code>${escapeHtml(item.content_sha256.slice(0, 12))}</code><time>${new Date(item.created_at).toLocaleString()}</time></li>`).join('');
   const reviews = (detection.reviews || []).map(item => `<li class="${escapeHtml(item.decision)}"><b>${escapeHtml(item.decision.replaceAll('-', ' '))}</b><span>${escapeHtml(item.reviewer)} · v${Number(item.version)}</span><p>${escapeHtml(item.note || 'No review note recorded.')}</p><time>${new Date(item.created_at).toLocaleString()}</time></li>`).join('');
   const exports = (detection.exports || []).map(item => `<li><b>Exported v${Number(item.version)}</b><a href="/api/detection-exports/${encodeURIComponent(item.filename)}">${escapeHtml(item.filename)}</a><code>${escapeHtml(item.archive_sha256.slice(0, 12))}</code><time>${new Date(item.created_at).toLocaleString()}</time></li>`).join('');
-  return `<div class="detection-history-grid"><section><h4>Immutable versions</h4><ol>${versions || '<li>No versions recorded.</li>'}</ol></section><section><h4>Review decisions</h4><ol>${reviews || '<li>No review decision yet.</li>'}</ol></section><section><h4>Local exports</h4><ol>${exports || '<li>No approved package exported.</li>'}</ol></section></div>`;
+  const gates = (detection.gate_runs || []).map(item => `<li class="${escapeHtml(item.status)}"><b>${escapeHtml(item.status)} · ${Number(item.score)}/100</b><span>Version ${Number(item.version)} · ${Number(item.result_count).toLocaleString()} result${Number(item.result_count) === 1 ? '' : 's'}</span><code>${escapeHtml(item.content_sha256.slice(0, 12))}</code>${item.accepted_at ? '<em>Accepted baseline</em>' : ''}<time>${new Date(item.created_at).toLocaleString()}</time></li>`).join('');
+  return `<div class="detection-history-grid"><section><h4>Immutable versions</h4><ol>${versions || '<li>No versions recorded.</li>'}</ol></section><section><h4>Promotion gates</h4><ol>${gates || '<li>No promotion gate has run.</li>'}</ol></section><section><h4>Review decisions</h4><ol>${reviews || '<li>No review decision yet.</li>'}</ol></section><section><h4>Local exports</h4><ol>${exports || '<li>No approved package exported.</li>'}</ol></section></div>`;
+}
+
+function detectionGateMarkup(detection) {
+  const gate = detection.latest_gate;
+  const currentGate = gate && gate.content_sha256 === detection.current_sha256 ? gate : null;
+  const controls = currentGate?.controls || [];
+  const exactMissing = !currentGate || controls.some(item => item.id === 'exact-validation' && item.status === 'fail');
+  const status = currentGate?.status || 'not-run';
+  const heading = currentGate
+    ? `${status === 'pass' ? 'Ready for review' : 'Blocked'} · ${Number(currentGate.score)}/100`
+    : 'Run before review';
+  const summary = currentGate
+    ? `${Number(currentGate.result_count).toLocaleString()} result${Number(currentGate.result_count) === 1 ? '' : 's'} · validation ${currentGate.validation_task_id ? currentGate.validation_task_id.slice(0, 12) : 'not available'}`
+    : 'SignalRoom has not evaluated this exact content hash.';
+  const rows = controls.length ? controls.map(item => `
+    <li class="${escapeHtml(item.status)}">
+      <i aria-hidden="true"></i><div><b>${escapeHtml(item.label)}</b><p>${escapeHtml(item.detail)}</p></div><span>${item.blocking ? 'Required' : 'Advisory'}</span>
+    </li>`).join('') : '<li class="not-run"><i aria-hidden="true"></i><div><b>No gate result yet</b><p>Evaluate the saved version against a completed, exact-fingerprint validation.</p></div><span>Required</span></li>';
+  const actions = detection.status === 'retired' ? '' : `
+    <button class="button primary" type="button" data-run-detection-gate>${currentGate ? 'Run gate again' : 'Run promotion gate'}</button>
+    ${exactMissing ? '<button class="button ghost" type="button" data-detection-validation-draft>Queue exact validation draft</button>' : ''}`;
+  return `<section class="detection-gate ${escapeHtml(status)}">
+    <header><div><span>DETERMINISTIC PROMOTION GATE</span><h4>${escapeHtml(heading)}</h4><p>${escapeHtml(summary)}</p></div><div>${actions}</div></header>
+    <div class="detection-gate-boundary"><b>No hidden Splunk execution</b><span>The gate reads preserved evidence only. If evidence is missing, SignalRoom creates an editable draft that still requires your approval before it can run.</span></div>
+    <ul>${rows}</ul>
+  </section>`;
 }
 
 function renderDetectionDetail() {
@@ -1652,16 +1681,18 @@ function renderDetectionDetail() {
     return;
   }
   const content = detection.content; const schedule = content.schedule; const classification = content.classification; const evidence = content.evidence;
+  const testing = content.testing || { expected_result:Number(evidence.result_count) ? 'nonzero' : 'zero', required_fields:[], validation_row_limit:100, max_result_count:0, max_count_delta_percent:200 };
+  const gatePassed = detection.latest_gate?.content_sha256 === detection.current_sha256 && detection.latest_gate?.status === 'pass' && Number(detection.latest_gate?.score || 0) >= 80;
   const locked = ['in-review','retired'].includes(detection.status);
   const lockAttribute = locked ? 'disabled' : '';
   const reviewControls = detection.status === 'in-review' ? `
     <section class="detection-review-box"><header><div><span>INDEPENDENT REVIEW</span><h4>Decide on version ${Number(detection.current_version)}</h4></div><code>${escapeHtml(detection.current_sha256)}</code></header>
       <div class="form-grid"><label><span>Reviewer</span><input id="detectionReviewer" maxlength="160" value="Local reviewer"></label><label class="full"><span>Review note</span><textarea id="detectionReviewNote" rows="3" maxlength="10000" placeholder="Record evidence, tuning, ownership, or deployment concerns."></textarea></label></div>
-      <footer><button class="button ghost" data-review-detection="request-changes">Request changes</button><button class="button primary" data-review-detection="approve">Approve exact version</button></footer>
+      <footer><button class="button ghost" data-review-detection="request-changes">Request changes</button><button class="button primary" data-review-detection="approve" ${gatePassed ? '' : 'disabled'}>Approve exact gated version</button></footer>
     </section>` : '';
   const primaryActions = [];
   if (['draft','changes-requested'].includes(detection.status)) {
-    primaryActions.push('<button class="button primary" data-submit-detection>Submit exact version for review</button>');
+    if (gatePassed) primaryActions.push('<button class="button primary" data-submit-detection>Submit gated version for review</button>');
     primaryActions.push('<button class="button danger" data-delete-detection>Delete unapproved draft</button>');
   }
   if (detection.status === 'approved') {
@@ -1685,8 +1716,16 @@ function renderDetectionDetail() {
       <label><span>Security domain</span><input id="detectionDomain" maxlength="120" value="${escapeHtml(classification.security_domain)}" ${lockAttribute}></label>
       <label><span>MITRE ATT&amp;CK techniques</span><input id="detectionMitre" maxlength="1000" value="${escapeHtml((classification.mitre_attack || []).join(', '))}" placeholder="T1059.001, T1021" ${lockAttribute}></label>
       <label class="full"><span>Tags</span><input id="detectionTags" maxlength="2000" value="${escapeHtml((classification.tags || []).join(', '))}" ${lockAttribute}></label>
+      <fieldset class="detection-test-contract full"><legend>Promotion test contract</legend>
+        <label><span>Expected result</span><select id="detectionExpectedResult" ${lockAttribute}>${[['any','Any count'],['zero','Exactly zero'],['nonzero','One or more']].map(([value,label]) => `<option value="${value}" ${testing.expected_result === value ? 'selected' : ''}>${label}</option>`).join('')}</select><small>Defines what a healthy bounded result looks like.</small></label>
+        <label><span>Validation row limit</span><input id="detectionValidationRowLimit" type="number" min="1" max="500" value="${Number(testing.validation_row_limit)}" ${lockAttribute}><small>Part of the exact query fingerprint.</small></label>
+        <label class="full"><span>Required result fields</span><input id="detectionRequiredFields" maxlength="4000" value="${escapeHtml((testing.required_fields || []).join(', '))}" placeholder="host, user, process_name" ${lockAttribute}><small>Each field must appear in every preserved preview row.</small></label>
+        <label><span>Maximum result count</span><input id="detectionMaxResultCount" type="number" min="0" max="10000000" value="${Number(testing.max_result_count)}" ${lockAttribute}><small>Use 0 for no fixed ceiling.</small></label>
+        <label><span>Maximum baseline drift (%)</span><input id="detectionMaxDelta" type="number" min="0" max="10000" value="${Number(testing.max_count_delta_percent)}" ${lockAttribute}><small>Absolute count change from the last accepted gate.</small></label>
+      </fieldset>
     </div>${locked ? '' : `<footer><span>Saving creates immutable version ${Number(detection.current_version)+1} and invalidates any prior approval.</span><button class="button primary" type="submit">Save new version</button></footer>`}</form>
     <section class="detection-evidence-contract"><header><div><span>TRUST ANCHOR</span><h4>Completed validation evidence</h4></div><b>${Number(evidence.result_count).toLocaleString()} result${Number(evidence.result_count) === 1 ? '' : 's'}</b></header><dl><div><dt>Validation</dt><dd><code>${escapeHtml(evidence.source_validation_id)}</code></dd></div><div><dt>Query fingerprint</dt><dd><code>${escapeHtml(evidence.query_fingerprint)}</code></dd></div><div><dt>Artifact</dt><dd><code>${escapeHtml(evidence.artifact_id)}</code></dd></div><div><dt>Completed</dt><dd>${evidence.completed_at ? new Date(evidence.completed_at).toLocaleString() : 'unknown'}</dd></div><div><dt>Evidence references</dt><dd>${escapeHtml((evidence.evidence_refs || []).join(', ') || 'none')}</dd></div></dl></section>
+    ${detectionGateMarkup(detection)}
     ${reviewControls}
     ${detectionHistoryMarkup(detection)}`;
   if (!locked) $('#detectionForm').addEventListener('submit', saveDetectionVersion);
@@ -1706,11 +1745,40 @@ async function saveDetectionVersion(event) {
     owner:$('#detectionOwner').value.trim() || 'Unassigned',
     security_domain:$('#detectionDomain').value.trim() || 'threat',
     mitre_attack:$('#detectionMitre').value.split(',').map(value => value.trim()).filter(Boolean),
-    tags:$('#detectionTags').value.split(',').map(value => value.trim()).filter(Boolean)
+    tags:$('#detectionTags').value.split(',').map(value => value.trim()).filter(Boolean),
+    expected_result:$('#detectionExpectedResult').value,
+    required_fields:$('#detectionRequiredFields').value.split(',').map(value => value.trim()).filter(Boolean),
+    validation_row_limit:Number($('#detectionValidationRowLimit').value),
+    max_result_count:Number($('#detectionMaxResultCount').value),
+    max_count_delta_percent:Number($('#detectionMaxDelta').value)
   };
   try {
     state.activeDetection = await api(`/api/detections/${encodeURIComponent(detection.id)}`, {method:'PATCH',body:JSON.stringify(payload)});
     await loadDetections(); toast(`Detection version ${state.activeDetection.current_version} saved; review is required`);
+  } catch (error) { toast(error.message); }
+}
+
+async function runDetectionGate() {
+  const detection = state.activeDetection; if (!detection) return;
+  try {
+    const result = await api(`/api/detections/${encodeURIComponent(detection.id)}/gate`, {method:'POST',body:JSON.stringify({expected_content_sha256:detection.current_sha256})});
+    state.activeDetection = result.detection; await loadDetections();
+    toast(result.gate.status === 'pass' ? `Promotion gate passed · ${result.gate.score}/100` : `Promotion gate blocked · ${result.gate.score}/100`);
+  } catch (error) { toast(error.message); }
+}
+
+async function queueDetectionValidationDraft() {
+  const detection = state.activeDetection; if (!detection) return;
+  try {
+    const result = await api(`/api/detections/${encodeURIComponent(detection.id)}/validation-draft`, {method:'POST',body:JSON.stringify({expected_content_sha256:detection.current_sha256})});
+    await loadValidations();
+    navigateView('discovery');
+    $('#validationWorkspace').scrollIntoView({behavior:'smooth',block:'start'});
+    setTimeout(() => {
+      const card = document.querySelector(`[data-validation-id="${CSS.escape(result.validation.id)}"]`);
+      if (card) { card.classList.add('package-focus'); card.scrollIntoView({behavior:'smooth',block:'center'}); setTimeout(() => card.classList.remove('package-focus'), 3500); }
+    }, 350);
+    toast(result.reused ? 'Exact validation already exists; opened the analyst queue' : 'Validation draft queued; review and approve it before running Splunk');
   } catch (error) { toast(error.message); }
 }
 
@@ -1958,6 +2026,8 @@ document.addEventListener('click', async event => {
   if (openDetectionButton) { setView('detections'); await openDetection(openDetectionButton.dataset.openDetection); return; }
   const createDetectionButton = event.target.closest('[data-create-detection]');
   if (createDetectionButton) { await createDetectionFromValidation(createDetectionButton.dataset.createDetection); return; }
+  if (event.target.closest('[data-run-detection-gate]')) { await runDetectionGate(); return; }
+  if (event.target.closest('[data-detection-validation-draft]')) { await queueDetectionValidationDraft(); return; }
   if (event.target.closest('[data-submit-detection]')) { await submitDetection(); return; }
   const reviewDetectionButton = event.target.closest('[data-review-detection]');
   if (reviewDetectionButton) { await reviewDetection(reviewDetectionButton.dataset.reviewDetection); return; }

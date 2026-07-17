@@ -13,8 +13,10 @@ from splunk_security_agent.schemas import (
     CaseCreate,
     DetectionCreate,
     DetectionExportRequest,
+    DetectionGateRunRequest,
     DetectionReviewRequest,
     DetectionUpdate,
+    DetectionValidationDraftRequest,
     ValidationTaskCreate,
 )
 from splunk_security_agent.validation import ValidationStore
@@ -107,6 +109,16 @@ def test_detection_versions_review_and_export_are_hash_bound(tmp_path):
     assert revised["current_sha256"] != detection["current_sha256"]
     assert revised["status"] == "draft"
 
+    gate = service.run_gate(
+        detection["id"],
+        DetectionGateRunRequest(
+            expected_content_sha256=revised["current_sha256"]
+        ),
+    )
+    assert gate["status"] == "pass"
+    assert gate["score"] == 100
+    assert gate["validation_task_id"] == task.id
+
     submitted = service.submit(detection["id"])
     assert submitted is not None
     assert submitted["status"] == "in-review"
@@ -159,6 +171,8 @@ def test_detection_versions_review_and_export_are_hash_bound(tmp_path):
         assert "enableSched = 0" in savedsearch
         manifest = json.loads(archive.read("manifest.json"))
         assert manifest["content_sha256"] == revised["current_sha256"]
+        assert manifest["promotion_gate"]["id"] == gate["id"]
+        assert manifest["promotion_gate"]["accepted_at"]
         assert manifest["authority"]["deploys_to_splunk"] is False
         assert manifest["authority"]["contains_raw_results"] is False
 
@@ -204,6 +218,13 @@ def test_unapproved_detection_can_be_deleted_but_review_blocks_editing(tmp_path)
     assert task is not None
     detection = service.create(DetectionCreate(validation_task_id=task.id))
 
+    gate = service.run_gate(
+        detection["id"],
+        DetectionGateRunRequest(
+            expected_content_sha256=detection["current_sha256"]
+        ),
+    )
+    assert gate["status"] == "pass"
     service.submit(detection["id"])
     with pytest.raises(ValueError, match="receive a decision"):
         service.update(detection["id"], DetectionUpdate(title="Changed during review"))
@@ -221,3 +242,215 @@ def test_unapproved_detection_can_be_deleted_but_review_blocks_editing(tmp_path)
     assert changes["status"] == "changes-requested"
     assert service.delete(detection["id"]) is True
     assert store.get(detection["id"]) is None
+
+
+def test_edited_search_requires_an_analyst_run_exact_validation(tmp_path):
+    service, _, validations, evidence, _ = service_fixture(tmp_path)
+    source = completed_validation(validations, evidence)
+    assert source is not None
+    detection = service.create(DetectionCreate(validation_task_id=source.id))
+    first_gate = service.run_gate(
+        detection["id"],
+        DetectionGateRunRequest(
+            expected_content_sha256=detection["current_sha256"]
+        ),
+    )
+    assert first_gate["status"] == "pass"
+    service.submit(detection["id"])
+    approved = service.review(
+        detection["id"],
+        DetectionReviewRequest(
+            decision="approve",
+            expected_content_sha256=detection["current_sha256"],
+            reviewer="Reviewer",
+        ),
+    )
+    assert approved is not None
+    assert approved["latest_gate"]["accepted_at"]
+
+    revised = service.update(
+        detection["id"],
+        DetectionUpdate(
+            search=(
+                'index=endpoint process_name="powershell.exe" encoded=true '
+                "| stats count by host user"
+            )
+        ),
+    )
+    assert revised is not None
+    blocked = service.run_gate(
+        detection["id"],
+        DetectionGateRunRequest(
+            expected_content_sha256=revised["current_sha256"]
+        ),
+    )
+    assert blocked["status"] == "fail"
+    exact = next(item for item in blocked["controls"] if item["id"] == "exact-validation")
+    assert exact["blocking"] is True
+    assert exact["status"] == "fail"
+    with pytest.raises(ValueError, match="passing promotion gate"):
+        service.submit(detection["id"])
+
+    draft, reused = service.create_validation_draft(
+        detection["id"],
+        DetectionValidationDraftRequest(
+            expected_content_sha256=revised["current_sha256"]
+        ),
+    )
+    assert reused is False
+    assert draft.status == "draft"
+    assert draft.approved_at is None
+    assert draft.started_at is None
+    assert draft.spl == revised["content"]["search"]
+
+    same_draft, reused = service.create_validation_draft(
+        detection["id"],
+        DetectionValidationDraftRequest(
+            expected_content_sha256=revised["current_sha256"]
+        ),
+    )
+    assert reused is True
+    assert same_draft.id == draft.id
+    validations.approve(draft.id)
+    validations.mark_running(draft.id)
+    artifact = evidence.add(
+        ArtifactCreate(
+            title="Fresh exact regression evidence",
+            content="Exact bounded result for the edited search.",
+            kind="validation",
+            source="test",
+        )
+    )
+    validations.complete(
+        draft.id,
+        3,
+        [{"host": "workstation-1", "user": "analyst", "count": 3}],
+        artifact.id,
+    )
+    passed = service.run_gate(
+        detection["id"],
+        DetectionGateRunRequest(
+            expected_content_sha256=revised["current_sha256"]
+        ),
+    )
+    assert passed["status"] == "pass"
+    assert passed["baseline_gate_id"] == first_gate["id"]
+    assert passed["result_delta_percent"] == 0
+
+
+def test_gate_blocks_field_count_and_baseline_regressions(tmp_path):
+    service, _, validations, evidence, _ = service_fixture(tmp_path)
+    source = completed_validation(validations, evidence)
+    assert source is not None
+    detection = service.create(DetectionCreate(validation_task_id=source.id))
+    gate = service.run_gate(
+        detection["id"],
+        DetectionGateRunRequest(
+            expected_content_sha256=detection["current_sha256"]
+        ),
+    )
+    service.submit(detection["id"])
+    service.review(
+        detection["id"],
+        DetectionReviewRequest(
+            decision="approve",
+            expected_content_sha256=detection["current_sha256"],
+            reviewer="Reviewer",
+        ),
+    )
+    assert gate["status"] == "pass"
+
+    field_contract = service.update(
+        detection["id"],
+        DetectionUpdate(
+            required_fields=["host", "process_name"],
+            max_result_count=2,
+        ),
+    )
+    assert field_contract is not None
+    blocked = service.run_gate(
+        detection["id"],
+        DetectionGateRunRequest(
+            expected_content_sha256=field_contract["current_sha256"]
+        ),
+    )
+    failures = {
+        item["id"]
+        for item in blocked["controls"]
+        if item["status"] == "fail"
+    }
+    assert blocked["status"] == "fail"
+    assert {"required-fields", "maximum-result-count"} <= failures
+
+    revised = service.update(
+        detection["id"],
+        DetectionUpdate(
+            search=(
+                'index=endpoint process_name="powershell.exe" '
+                "| stats count by host user source"
+            ),
+            required_fields=["host", "user", "source", "count"],
+            max_result_count=0,
+        ),
+    )
+    assert revised is not None
+    draft, reused = service.create_validation_draft(
+        detection["id"],
+        DetectionValidationDraftRequest(
+            expected_content_sha256=revised["current_sha256"]
+        ),
+    )
+    assert reused is False
+    validations.approve(draft.id)
+    validations.mark_running(draft.id)
+    artifact = evidence.add(
+        ArtifactCreate(
+            title="Regression count evidence",
+            content="A materially changed bounded result count.",
+            kind="validation",
+            source="test",
+        )
+    )
+    validations.complete(
+        draft.id,
+        20,
+        [{"host": "a", "user": "b", "source": "c", "count": 20}],
+        artifact.id,
+    )
+    regression = service.run_gate(
+        detection["id"],
+        DetectionGateRunRequest(
+            expected_content_sha256=revised["current_sha256"]
+        ),
+    )
+    drift = next(
+        item for item in regression["controls"] if item["id"] == "baseline-drift"
+    )
+    assert regression["status"] == "fail"
+    assert regression["result_delta_percent"] > 200
+    assert drift["status"] == "fail"
+
+
+def test_gate_rejects_a_stale_content_hash(tmp_path):
+    service, _, validations, evidence, _ = service_fixture(tmp_path)
+    source = completed_validation(validations, evidence)
+    assert source is not None
+    detection = service.create(DetectionCreate(validation_task_id=source.id))
+    revised = service.update(
+        detection["id"], DetectionUpdate(description="Changed exact content")
+    )
+    assert revised is not None
+    with pytest.raises(ValueError, match="content changed"):
+        service.run_gate(
+            detection["id"],
+            DetectionGateRunRequest(
+                expected_content_sha256=detection["current_sha256"]
+            ),
+        )
+    with pytest.raises(ValueError, match="content changed"):
+        service.create_validation_draft(
+            detection["id"],
+            DetectionValidationDraftRequest(
+                expected_content_sha256=detection["current_sha256"]
+            ),
+        )

@@ -43,8 +43,10 @@ from .schemas import (
     DeliveryPolicyUpdate,
     DetectionCreate,
     DetectionExportRequest,
+    DetectionGateRunRequest,
     DetectionReviewRequest,
     DetectionUpdate,
+    DetectionValidationDraftRequest,
     DiscoveryRequest,
     GoldenBenchmarkRunCreate,
     ModelActivateRequest,
@@ -1033,6 +1035,81 @@ async def submit_detection(detection_id: str) -> dict[str, Any]:
     return detection
 
 
+@app.post("/api/detections/{detection_id}/gate")
+async def run_detection_gate(
+    detection_id: str, request: DetectionGateRunRequest
+) -> dict[str, Any]:
+    try:
+        gate = services.detections.run_gate(detection_id, request)
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    detection = services.detection_store.get(detection_id)
+    assert detection is not None
+    services.audit.record(
+        "detection.gate.completed",
+        "evaluate",
+        target_type="detection",
+        target_id=detection_id,
+        outcome=gate["status"],
+        summary=(
+            f"Deterministic promotion gate {gate['status']} with score "
+            f"{gate['score']} for the exact detection hash."
+        ),
+        metadata={
+            "gate_id": gate["id"],
+            "version": gate["version"],
+            "content_sha256": gate["content_sha256"],
+            "validation_task_id": gate["validation_task_id"],
+            "baseline_gate_id": gate["baseline_gate_id"],
+            "result_count": gate["result_count"],
+            "result_delta_percent": gate["result_delta_percent"],
+        },
+    )
+    return {"gate": gate, "detection": detection}
+
+
+@app.post("/api/detections/{detection_id}/validation-draft", status_code=201)
+async def create_detection_validation_draft(
+    detection_id: str, request: DetectionValidationDraftRequest
+) -> dict[str, Any]:
+    try:
+        task, reused = services.detections.create_validation_draft(
+            detection_id, request
+        )
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    services.audit.record(
+        (
+            "detection.validation.reused"
+            if reused
+            else "detection.validation.draft.created"
+        ),
+        "reuse" if reused else "create",
+        target_type="validation-task",
+        target_id=task.id,
+        summary=(
+            "An existing exact validation contract was reused for the detection gate."
+            if reused
+            else (
+                "A bounded validation draft was created for analyst approval; "
+                "no Splunk search was executed."
+            )
+        ),
+        metadata={
+            "detection_id": detection_id,
+            "content_sha256": request.expected_content_sha256,
+            "query_fingerprint": task.query_fingerprint,
+            "status": task.status,
+            "reused": reused,
+        },
+    )
+    return {"validation": task.model_dump(mode="json"), "reused": reused}
+
+
 @app.post("/api/detections/{detection_id}/review")
 async def review_detection(
     detection_id: str, request: DetectionReviewRequest
@@ -1058,6 +1135,11 @@ async def review_detection(
             "version": detection["current_version"],
             "content_sha256": detection["current_sha256"],
             "reviewer": request.reviewer,
+            "gate_id": (
+                detection["latest_gate"]["id"]
+                if request.decision == "approve" and detection.get("latest_gate")
+                else ""
+            ),
         },
     )
     if request.decision == "approve":

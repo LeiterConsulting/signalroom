@@ -379,6 +379,11 @@ class DetectionUpdate(BaseModel):
     throttle_seconds: int | None = Field(default=None, ge=0, le=86400)
     tags: list[str] | None = Field(default=None, max_length=32)
     mitre_attack: list[str] | None = Field(default=None, max_length=32)
+    expected_result: Literal["any", "zero", "nonzero"] | None = None
+    required_fields: list[str] | None = Field(default=None, max_length=32)
+    validation_row_limit: int | None = Field(default=None, ge=1, le=500)
+    max_result_count: int | None = Field(default=None, ge=0, le=10_000_000)
+    max_count_delta_percent: int | None = Field(default=None, ge=0, le=10_000)
 
 
 class DetectionReviewRequest(BaseModel):
@@ -391,6 +396,18 @@ class DetectionReviewRequest(BaseModel):
 
 
 class DetectionExportRequest(BaseModel):
+    expected_content_sha256: str = Field(
+        min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$"
+    )
+
+
+class DetectionGateRunRequest(BaseModel):
+    expected_content_sha256: str = Field(
+        min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$"
+    )
+
+
+class DetectionValidationDraftRequest(BaseModel):
     expected_content_sha256: str = Field(
         min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$"
     )

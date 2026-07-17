@@ -4,6 +4,7 @@ import hashlib
 import json
 import re
 import zipfile
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -15,11 +16,15 @@ from ..schemas import (
     CaseItemCreate,
     DetectionCreate,
     DetectionExportRequest,
+    DetectionGateRunRequest,
     DetectionReviewRequest,
     DetectionUpdate,
+    DetectionValidationDraftRequest,
+    ValidationTaskCreate,
+    ValidationTaskRecord,
 )
 from ..splunk.guardrails import validate_read_only_spl
-from ..validation import ValidationStore
+from ..validation import ValidationService, ValidationStore
 from .store import DetectionStore
 
 CRON_PART = re.compile(r"^[0-9*/?,#LW-]+$")
@@ -85,6 +90,13 @@ class DetectionService:
                 "completed_at": task.completed_at,
                 "evidence_refs": sorted(set(task.evidence_refs)),
             },
+            "testing": {
+                "expected_result": "nonzero" if task.result_count else "zero",
+                "required_fields": self._result_fields(task.result_preview),
+                "validation_row_limit": task.row_limit,
+                "max_result_count": 0,
+                "max_count_delta_percent": 200,
+            },
             "deployment": {
                 "enabled": False,
                 "authority": "review-package-only",
@@ -128,6 +140,20 @@ class DetectionService:
             content["classification"]["tags"] = self._tags(changes["tags"])
         if "mitre_attack" in changes:
             content["classification"]["mitre_attack"] = self._mitre(changes["mitre_attack"])
+        testing_map = {
+            "expected_result": "expected_result",
+            "required_fields": "required_fields",
+            "validation_row_limit": "validation_row_limit",
+            "max_result_count": "max_result_count",
+            "max_count_delta_percent": "max_count_delta_percent",
+        }
+        testing = content.setdefault("testing", self._default_testing(current["content"]))
+        for source, target in testing_map.items():
+            if source in changes:
+                item = changes[source]
+                testing[target] = (
+                    self._fields(item) if source == "required_fields" else item
+                )
         self._validate(content)
         return self.store.add_version(detection_id, content)
 
@@ -136,7 +162,108 @@ class DetectionService:
         if current is None:
             return None
         self._validate(current["content"])
+        self._passing_gate(current)
         return self.store.submit(detection_id)
+
+    def run_gate(
+        self, detection_id: str, request: DetectionGateRunRequest
+    ) -> dict[str, Any]:
+        current = self.store.get(detection_id)
+        if current is None:
+            raise KeyError("Detection not found")
+        if current["status"] == "retired":
+            raise ValueError("A retired detection cannot run a promotion gate")
+        if current["current_sha256"] != request.expected_content_sha256:
+            raise ValueError("Detection content changed; run the gate on the current version")
+        content = current["content"]
+        self._validate(content)
+        testing = self._default_testing(content)
+        fingerprint = self._validation_fingerprint(content)
+        validation = self.validations.find_latest_complete(fingerprint)
+        baseline = self.store.accepted_gate(detection_id)
+        baseline_count = baseline["result_count"] if baseline else None
+        result_count = validation.result_count if validation else 0
+        delta = self._result_delta(result_count, baseline_count)
+        controls = self._gate_controls(
+            content,
+            testing,
+            validation,
+            baseline,
+            delta,
+        )
+        blocking = [item for item in controls if item["blocking"] and item["status"] == "fail"]
+        score = sum(
+            int(item["weight"])
+            for item in controls
+            if item["status"] == "pass"
+        )
+        status = "pass" if not blocking and score >= 80 else "fail"
+        return self.store.record_gate(
+            detection_id,
+            content_sha256=current["current_sha256"],
+            status=status,
+            score=score,
+            validation_task_id=validation.id if validation else "",
+            baseline_gate_id=baseline["id"] if baseline else "",
+            result_count=result_count,
+            baseline_result_count=baseline_count,
+            result_delta_percent=delta,
+            controls=controls,
+        )
+
+    def create_validation_draft(
+        self, detection_id: str, request: DetectionValidationDraftRequest
+    ) -> tuple[ValidationTaskRecord, bool]:
+        current = self.store.get(detection_id)
+        if current is None:
+            raise KeyError("Detection not found")
+        if current["status"] == "retired":
+            raise ValueError("A retired detection cannot queue validation work")
+        if current["current_sha256"] != request.expected_content_sha256:
+            raise ValueError(
+                "Detection content changed; queue validation for the current version"
+            )
+        content = current["content"]
+        self._validate(content)
+        testing = self._default_testing(content)
+        schedule = content["schedule"]
+        row_limit = int(testing["validation_row_limit"])
+        ValidationService.validate_contract(
+            content["search"],
+            schedule["earliest_time"],
+            schedule["latest_time"],
+            row_limit,
+        )
+        fingerprint = self._validation_fingerprint(content)
+        complete = self.validations.find_latest_complete(fingerprint)
+        if complete is not None:
+            return complete, True
+        reusable = self.validations.find_reusable(fingerprint)
+        if reusable is not None:
+            return reusable, True
+        task = self.validations.create(
+            ValidationTaskCreate(
+                title=(
+                    f"Detection regression · {content['title']} · "
+                    f"v{current['current_version']}"
+                ),
+                rationale=(
+                    "Refresh the exact bounded evidence contract required by the "
+                    f"promotion gate for detection version {current['current_version']} "
+                    f"({current['current_sha256'][:12]}). Queueing this draft does not "
+                    "approve or execute the Splunk search."
+                ),
+                spl=content["search"],
+                earliest_time=schedule["earliest_time"],
+                latest_time=schedule["latest_time"],
+                row_limit=row_limit,
+                evidence_refs=content["evidence"].get("evidence_refs", []),
+                source_run_id=f"detection:{detection_id}",
+                source_finding_ref=f"version:{current['current_version']}",
+                case_id=current.get("case_id"),
+            )
+        )
+        return task, False
 
     def review(
         self, detection_id: str, request: DetectionReviewRequest
@@ -145,14 +272,19 @@ class DetectionService:
         if current is None:
             return None
         self._validate(current["content"])
+        gate: dict[str, Any] | None = None
+        if request.decision == "approve":
+            gate = self._passing_gate(current)
         reviewed = self.store.review(
             detection_id,
             decision=request.decision,
             expected_sha256=request.expected_content_sha256,
             reviewer=request.reviewer.strip(),
             note=request.note.strip(),
+            accepted_gate_id=gate["id"] if gate else "",
         )
         if reviewed and request.decision == "approve":
+            assert gate is not None
             self._preserve_approval(reviewed)
         return reviewed
 
@@ -185,6 +317,7 @@ class DetectionService:
                 "reviewer": current["reviewed_by"],
                 "reviewed_at": current["reviewed_at"],
             },
+            "promotion_gate": self._export_gate(current),
             "authority": {
                 "deploys_to_splunk": False,
                 "enables_saved_search": False,
@@ -272,6 +405,281 @@ class DetectionService:
         )[:32]
 
     @staticmethod
+    def _fields(values: list[str]) -> list[str]:
+        return sorted(
+            {
+                str(value).strip()[:160]
+                for value in values
+                if str(value).strip()
+            }
+        )[:32]
+
+    @classmethod
+    def _result_fields(cls, preview: list[Any]) -> list[str]:
+        rows = [row for row in preview if isinstance(row, dict)]
+        if not rows:
+            return []
+        common = set(str(key) for key in rows[0])
+        for row in rows[1:]:
+            common.intersection_update(str(key) for key in row)
+        return cls._fields(list(common))[:16]
+
+    @classmethod
+    def _default_testing(cls, content: dict[str, Any]) -> dict[str, Any]:
+        evidence = content.get("evidence") or {}
+        supplied = content.get("testing") or {}
+        return {
+            "expected_result": supplied.get(
+                "expected_result",
+                "nonzero" if int(evidence.get("result_count", 0)) else "zero",
+            ),
+            "required_fields": cls._fields(supplied.get("required_fields") or []),
+            "validation_row_limit": int(supplied.get("validation_row_limit", 100)),
+            "max_result_count": int(supplied.get("max_result_count", 0)),
+            "max_count_delta_percent": int(
+                supplied.get("max_count_delta_percent", 200)
+            ),
+        }
+
+    @classmethod
+    def _validation_fingerprint(cls, content: dict[str, Any]) -> str:
+        schedule = content["schedule"]
+        testing = cls._default_testing(content)
+        return ValidationStore.fingerprint(
+            content["search"],
+            schedule["earliest_time"],
+            schedule["latest_time"],
+            testing["validation_row_limit"],
+        )
+
+    @staticmethod
+    def _result_delta(current: int, baseline: int | None) -> float | None:
+        if baseline is None:
+            return None
+        return round(abs(current - baseline) / max(abs(baseline), 1) * 100, 2)
+
+    def _gate_controls(
+        self,
+        content: dict[str, Any],
+        testing: dict[str, Any],
+        validation: ValidationTaskRecord | None,
+        baseline: dict[str, Any] | None,
+        delta: float | None,
+    ) -> list[dict[str, Any]]:
+        controls: list[dict[str, Any]] = []
+
+        def add(
+            control_id: str,
+            label: str,
+            passed: bool,
+            detail: str,
+            weight: int,
+            *,
+            blocking: bool = True,
+            warning: bool = False,
+        ) -> None:
+            controls.append(
+                {
+                    "id": control_id,
+                    "label": label,
+                    "status": "pass" if passed else ("warn" if warning else "fail"),
+                    "blocking": blocking,
+                    "weight": weight,
+                    "detail": detail,
+                }
+            )
+
+        try:
+            validate_read_only_spl(content["search"])
+            read_only = True
+            read_only_detail = "SPL passed the read-only search guardrail."
+        except ValueError as exc:
+            read_only = False
+            read_only_detail = str(exc)
+        add("read-only", "Read-only SPL", read_only, read_only_detail, 15)
+
+        exact = validation is not None
+        add(
+            "exact-validation",
+            "Exact completed validation",
+            exact,
+            (
+                f"Completed task {validation.id} matches search, window, and row limit."
+                if validation
+                else "No completed validation matches this search, window, and row limit."
+            ),
+            25,
+        )
+        artifact_ok = bool(
+            validation
+            and validation.artifact_id
+            and self.evidence.get(validation.artifact_id)
+        )
+        add(
+            "preserved-evidence",
+            "Preserved evidence artifact",
+            artifact_ok,
+            (
+                f"Evidence artifact {validation.artifact_id} is available."
+                if artifact_ok and validation
+                else "The exact validation does not have an available evidence artifact."
+            ),
+            15,
+        )
+        result_count = validation.result_count if validation else 0
+        expected = testing["expected_result"]
+        expectation_ok = (
+            expected == "any"
+            or (expected == "zero" and result_count == 0)
+            or (expected == "nonzero" and result_count > 0)
+        )
+        add(
+            "expected-result",
+            "Expected result contract",
+            bool(validation) and expectation_ok,
+            (
+                f"Expected {expected}; observed {result_count} result(s)."
+                if validation
+                else f"Expected {expected}; no exact validation result is available."
+            ),
+            15,
+        )
+        observed_fields: set[str] = set()
+        rows = (
+            [row for row in validation.result_preview if isinstance(row, dict)]
+            if validation
+            else []
+        )
+        if rows:
+            observed_fields = set(str(key) for key in rows[0])
+            for row in rows[1:]:
+                observed_fields.intersection_update(str(key) for key in row)
+        required = set(testing["required_fields"])
+        missing = sorted(required - observed_fields)
+        fields_ok = not missing and (not required or bool(rows))
+        add(
+            "required-fields",
+            "Required result fields",
+            bool(validation) and fields_ok,
+            (
+                "All required fields were present in every preview row."
+                if validation and fields_ok
+                else (
+                    f"Missing from one or more preview rows: {', '.join(missing)}."
+                    if missing
+                    else "No exact result preview is available for the field contract."
+                )
+            ),
+            15,
+        )
+        maximum = int(testing["max_result_count"])
+        maximum_ok = not maximum or result_count <= maximum
+        add(
+            "maximum-result-count",
+            "Maximum result count",
+            bool(validation) and maximum_ok,
+            (
+                f"Observed {result_count}; configured maximum is "
+                f"{maximum if maximum else 'unlimited'}."
+            ),
+            5,
+        )
+        delta_limit = int(testing["max_count_delta_percent"])
+        delta_ok = delta is None or delta <= delta_limit
+        add(
+            "baseline-drift",
+            "Accepted baseline drift",
+            bool(validation) and delta_ok,
+            (
+                "This passing run will establish the first accepted baseline."
+                if baseline is None
+                else (
+                    f"Result count changed {delta:.2f}% from accepted gate "
+                    f"{baseline['id'][:12]}; limit is {delta_limit}%."
+                )
+            ),
+            10,
+        )
+        explicit_scope = bool(
+            re.search(r"\bindex\s*=", content["search"], re.IGNORECASE)
+            or re.search(r"\bdatamodel\s*=", content["search"], re.IGNORECASE)
+            or re.search(r"\|\s*tstats\b", content["search"], re.IGNORECASE)
+        )
+        add(
+            "explicit-scope",
+            "Explicit data scope",
+            explicit_scope,
+            (
+                "The SPL declares an index, data model, or tstats scope."
+                if explicit_scope
+                else "No explicit index or data-model scope was detected; review search cost."
+            ),
+            0,
+            blocking=False,
+            warning=not explicit_scope,
+        )
+        fresh = False
+        if validation and validation.completed_at:
+            completed = datetime.fromisoformat(validation.completed_at.replace("Z", "+00:00"))
+            fresh = (datetime.now(UTC) - completed.astimezone(UTC)).days <= 7
+        add(
+            "evidence-freshness",
+            "Evidence freshness",
+            fresh,
+            (
+                f"Validation completed {validation.completed_at}."
+                if validation and validation.completed_at
+                else "No completion time is available."
+            ),
+            0,
+            blocking=False,
+            warning=not fresh,
+        )
+        return controls
+
+    def _passing_gate(self, current: dict[str, Any]) -> dict[str, Any]:
+        gate = self.store.latest_gate(current["id"], current["current_sha256"])
+        if gate is None or gate["status"] != "pass" or gate["score"] < 80:
+            raise ValueError(
+                "The exact current detection version requires a passing promotion gate"
+            )
+        task = self.validations.get(gate["validation_task_id"])
+        if (
+            task is None
+            or task.status != "complete"
+            or task.query_fingerprint != self._validation_fingerprint(current["content"])
+            or not task.artifact_id
+            or self.evidence.get(task.artifact_id) is None
+        ):
+            raise ValueError(
+                "Promotion-gate evidence is no longer complete and available; run the gate again"
+            )
+        return gate
+
+    @staticmethod
+    def _export_gate(detection: dict[str, Any]) -> dict[str, Any]:
+        gates = [
+            item
+            for item in detection.get("gate_runs", [])
+            if item.get("accepted_at")
+            and item["content_sha256"] == detection["current_sha256"]
+        ]
+        if not gates:
+            return {}
+        gate = gates[0]
+        return {
+            "id": gate["id"],
+            "status": gate["status"],
+            "score": gate["score"],
+            "validation_task_id": gate["validation_task_id"],
+            "baseline_gate_id": gate["baseline_gate_id"],
+            "result_count": gate["result_count"],
+            "baseline_result_count": gate["baseline_result_count"],
+            "result_delta_percent": gate["result_delta_percent"],
+            "accepted_at": gate["accepted_at"],
+        }
+
+    @staticmethod
     def _mitre(values: list[str]) -> list[str]:
         techniques = sorted({str(value).strip().upper() for value in values if str(value).strip()})
         invalid = [value for value in techniques if not MITRE_TECHNIQUE.fullmatch(value)]
@@ -301,6 +709,15 @@ class DetectionService:
         throttle = int(schedule.get("throttle_seconds", 0))
         if not 0 <= throttle <= 86400:
             raise ValueError("Detection throttle must be between 0 and 86400 seconds")
+        testing = DetectionService._default_testing(content)
+        if testing["expected_result"] not in {"any", "zero", "nonzero"}:
+            raise ValueError("Expected result must be any, zero, or nonzero")
+        if not 1 <= testing["validation_row_limit"] <= 500:
+            raise ValueError("Detection validation row limits must be between 1 and 500")
+        if not 0 <= testing["max_result_count"] <= 10_000_000:
+            raise ValueError("Maximum result count is outside the supported range")
+        if not 0 <= testing["max_count_delta_percent"] <= 10_000:
+            raise ValueError("Maximum baseline drift is outside the supported range")
 
     @staticmethod
     def _yaml(detection: dict[str, Any]) -> str:
@@ -308,6 +725,7 @@ class DetectionService:
         classification = content["classification"]
         schedule = content["schedule"]
         evidence = content["evidence"]
+        testing = DetectionService._default_testing(content)
 
         def quote(value: Any) -> str:
             return json.dumps(value, ensure_ascii=False)
@@ -341,6 +759,12 @@ class DetectionService:
                 f"  result_count: {evidence['result_count']}",
                 f"  completed_at: {quote(evidence['completed_at'])}",
                 f"  evidence_refs: {json.dumps(evidence['evidence_refs'])}",
+                "testing:",
+                f"  expected_result: {quote(testing['expected_result'])}",
+                f"  required_fields: {json.dumps(testing['required_fields'])}",
+                f"  validation_row_limit: {testing['validation_row_limit']}",
+                f"  max_result_count: {testing['max_result_count']}",
+                f"  max_count_delta_percent: {testing['max_count_delta_percent']}",
                 "deployment:",
                 "  enabled: false",
                 '  authority: "review-package-only"',
@@ -378,6 +802,8 @@ class DetectionService:
         content = detection["content"]
         classification = content["classification"]
         evidence = content["evidence"]
+        testing = DetectionService._default_testing(content)
+        gate = DetectionService._export_gate(detection)
         return "\n".join(
             [
                 f"# {content['title']}",
@@ -413,6 +839,18 @@ class DetectionService:
                 f"- Preserved artifact: `{evidence['artifact_id']}`",
                 f"- Validation result count: {evidence['result_count']}",
                 f"- Evidence references: {', '.join(evidence['evidence_refs']) or 'none'}",
+                "",
+                "## Promotion gate contract",
+                "",
+                f"- Expected result: `{testing['expected_result']}`",
+                f"- Required fields: {', '.join(testing['required_fields']) or 'none'}",
+                f"- Validation row limit: {testing['validation_row_limit']}",
+                f"- Maximum result count: "
+                f"{testing['max_result_count'] or 'unlimited'}",
+                f"- Maximum count drift: {testing['max_count_delta_percent']}%",
+                f"- Accepted gate: `{gate.get('id', 'not accepted')}`",
+                f"- Gate score: {gate.get('score', 'not available')}",
+                f"- Gate validation: `{gate.get('validation_task_id', 'not available')}`",
                 "",
                 "## Deployment boundary",
                 "",
