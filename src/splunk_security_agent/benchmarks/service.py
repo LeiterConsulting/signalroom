@@ -40,12 +40,14 @@ class GoldenBenchmarkService:
         feedback: Any,
         store: GoldenBenchmarkStore,
         runtime_root: Path | str,
+        model_trust: Any | None = None,
     ):
         self.config = config
         self.feedback = feedback
         self.store = store
         self.runtime_root = Path(runtime_root)
         self.runtime_root.mkdir(parents=True, exist_ok=True)
+        self.model_trust = model_trust
 
     def overview(self) -> dict[str, Any]:
         settings = self.config.load()
@@ -94,8 +96,17 @@ class GoldenBenchmarkService:
         if not profile.enabled:
             raise ValueError("The selected model profile is disabled")
         baseline = self.store.baseline()
+        artifact_binding = {}
+        if self.model_trust is not None:
+            artifact_binding = self.model_trust.assess(
+                await self.model_trust.observe(profile.id, verify_files=True)
+            )
         run = self.store.create_run(
-            suite_version(), profile.id, profile.model, self._prompt_version()
+            suite_version(),
+            profile.id,
+            profile.model,
+            self._prompt_version(),
+            artifact_binding,
         )
         try:
             await report_progress(
@@ -204,6 +215,8 @@ class GoldenBenchmarkService:
             gate = self._promotion_gate(
                 scenario_results, score, pass_rate, critical_failures, feedback, comparison
             )
+            if self.model_trust is not None:
+                gate = self.model_trust.gate(gate, artifact_binding)
             completed = self.store.complete(
                 run["id"],
                 score=score,

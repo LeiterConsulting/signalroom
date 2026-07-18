@@ -81,3 +81,14 @@ def test_optional_rbac_is_visible_and_keyboard_operable() -> None:
     assert "await loadAuthStatus()" in APP_JS
     assert "if (state.auth.enabled && !state.auth.authenticated) return" in APP_JS
     assert ".access-user-controls" in STYLES_CSS
+
+
+def test_model_artifact_trust_is_explicit_and_audit_first() -> None:
+    assert 'id="modelTrustPanel"' in INDEX_HTML
+    assert 'id="modelTrustPolicyForm"' in INDEX_HTML
+    assert '<option value="audit">Audit only</option>' in INDEX_HTML
+    assert "Approve exact artifact" in APP_JS
+    assert "future digest or revision change" in APP_JS
+    assert "publisher signature or a software-vulnerability verdict" in INDEX_HTML
+    assert "[data-approve-model-artifact]" in APP_JS
+    assert ".model-trust-card.approved" in STYLES_CSS

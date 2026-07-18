@@ -28,11 +28,13 @@ class ModelTournamentService:
         benchmarks: GoldenBenchmarkService,
         benchmark_store: GoldenBenchmarkStore,
         store: ModelTournamentStore,
+        model_trust: Any | None = None,
     ):
         self.config = config
         self.benchmarks = benchmarks
         self.benchmark_store = benchmark_store
         self.store = store
+        self.model_trust = model_trust
 
     def overview(self) -> dict[str, Any]:
         settings = self.config.load()
@@ -274,7 +276,7 @@ class ModelTournamentService:
         )
         return self._public(saved)
 
-    def promote(
+    async def promote(
         self, tournament_id: str, profile_id: str, fingerprint: str
     ) -> dict[str, Any]:
         tournament = self.store.get(tournament_id)
@@ -314,6 +316,13 @@ class ModelTournamentService:
         )
         if profile is None or profile.model != candidate_run["model"]:
             raise ValueError("The winning model revision changed; run a fresh tournament")
+        artifact_trust = None
+        if self.model_trust is not None:
+            artifact_trust = await self.model_trust.assert_binding(
+                profile_id,
+                candidate_run.get("artifact_binding") or {},
+                "tournament promotion",
+            )
         before_sha = self._settings_sha(settings)
         previous_baseline = self.benchmark_store.baseline()
         setattr(settings, target, profile_id)
@@ -336,6 +345,15 @@ class ModelTournamentService:
             ),
             config_before_sha256=before_sha,
             config_after_sha256=after_sha,
+            artifact_fingerprint=str(
+                (artifact_trust or candidate_run.get("artifact_binding") or {}).get(
+                    "identity_fingerprint"
+                )
+                or ""
+            ),
+            attestation_id=str(
+                ((artifact_trust or {}).get("attestation") or {}).get("id") or ""
+            ),
         )
         return {
             "promotion": promotion,
@@ -350,7 +368,7 @@ class ModelTournamentService:
             },
         }
 
-    def rollback(self, promotion_id: str) -> dict[str, Any]:
+    async def rollback(self, promotion_id: str) -> dict[str, Any]:
         promotion = self.store.get_promotion(promotion_id)
         if promotion is None:
             raise KeyError(f"Unknown model promotion: {promotion_id}")
@@ -383,6 +401,10 @@ class ModelTournamentService:
         )
         if previous is None:
             raise ValueError("The previous routing profile is no longer available")
+        if self.model_trust is not None:
+            await self.model_trust.require_profile(
+                previous.id, "tournament rollback"
+            )
         setattr(settings, target, previous.id)
         self.config.save(settings)
         previous_baseline_id = promotion["previous_baseline_run_id"] or None
@@ -472,6 +494,12 @@ class ModelTournamentService:
                     "feedback_total": int(feedback.get("total", 0)),
                     "feedback_positive_rate": feedback.get("positive_rate"),
                     "gate_ready": bool(run.get("gate", {}).get("ready")),
+                    "artifact_fingerprint": str(
+                        (run.get("artifact_binding") or {}).get(
+                            "identity_fingerprint"
+                        )
+                        or ""
+                    ),
                     "gate_blockers": list(run.get("gate", {}).get("blockers") or []),
                     "eligible": (
                         run["status"] == "complete"
@@ -697,6 +725,12 @@ class ModelTournamentService:
                     "pass_rate": run["pass_rate"],
                     "critical_failures": run["critical_failures"],
                     "gate_ready": bool(run.get("gate", {}).get("ready")),
+                    "artifact_fingerprint": str(
+                        (run.get("artifact_binding") or {}).get(
+                            "identity_fingerprint"
+                        )
+                        or ""
+                    ),
                 }
                 for run in sorted(runs, key=lambda item: item["profile_id"])
             ],

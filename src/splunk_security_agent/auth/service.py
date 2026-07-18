@@ -22,6 +22,7 @@ ADMIN_MUTATION_PREFIXES = (
     "/api/auth/users",
     "/api/model-setup/pull",
     "/api/model-setup/activate",
+    "/api/model-trust",
     "/api/detection-repository/",
 )
 ADMIN_MUTATION_PATHS = {

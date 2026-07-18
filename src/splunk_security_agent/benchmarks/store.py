@@ -23,7 +23,8 @@ class GoldenBenchmarkStore:
                     score REAL NOT NULL, pass_rate REAL NOT NULL, critical_failures INTEGER NOT NULL,
                     gate TEXT NOT NULL, feedback TEXT NOT NULL, comparison TEXT NOT NULL,
                     is_baseline INTEGER NOT NULL, error TEXT NOT NULL, created_at TEXT NOT NULL,
-                    started_at TEXT, completed_at TEXT
+                    started_at TEXT, completed_at TEXT,
+                    artifact_binding TEXT NOT NULL DEFAULT '{}'
                 );
                 CREATE TABLE IF NOT EXISTS benchmark_results (
                     id TEXT PRIMARY KEY, run_id TEXT NOT NULL, scenario_id TEXT NOT NULL,
@@ -40,6 +41,15 @@ class GoldenBenchmarkStore:
                     ON benchmark_results(run_id, scenario_id);
                 """
             )
+            columns = {
+                str(row["name"])
+                for row in db.execute("PRAGMA table_info(benchmark_runs)").fetchall()
+            }
+            if "artifact_binding" not in columns:
+                db.execute(
+                    "ALTER TABLE benchmark_runs ADD COLUMN "
+                    "artifact_binding TEXT NOT NULL DEFAULT '{}'"
+                )
             now = datetime.now(UTC).isoformat()
             db.execute(
                 """UPDATE benchmark_runs SET status='error',
@@ -55,7 +65,12 @@ class GoldenBenchmarkStore:
         return connection
 
     def create_run(
-        self, suite_version: str, profile_id: str, model: str, prompt_version: str
+        self,
+        suite_version: str,
+        profile_id: str,
+        model: str,
+        prompt_version: str,
+        artifact_binding: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         run_id = str(uuid4())
         now = datetime.now(UTC).isoformat()
@@ -64,7 +79,8 @@ class GoldenBenchmarkStore:
                 """INSERT INTO benchmark_runs
                 (id,suite_version,profile_id,model,prompt_version,status,score,pass_rate,
                 critical_failures,gate,feedback,comparison,is_baseline,error,created_at,
-                started_at,completed_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                started_at,completed_at,artifact_binding)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     run_id,
                     suite_version,
@@ -83,6 +99,7 @@ class GoldenBenchmarkStore:
                     now,
                     now,
                     None,
+                    json.dumps(artifact_binding or {}, default=str),
                 ),
             )
         result = self.get(run_id)
@@ -234,6 +251,7 @@ class GoldenBenchmarkStore:
             "created_at": row["created_at"],
             "started_at": row["started_at"],
             "completed_at": row["completed_at"],
+            "artifact_binding": json.loads(row["artifact_binding"]),
             "results": [
                 {
                     "scenario_id": item["scenario_id"],

@@ -19,6 +19,7 @@ The local prototype defaults to localhost, opt-in demo mode, local specialist ex
 - Demo mode allows validation without live infrastructure.
 - SecureBERT downloads are explicit, use safetensor snapshots, resolve an immutable publisher revision, and record a local installation manifest.
 - Model freshness checks are read-only. They compare recorded immutable revisions and local Ollama digests without pulling, loading, unloading, or swapping models; unprovable provenance is labeled untracked.
+- Model artifact trust defaults to non-blocking audit mode. Exact publisher, immutable revision, runtime, and local content digest identities can receive an explicit operator approval signed with a persistent local Ed25519 key. Enforced mode requires trusted active routes and fails closed for activation, accepted benchmark baselines, tournament promotion, and rollback; artifact drift requires re-evaluation and re-approval.
 - Splunk MLTK scans use only `listmodels`, retain local definition fingerprints, and perform zero model writes. Dependency comparisons are explicitly scoped to SignalRoom's configured Ollama endpoint.
 - Continuous assurance is opt-in, single-concurrency, and protected by hard per-run MCP call and UTC daily run ceilings. It stores local notifications but never sends them externally or auto-approves validation SPL.
 - Interrupted assurance runs restart as fresh read-only collections; explicit cancellation is persisted and prevents recovery from silently resuming work.
@@ -51,7 +52,7 @@ The local prototype defaults to localhost, opt-in demo mode, local specialist ex
 - The app does not terminate HTTPS itself. Session cookies receive the `Secure` attribute only when the request scheme is HTTPS; configure and validate trusted proxy behavior in the deployment environment.
 - SPL command blocking is a guardrail, not a parser or authorization boundary. Enforce read-only roles in Splunk.
 - Model output can contain incorrect or unsafe recommendations. Human verification remains required.
-- Hugging Face model loading remains a supply-chain decision. Production deployments should add publisher/revision allowlists and artifact signatures around the recorded immutable revision.
+- Model approval is a local operator attestation, not a publisher signature, license review, malware scan, training-data assessment, or vulnerability verdict. Protect and independently inventory `data/model_trust_signing.key`; changing or losing it invalidates the local approval authority.
 - The audit chain is local and tamper-evident, not remotely immutable. A fully compromised host can modify the database and application together; production should export verified events to a dedicated audit system.
 - The local detection signing key is only as trustworthy as the SignalRoom host and data directory. Back it up securely, restrict filesystem access, and verify its public-key fingerprint through an independent channel before pinning it in repository policy.
 - Enabling repository handoff grants SignalRoom narrow write authority over a configured local Git repository. Repository filesystem permissions, Git credentials, remote branch protections, CODEOWNERS, required CI, and reviewer policy remain external enforcement boundaries.

@@ -55,11 +55,21 @@ request-scoped audit events inherit the named username.
 
 Profiles declare a model source, identifier, task, endpoint, provenance label, and context limit. The router chooses a security reasoning profile only for security-domain work. Embedding, reranking, and NER models are separate capabilities rather than pretend chat models. Broad FTS5 + bi-encoder candidates can be rescored by the optional local SecureBERT cross-encoder before evidence reaches chat or discovery synthesis. Hugging Face is the source for SecureBERT snapshots; `specialist_runtime` determines whether those capabilities execute locally through Transformers or through optional hosted inference.
 
+`ModelTrustService` forms a separate local supply-chain authority. It observes the publisher, immutable source
+revision, runtime, and local content digest for each enabled profile. Explicit approvals sign that canonical
+identity with a persistent Ed25519 key and retain both a SQLite record and portable JSON/signature files. Audit
+mode reports unapproved, unverifiable, publisher-blocked, and drifted artifacts without disrupting a POC.
+Enforcement is an admin promotion that first requires both active routing profiles to be trusted, then guards
+activation, baseline acceptance, tournament promotion, and rollback. The approval signature represents the local
+operator's decision; it is not represented as a publisher signature or vulnerability assessment.
+
 `ModelTournamentService` treats routing changes as a separate authority. It orchestrates multiple immutable golden
 runs, applies deterministic quality, latency, and established-feedback scoring, and constructs blind comparisons
-for the two highest-ranked complete profiles. A promotion fingerprint covers the suite, prompts, candidate model
-revisions and run IDs, blind-review mapping and decisions, prior route assignment, and reviewed winner. Promotion
-atomically changes the configured route and accepted regression baseline only after an exact fingerprint match.
+for the two highest-ranked complete profiles. Every golden run captures the exact observed model-artifact identity.
+A promotion fingerprint covers the suite, prompts, candidate model revisions, artifact fingerprints and run IDs,
+blind-review mapping and decisions, prior route assignment, and reviewed winner. Promotion re-observes the local
+artifact and atomically changes the configured route and accepted regression baseline only after the artifact
+binding and exact tournament fingerprint both match.
 Rollback fails closed if either value has changed since promotion.
 
 ### Deterministic routes precede agentic behavior
@@ -270,8 +280,7 @@ SignalRoom is an MCP client of a Splunk MCP server and an MCP server to agent ho
 
 ## Next production increments
 
-1. Model publisher/revision allowlists and signed model artifacts around the implemented evaluation gates
-2. Search cost estimation, per-instance concurrency limits, and Splunk workload controls
-3. Broader operator-authored evaluation suites beyond the durable golden, tournament, and feedback history
-4. Audit events sent to a dedicated Splunk index
-5. OIDC/MFA integration, account recovery, and tenant boundaries beyond local RBAC
+1. Search cost estimation, per-instance concurrency limits, and Splunk workload controls
+2. Broader operator-authored evaluation suites beyond the durable golden, tournament, and feedback history
+3. Audit events sent to a dedicated Splunk index
+4. OIDC/MFA integration, account recovery, and tenant boundaries beyond local RBAC

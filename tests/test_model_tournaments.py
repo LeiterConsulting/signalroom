@@ -37,7 +37,17 @@ class FakeGoldenBenchmarks:
     ) -> dict[str, Any]:
         del raise_errors
         profile = next(item for item in self.config.load().models if item.id == profile_id)
-        run = self.store.create_run("suite-contract", profile.id, profile.model, "prompt-contract")
+        run = self.store.create_run(
+            "suite-contract",
+            profile.id,
+            profile.model,
+            "prompt-contract",
+            {
+                "identity_fingerprint": profile.id.encode().hex().ljust(64, "0")[:64],
+                "status": "approved",
+                "trusted": True,
+            },
+        )
         score = self.SCORES[profile_id]
         for index, scenario in enumerate(GOLDEN_SCENARIOS):
             self.store.add_result(
@@ -80,12 +90,14 @@ class FakeGoldenBenchmarks:
         )
 
 
-def tournament_service(tmp_path):
+def tournament_service(tmp_path, model_trust=None):
     config = ConfigStore(tmp_path / "config")
     benchmark_store = GoldenBenchmarkStore(tmp_path / "benchmarks.db")
     tournaments = ModelTournamentStore(tmp_path / "tournaments.db")
     benchmarks = FakeGoldenBenchmarks(config, benchmark_store)
-    service = ModelTournamentService(config, benchmarks, benchmark_store, tournaments)
+    service = ModelTournamentService(
+        config, benchmarks, benchmark_store, tournaments, model_trust
+    )
     return config, benchmark_store, tournaments, service
 
 
@@ -153,13 +165,13 @@ async def test_exact_tournament_promotion_and_rollback_restore_route_and_baselin
     tournament = await complete_review(service, store, tournament)
 
     with pytest.raises(ValueError, match="fingerprint"):
-        service.promote(
+        await service.promote(
             tournament["id"],
             "foundation-sec-instruct",
             "0" * 64,
         )
 
-    promoted = service.promote(
+    promoted = await service.promote(
         tournament["id"],
         "foundation-sec-instruct",
         tournament["fingerprint"],
@@ -170,7 +182,7 @@ async def test_exact_tournament_promotion_and_rollback_restore_route_and_baselin
     assert promoted["promotion"]["previous_profile_id"] == "foundation-sec"
     assert benchmark_store.baseline()["profile_id"] == "foundation-sec-instruct"
 
-    rolled_back = service.rollback(promoted["promotion"]["id"])
+    rolled_back = await service.rollback(promoted["promotion"]["id"])
 
     assert rolled_back["promotion"]["status"] == "rolled-back"
     assert config.load().security_reasoning_model == "foundation-sec"
@@ -196,8 +208,56 @@ async def test_promotion_fails_closed_when_assignment_changes_after_tournament(
     config.save(settings)
 
     with pytest.raises(ValueError, match="changed after this tournament"):
-        service.promote(
+        await service.promote(
             tournament["id"],
             "foundation-sec-instruct",
             tournament["fingerprint"],
         )
+
+
+@pytest.mark.asyncio
+async def test_promotion_rechecks_exact_evaluated_artifact(tmp_path, monkeypatch):
+    class FakeTrust:
+        def __init__(self):
+            self.bindings = []
+
+        async def assert_binding(self, profile_id, binding, purpose):
+            self.bindings.append((profile_id, binding, purpose))
+            return {
+                **binding,
+                "attestation": {"id": "signed-approval"},
+            }
+
+    trust = FakeTrust()
+    _config, _benchmark_store, store, service = tournament_service(tmp_path, trust)
+    monkeypatch.setattr(
+        "splunk_security_agent.benchmarks.tournament.suite_version",
+        lambda: "suite-contract",
+    )
+    tournament = await service.run(
+        ["foundation-sec", "foundation-sec-instruct"],
+        "security_reasoning_model",
+    )
+    tournament = await complete_review(service, store, tournament)
+    result = await service.promote(
+        tournament["id"],
+        "foundation-sec-instruct",
+        tournament["fingerprint"],
+    )
+
+    expected = (
+        b"foundation-sec-instruct".hex().ljust(64, "0")[:64]
+    )
+    assert trust.bindings == [
+        (
+            "foundation-sec-instruct",
+            {
+                "identity_fingerprint": expected,
+                "status": "approved",
+                "trusted": True,
+            },
+            "tournament promotion",
+        )
+    ]
+    assert result["promotion"]["artifact_fingerprint"] == expected
+    assert result["promotion"]["attestation_id"] == "signed-approval"

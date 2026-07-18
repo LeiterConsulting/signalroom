@@ -39,6 +39,7 @@ from .discovery import DiscoveryJobService, DiscoveryJobStore, DiscoveryPipeline
 from .feedback import AnalystFeedbackStore
 from .mcp_server import MCPServer
 from .model_setup import ModelSetupService
+from .model_trust import ModelTrustService, ModelTrustStore
 from .providers import ModelProviderError, ModelRouter
 from .rag import EvidenceStore
 from .schemas import (
@@ -82,10 +83,12 @@ from .schemas import (
     DiscoveryRequest,
     GoldenBenchmarkRunCreate,
     ModelActivateRequest,
+    ModelArtifactApproval,
     ModelPullRequest,
     ModelTournamentPromotionRequest,
     ModelTournamentReviewRequest,
     ModelTournamentRunCreate,
+    ModelTrustPolicyUpdate,
     QueryIntelligenceRequest,
     SettingsUpdate,
     ValidationTaskCreate,
@@ -108,6 +111,13 @@ DATA = Path(os.getenv("SIGNALROOM_DATA_DIR", ROOT / "data")).resolve()
 class Services:
     def __init__(self):
         self.config = ConfigStore(DATA)
+        self.model_trust_store = ModelTrustStore(DATA / "model_trust.db")
+        self.model_trust = ModelTrustService(
+            self.config,
+            self.model_trust_store,
+            DATA / "model_trust_signing.key",
+            DATA / "model_attestations",
+        )
         self.evidence = EvidenceStore(DATA / "evidence.db")
         self.feedback = AnalystFeedbackStore(DATA / "feedback.db")
         self.benchmark_store = GoldenBenchmarkStore(DATA / "benchmarks.db")
@@ -116,6 +126,7 @@ class Services:
             self.feedback,
             self.benchmark_store,
             DATA / "benchmark_runtime",
+            self.model_trust,
         )
         self.tournament_store = ModelTournamentStore(DATA / "model_tournaments.db")
         self.model_tournaments = ModelTournamentService(
@@ -123,6 +134,7 @@ class Services:
             self.benchmarks,
             self.benchmark_store,
             self.tournament_store,
+            self.model_trust,
         )
         self.cases = CaseStore(DATA / "cases.db", DATA / "case_exports")
         self.validation_store = ValidationStore(DATA / "validations.db")
@@ -160,7 +172,9 @@ class Services:
         self.connection_diagnostics = SplunkConnectionDiagnostics(self.connection_diagnostics_store)
         self.discovery_lock = asyncio.Lock()
         self.benchmark_lock = asyncio.Lock()
-        self.model_setup = ModelSetupService(self.config, self.evidence)
+        self.model_setup = ModelSetupService(
+            self.config, self.evidence, self.model_trust
+        )
         self._fingerprint = ""
         self._splunk: Any = None
         self._agent: SecurityAgent | None = None
@@ -673,12 +687,84 @@ async def model_updates() -> dict[str, Any]:
     return await services.model_setup.check_updates()
 
 
+@app.get("/api/model-trust")
+async def model_trust_overview(verify_files: bool = False) -> dict[str, Any]:
+    return await services.model_trust.overview(verify_files=verify_files)
+
+
+@app.put("/api/model-trust/policy")
+async def update_model_trust_policy(
+    value: ModelTrustPolicyUpdate,
+) -> dict[str, Any]:
+    try:
+        result = await services.model_trust.update_policy(value)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    services.audit.record(
+        "model.trust.policy.updated",
+        "update",
+        target_type="model-trust-policy",
+        target_id="local",
+        summary="The local model publisher and artifact enforcement policy changed.",
+        metadata=result,
+    )
+    return await services.model_trust.overview()
+
+
+@app.post("/api/model-trust/profiles/{profile_id}/approve")
+async def approve_model_artifact(
+    profile_id: str, value: ModelArtifactApproval, request: Request
+) -> dict[str, Any]:
+    principal = getattr(request.state, "principal", {}) or {}
+    actor = str(principal.get("username") or "local-operator")
+    try:
+        result = await services.model_trust.approve(
+            profile_id, value.expected_fingerprint, actor
+        )
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    services.audit.record(
+        "model.artifact.approved",
+        "approve",
+        target_type="model-profile",
+        target_id=profile_id,
+        summary="An exact local model artifact received an operator-signed approval.",
+        metadata={
+            "identity_fingerprint": result["identity_fingerprint"],
+            "publisher": result["publisher"],
+            "attestation_id": (result.get("attestation") or {}).get("id", ""),
+        },
+    )
+    return result
+
+
+@app.post("/api/model-trust/attestations/{attestation_id}/revoke")
+async def revoke_model_artifact(attestation_id: str) -> dict[str, Any]:
+    try:
+        result = services.model_trust.revoke(attestation_id)
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    services.audit.record(
+        "model.artifact.approval.revoked",
+        "revoke",
+        target_type="model-attestation",
+        target_id=attestation_id,
+        summary="A local model artifact approval was revoked.",
+        metadata=result,
+    )
+    return result
+
+
 @app.post("/api/model-setup/pull", status_code=202)
 async def pull_model(request: ModelPullRequest) -> dict[str, Any]:
     try:
         return services.model_setup.start_pull(request.profile_id)
     except KeyError as exc:
         raise HTTPException(404, str(exc)) from exc
+    except (PermissionError, ValueError) as exc:
+        raise HTTPException(409, str(exc)) from exc
 
 
 @app.post("/api/model-setup/activate")
@@ -701,6 +787,8 @@ async def activate_model(request: ModelActivateRequest) -> dict[str, Any]:
         return result
     except KeyError as exc:
         raise HTTPException(404, str(exc)) from exc
+    except (PermissionError, ValueError) as exc:
+        raise HTTPException(409, str(exc)) from exc
     except Exception as exc:
         raise HTTPException(502, str(exc)) from exc
 
@@ -853,6 +941,17 @@ async def run_golden_benchmark(request: GoldenBenchmarkRunCreate) -> StreamingRe
 
 @app.post("/api/benchmarks/runs/{run_id}/baseline")
 async def accept_benchmark_baseline(run_id: str) -> dict[str, Any]:
+    candidate = services.benchmark_store.get(run_id)
+    if candidate is None:
+        raise HTTPException(404, "Benchmark run not found")
+    try:
+        trust = await services.model_trust.assert_binding(
+            candidate["profile_id"],
+            candidate.get("artifact_binding") or {},
+            "golden baseline acceptance",
+        )
+    except (PermissionError, ValueError) as exc:
+        raise HTTPException(409, str(exc)) from exc
     result = services.benchmark_store.accept_baseline(run_id)
     if result is None:
         raise HTTPException(409, "Only a completed, promotion-ready run can become the baseline")
@@ -867,6 +966,7 @@ async def accept_benchmark_baseline(run_id: str) -> dict[str, Any]:
             "score": result["score"],
             "suite_version": result["suite_version"],
             "prompt_version": result["prompt_version"],
+            "artifact_fingerprint": trust.get("identity_fingerprint", ""),
         },
     )
     return result
@@ -914,10 +1014,12 @@ async def promote_model_tournament(
     tournament_id: str, request: ModelTournamentPromotionRequest
 ) -> dict[str, Any]:
     try:
-        result = services.model_tournaments.promote(tournament_id, request.profile_id, request.fingerprint)
+        result = await services.model_tournaments.promote(
+            tournament_id, request.profile_id, request.fingerprint
+        )
     except KeyError as exc:
         raise HTTPException(404, str(exc)) from exc
-    except ValueError as exc:
+    except (PermissionError, ValueError) as exc:
         raise HTTPException(409, str(exc)) from exc
     services.refresh(force=True)
     promotion = result["promotion"]
@@ -942,10 +1044,10 @@ async def promote_model_tournament(
 @app.post("/api/benchmarks/promotions/{promotion_id}/rollback")
 async def rollback_model_promotion(promotion_id: str) -> dict[str, Any]:
     try:
-        result = services.model_tournaments.rollback(promotion_id)
+        result = await services.model_tournaments.rollback(promotion_id)
     except KeyError as exc:
         raise HTTPException(404, str(exc)) from exc
-    except ValueError as exc:
+    except (PermissionError, ValueError) as exc:
         raise HTTPException(409, str(exc)) from exc
     services.refresh(force=True)
     promotion = result["promotion"]

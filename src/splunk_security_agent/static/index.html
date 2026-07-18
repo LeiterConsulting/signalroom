@@ -317,6 +317,19 @@
           <div class="button-row"><button class="button ghost" id="checkModelUpdates">Check for updates</button><button class="button primary" id="configureModels">Configure profiles</button></div>
         </div>
         <section class="model-freshness" id="modelFreshness" aria-live="polite" hidden></section>
+        <section class="model-trust-panel" id="modelTrustPanel" aria-labelledby="modelTrustTitle">
+          <header>
+            <div><span>LOCAL MODEL SUPPLY CHAIN</span><h3 id="modelTrustTitle">Approve the artifact you actually evaluated</h3><p>SignalRoom observes immutable Hub revisions and local content digests, then binds an explicit operator approval to that exact artifact with a local Ed25519 signature.</p></div>
+            <span id="modelTrustMode" class="subtle-pill">Loading policy</span>
+          </header>
+          <form id="modelTrustPolicyForm" class="model-trust-policy">
+            <label><span>Enforcement mode</span><select id="modelTrustPolicyMode"><option value="audit">Audit only</option><option value="enforce">Enforce approved artifacts</option></select><small>Audit mode reports drift without blocking the POC workflow.</small></label>
+            <label><span>Allowed publishers</span><input id="modelTrustPublishers" autocomplete="off" spellcheck="false" aria-describedby="modelTrustPublisherHelp"><small id="modelTrustPublisherHelp">Comma-separated exact organization names.</small></label>
+            <button class="button primary" type="submit">Save trust policy</button>
+          </form>
+          <div class="model-trust-profiles" id="modelTrustProfiles" aria-live="polite"><div class="empty-inline compact-empty">Observing local model artifacts…</div></div>
+          <details class="model-trust-contract"><summary>What this signature does—and does not—prove</summary><p id="modelTrustContract">A SignalRoom signature proves local operator approval of an exact observed artifact. It is not a publisher signature or a software-vulnerability verdict.</p><p>Enforcement fails closed for model activation, accepted golden baselines, tournament promotion, and rollback. A changed digest must be evaluated and approved again.</p></details>
+        </section>
         <div class="routing-map"><span>Operator question</span><b aria-hidden="true">→</b><span>Task router</span><b aria-hidden="true">→</b><div><em>General agent</em><em>Security reasoning</em><em>Cyber retrieval</em><em>Evidence reranking</em><em>Entity extraction</em></div></div>
         <div class="model-grid" id="modelGrid"></div>
         <section class="model-tournament" aria-labelledby="modelTournamentTitle">

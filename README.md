@@ -21,6 +21,7 @@ This is a focused reimplementation inspired by [LeiterConsulting/splunk-discover
 - Deterministic SPL cost and reuse intelligence before approval, including safer staged contracts and exact-result reuse
 - Local analyst feedback and model/task outcome scorecards with no telemetry export
 - Versioned local golden investigations with isolated evidence, instrumented tool selection, durable baselines, and explicit promotion gates
+- Audit-first model publisher allowlists and local Ed25519 approvals bound to exact model revisions and content digests
 - Opt-in generic JSON and Slack Incoming Webhook adapters with exact redaction previews, hash-bound approval, guarded routing, and a tamper-evident local audit chain
 - Evidence-bound detection-as-code projects with immutable versions, exact-hash review, case linkage, and disabled-by-default Splunk packages
 - Ollama chat and tool-capable model support
@@ -166,6 +167,17 @@ installs are reported as untracked until explicitly refreshed; generic Ollama re
 manual refresh because Ollama does not expose a non-mutating remote freshness API. The check never pulls,
 updates, loads, unloads, or swaps a model.
 
+The **Models → Local model supply chain** panel observes the exact installed artifact separately from
+source freshness. SignalRoom defaults to non-blocking **audit** mode with `cisco-ai`, `fdtn-ai`, and
+`ollama-library` on the publisher allowlist. An administrator can verify the current files and explicitly
+approve that identity; SignalRoom signs a canonical attestation with a host-local Ed25519 key. Enabling
+**enforce** mode requires valid approvals for both currently routed chat profiles and then fails closed for
+activation, accepted golden baselines, tournament promotion, and rollback. A digest or immutable revision
+change is reported as drift and requires a fresh evaluation and approval. This signature proves local
+operator approval—not publisher authorship, license acceptance, or vulnerability-free software. For a
+plain Ollama library name, `ollama-library` is the configured namespace assertion; the approved local
+content digest remains the identity boundary.
+
 The **Models → Scan MLTK models** action inventories models stored inside the connected Splunk instance
 using `| listmodels | head 500`. It records new, changed, unchanged, and previously observed-but-missing
 definitions and identifies declared Ollama dependencies. A backing model that is not observed is labeled
@@ -188,9 +200,11 @@ requires an overall score of 80, an 80% scenario pass rate, no scenario below 70
 material regression from the accepted baseline. Once a profile has at least five analyst ratings, a positive
 outcome rate below 60% also blocks promotion; smaller samples remain visible but directional.
 
-Runs, prompt and suite versions, per-control scores, synthetic responses, and baseline comparisons are stored in
-`data/benchmarks.db`. Passing a gate does not automatically change any configured model or prompt. **Accept as
-baseline** is a separate analyst action so quality policy remains explicit and reviewable.
+Runs, prompt and suite versions, per-control scores, synthetic responses, baseline comparisons, and the
+observed artifact fingerprint are stored in `data/benchmarks.db`. Passing a gate does not automatically
+change any configured model or prompt. **Accept as baseline** is a separate analyst action and rechecks the
+installed artifact against that evaluation. In enforcement mode, the exact artifact must also have a valid
+operator-signed approval.
 
 ### Local model tournament and controlled promotion
 
@@ -205,7 +219,8 @@ hidden until every comparison is recorded. Blind preference can adjust the final
 so human review informs the decision without overriding a critical safety failure or a blocked promotion gate.
 Incomplete review produces no promotion fingerprint.
 
-After review, SignalRoom hashes the exact suite and prompt versions, candidate run IDs and model revisions, scores,
+After review, SignalRoom hashes the exact suite and prompt versions, candidate run IDs, model revisions and local
+artifact fingerprints, scores,
 blind pair mappings and choices, route target, prior assignment, and winner. **Promote reviewed winner** succeeds
 only when that 64-character fingerprint still matches, the winner still has a passing gate, the model revision and
 route assignment are unchanged, and the tournament has not already been promoted. Promotion changes only the chosen
@@ -293,6 +308,7 @@ src/splunk_security_agent/
   delivery/        redacted webhook policy, approval state, attempts, and retries
   detections/      evidence-bound versions, exact-hash review, and safe local exports
   cases/           durable case records, evidence cockpit, timelines, and handoff exports
+  model_trust/     publisher policy, artifact identity, signed approvals, and enforcement
   providers/       Ollama, local Transformers, Hugging Face cloud, and capability routing
   rag/             SQLite evidence and chunk retrieval
   splunk/          tolerant MCP client, layered connection diagnostics, and safe demo client
@@ -557,10 +573,10 @@ tamper-evident local record, not an external immutable audit sink.
 Splunk SOAR now has a duplicate-safe, create-container-only adapter with exact-payload approval, automation disabled,
 no artifacts, durable correlation, self-signed/private-CA transport support, and a read-only container-options test.
 Correlated Jira issues retain explicit read-only reconciliation and immutable local drift history. Optional local
-RBAC now gives those actions named role and connection boundaries. Durable manual discovery now preserves progress,
-cancellation, restart recovery, and retained results. The next roadmap increment is publisher/revision allowlists
-and signed model-artifact policy around the existing model evaluation and promotion gates. Cross-model tournaments
-already compare promotion-ready local profiles before an explicitly approved routing change.
+RBAC gives those actions named role and connection boundaries. Durable manual discovery preserves progress,
+cancellation, restart recovery, and retained results. Model evaluation and promotion now carry exact revision and
+digest bindings through operator-signed local attestations. The next roadmap increment is search cost estimation,
+per-instance concurrency limits, and Splunk workload controls.
 
 ### Context
 

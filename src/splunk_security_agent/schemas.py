@@ -123,6 +123,23 @@ class ModelActivateRequest(BaseModel):
     unload_other_signalroom_models: bool = True
 
 
+class ModelTrustPolicyUpdate(BaseModel):
+    mode: Literal["audit", "enforce"] = "audit"
+    allowed_publishers: list[str] = Field(
+        default_factory=lambda: ["cisco-ai", "fdtn-ai", "ollama-library"],
+        min_length=1,
+        max_length=50,
+    )
+
+
+class ModelArtifactApproval(BaseModel):
+    expected_fingerprint: str = Field(
+        min_length=64,
+        max_length=64,
+        pattern=r"^[0-9a-f]{64}$",
+    )
+
+
 class ChatRequest(BaseModel):
     message: str = Field(min_length=1, max_length=20000)
     conversation_id: str | None = None

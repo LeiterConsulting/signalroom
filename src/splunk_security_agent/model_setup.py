@@ -95,9 +95,15 @@ def _models_match(requested: str, actual: str) -> bool:
 class ModelSetupService:
     """Readiness checks and explicit, profile-scoped local model downloads."""
 
-    def __init__(self, config: ConfigStore, evidence: EvidenceStore | None = None):
+    def __init__(
+        self,
+        config: ConfigStore,
+        evidence: EvidenceStore | None = None,
+        model_trust: Any | None = None,
+    ):
         self.config = config
         self.evidence = evidence
+        self.model_trust = model_trust
         self.jobs: dict[str, dict[str, Any]] = {}
         self.context_index_job: dict[str, Any] = {"status": "idle"}
         self.revision_state_path = self.config.root / "model_revisions.json"
@@ -504,6 +510,11 @@ class ModelSetupService:
         )
         if not profile:
             raise KeyError(f"Enabled Ollama profile not found: {profile_id}")
+        trust = (
+            await self.model_trust.require_profile(profile.id, "model activation")
+            if self.model_trust is not None
+            else None
+        )
         endpoint = _ollama_base(profile)
         timeout = httpx.Timeout(connect=10, read=180, write=30, pool=10)
         unloaded: list[str] = []
@@ -577,6 +588,7 @@ class ModelSetupService:
             "loaded_models": loaded_after,
             "unloaded_models": unloaded,
             "endpoint": endpoint,
+            "trust": trust,
         }
 
     def start_pull(self, profile_id: str) -> dict[str, Any]:
@@ -590,6 +602,11 @@ class ModelSetupService:
         )
         if not profile:
             raise KeyError(f"Enabled model profile not found: {profile_id}")
+        source_trust = (
+            self.model_trust.validate_source(profile, "model installation")
+            if self.model_trust is not None
+            else None
+        )
         if profile.provider == "huggingface" and profile.task not in {
             "embedding",
             "ner",
@@ -623,6 +640,7 @@ class ModelSetupService:
             "total": 0,
             "progress": 0,
             "created_at": datetime.now(UTC).isoformat(),
+            "source_trust": source_trust,
         }
         self.jobs[job_id] = job
         asyncio.create_task(self._pull(job_id))
@@ -669,6 +687,10 @@ class ModelSetupService:
                 job["revision_tracking"] = await self._record_ollama_revision(profile)
             except Exception as exc:
                 job["revision_tracking"] = {"tracked": False, "reason": str(exc)}
+            if self.model_trust is not None:
+                job["trust"] = self.model_trust.assess(
+                    await self.model_trust.observe(profile.id, verify_files=True)
+                )
             job.update(status="complete", detail="Model ready", progress=100)
         except (httpx.HTTPError, ValueError, RuntimeError) as exc:
             job.update(status="error", detail=str(exc))
@@ -756,6 +778,13 @@ class ModelSetupService:
                 for item in model_path.rglob("*")
                 if item.is_file() and ".cache" not in item.parts
             )
+            artifact = (
+                await asyncio.to_thread(
+                    self.model_trust.hash_local_artifact, model_path
+                )
+                if self.model_trust is not None
+                else {}
+            )
             (model_path / ".signalroom-model.json").write_text(
                 json.dumps(
                     {
@@ -766,6 +795,8 @@ class ModelSetupService:
                         "bytes": size,
                         "downloaded_at": datetime.now(UTC).isoformat(),
                         "runtime": "local-transformers",
+                        "artifact_sha256": artifact.get("artifact_sha256", ""),
+                        "file_count": artifact.get("file_count", 0),
                     },
                     indent=2,
                 ),
@@ -776,6 +807,10 @@ class ModelSetupService:
             if profile.task == "embedding" and self.evidence is not None:
                 job.update(detail="Indexing SignalRoom Context locally", progress=95)
                 await self._backfill_embeddings(profile, job)
+            if self.model_trust is not None:
+                job["trust"] = self.model_trust.assess(
+                    await self.model_trust.observe(profile.id, verify_files=True)
+                )
             job.update(
                 status="complete",
                 detail="Local specialist ready · no cloud inference required",

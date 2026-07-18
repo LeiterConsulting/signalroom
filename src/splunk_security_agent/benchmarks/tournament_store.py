@@ -49,6 +49,8 @@ class ModelTournamentStore:
                     previous_baseline_run_id TEXT NOT NULL,
                     config_before_sha256 TEXT NOT NULL,
                     config_after_sha256 TEXT NOT NULL,
+                    artifact_fingerprint TEXT NOT NULL DEFAULT '',
+                    attestation_id TEXT NOT NULL DEFAULT '',
                     status TEXT NOT NULL,
                     promoted_at TEXT NOT NULL,
                     rolled_back_at TEXT,
@@ -62,6 +64,16 @@ class ModelTournamentStore:
                     ON model_promotions(target, status);
                 """
             )
+            promotion_columns = {
+                str(row["name"])
+                for row in db.execute("PRAGMA table_info(model_promotions)").fetchall()
+            }
+            for name in ("artifact_fingerprint", "attestation_id"):
+                if name not in promotion_columns:
+                    db.execute(
+                        f"ALTER TABLE model_promotions ADD COLUMN {name} "
+                        "TEXT NOT NULL DEFAULT ''"
+                    )
             now = datetime.now(UTC).isoformat()
             db.execute(
                 """UPDATE model_tournaments
@@ -197,6 +209,8 @@ class ModelTournamentStore:
         previous_baseline_run_id: str,
         config_before_sha256: str,
         config_after_sha256: str,
+        artifact_fingerprint: str = "",
+        attestation_id: str = "",
     ) -> dict[str, Any]:
         promotion_id = str(uuid4())
         now = datetime.now(UTC).isoformat()
@@ -210,8 +224,9 @@ class ModelTournamentStore:
                 """INSERT INTO model_promotions
                 (id,tournament_id,target,profile_id,previous_profile_id,
                 tournament_fingerprint,promoted_run_id,previous_baseline_run_id,
-                config_before_sha256,config_after_sha256,status,promoted_at,rolled_back_at)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                config_before_sha256,config_after_sha256,artifact_fingerprint,
+                attestation_id,status,promoted_at,rolled_back_at)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     promotion_id,
                     tournament_id,
@@ -223,6 +238,8 @@ class ModelTournamentStore:
                     previous_baseline_run_id,
                     config_before_sha256,
                     config_after_sha256,
+                    artifact_fingerprint,
+                    attestation_id,
                     "active",
                     now,
                     None,
@@ -308,6 +325,8 @@ class ModelTournamentStore:
             "previous_baseline_run_id": row["previous_baseline_run_id"],
             "config_before_sha256": row["config_before_sha256"],
             "config_after_sha256": row["config_after_sha256"],
+            "artifact_fingerprint": row["artifact_fingerprint"],
+            "attestation_id": row["attestation_id"],
             "status": row["status"],
             "promoted_at": row["promoted_at"],
             "rolled_back_at": row["rolled_back_at"],

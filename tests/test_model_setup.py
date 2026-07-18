@@ -276,3 +276,16 @@ async def test_activate_swaps_configured_ollama_profiles(monkeypatch, tmp_path):
     assert result["executed_model"].startswith("hf.co/fdtn-ai/Foundation-Sec")
     assert result["unloaded_models"] == ["llama3.1:8b"]
     assert result["loaded_models"] == [result["executed_model"]]
+
+
+@pytest.mark.asyncio
+async def test_activate_fails_before_ollama_when_model_trust_blocks(tmp_path):
+    class BlockingTrust:
+        async def require_profile(self, profile_id, purpose):
+            raise PermissionError(f"blocked {purpose} for {profile_id}")
+
+    service = ModelSetupService(
+        ConfigStore(tmp_path), model_trust=BlockingTrust()
+    )
+    with pytest.raises(PermissionError, match="blocked model activation"):
+        await service.activate("foundation-sec")

@@ -32,6 +32,13 @@ For a terminal-driven deployment:
 
 External installation and model downloads are always opt-in. Local SecureBERT installation is initiated from Setup so the operator sees the exact profile, purpose, and progress. On macOS, `--install-ollama` opens the signed app download; finish the app installation and rerun with `--pull-models`.
 
+After installing and evaluating models, use **Models → Local model supply chain** to approve each exact
+artifact. The default audit mode is appropriate while proving the deployment. Before selecting enforcement,
+approve the currently configured general and security-reasoning routes; SignalRoom will reject the transition
+otherwise. Back up `data/model_trust_signing.key`, `data/model_trust.db`, and `data/model_attestations/`
+together. Treat the signing-key fingerprint as deployment inventory and restrict filesystem access to the
+SignalRoom service identity.
+
 ## Optional access promotion
 
 The installer deliberately does not require an administrator account. SignalRoom starts in local single-user mode
@@ -155,6 +162,9 @@ All lifecycle files stay inside the repository:
 | `signalroom.err.log` | Server and startup errors |
 | `data/` | Configuration, encrypted secrets, evidence database, and artifacts |
 | `data/discovery_jobs.db` | Durable manual discovery queue, progress, cancellation, recovery, and compact results |
+| `data/model_trust.db` | Model publisher policy and exact artifact approval history |
+| `data/model_trust_signing.key` | Local Ed25519 private key for operator artifact attestations |
+| `data/model_attestations/` | Portable canonical approval payloads, signatures, and public key |
 
 The lifecycle manager validates that a PID belongs to SignalRoom before stopping it. A stale PID will never be used to terminate an unrelated process.
 

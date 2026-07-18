@@ -4,7 +4,7 @@ const state = {
   activeCase: null, caseCockpit: null, pendingCaseItem: null, detailActions: [], contextPage: 1, contextPageSize: 9,
   contextItems: [], editingArtifactId: null, editingCaseItemId: null, demoTourStep: -1,
   modelRecommendations: {}, validations: [], editingValidationId: null,
-  modelUpdates: null, modelCatalog: null, splunkModels: null,
+  modelUpdates: null, modelCatalog: null, modelTrust: null, splunkModels: null,
   assurance: null, assurancePolicyDirty: false, connectionDiagnostics: null, queryIntelligence: null,
   feedbackBenchmarks: null, goldenBenchmarks: null, selectedTournamentId: null, deliveryPolicyDirty: false,
   deliveryPreview: null, detections: [], activeDetection: null, detectionGitExport: null,
@@ -275,6 +275,9 @@ function applyAccessPermissions() {
     '#assuranceForm input', '#assuranceForm select', '#assuranceForm button[type="submit"]',
     '#deliveryForm input', '#deliveryForm select', '#deliveryForm button',
     '[data-pull-profile]', '[data-activate-model]', '[data-promote-tournament]',
+    '#modelTrustPolicyForm input', '#modelTrustPolicyForm select',
+    '#modelTrustPolicyForm button', '[data-approve-model-artifact]',
+    '[data-revoke-model-attestation]',
     '[data-rollback-promotion]', '[data-preview-repository]', '[data-apply-repository]',
     '[data-push-repository]', '[data-pull-request-repository]',
     '[data-refresh-repository-review]', '[data-preserve-repository-review]',
@@ -813,6 +816,7 @@ async function checkModelUpdates(button) {
     state.modelUpdates = await api('/api/model-setup/updates');
     renderModelFreshness();
     renderModels();
+    await loadModelTrust(true);
   } catch (error) {
     panel.innerHTML = `<div><b>Freshness check failed</b><span>${escapeHtml(error.message)}</span></div>`;
   } finally {
@@ -829,6 +833,75 @@ function renderModelFreshness() {
   panel.innerHTML = `<div><b>Model source check complete</b><span>${escapeHtml(value.policy)}</span></div>
     <div class="freshness-counts"><span class="current"><b>${counts.current || 0}</b> current</span><span class="update"><b>${counts['update-available'] || 0}</b> updates</span><span><b>${counts.untracked || 0}</b> untracked</span><span><b>${counts.error || 0}</b> errors</span></div>
     <time datetime="${escapeHtml(value.checked_at)}">${escapeHtml(checked)}</time>`;
+}
+
+function shortDigest(value = '') {
+  return value ? `${value.slice(0, 12)}…${value.slice(-8)}` : 'not available';
+}
+
+function renderModelTrust() {
+  const value = state.modelTrust; if (!value) return;
+  const policy = value.policy || {}; const profiles = value.profiles || [];
+  $('#modelTrustMode').textContent = policy.mode === 'enforce' ? 'Enforcement active' : 'Audit only';
+  $('#modelTrustMode').classList.toggle('trust-enforced', policy.mode === 'enforce');
+  $('#modelTrustPolicyMode').value = policy.mode || 'audit';
+  $('#modelTrustPublishers').value = (policy.allowed_publishers || []).join(', ');
+  $('#modelTrustContract').textContent = value.contract || '';
+  $('#modelTrustProfiles').innerHTML = profiles.map(item => {
+    const attestation = item.attestation || {};
+    const action = item.trusted
+      ? `<button class="button ghost small" type="button" data-revoke-model-attestation="${escapeHtml(attestation.id || '')}">Revoke approval</button>`
+      : item.installed && item.verifiable && item.publisher_allowed
+      ? `<button class="button primary small" type="button" data-approve-model-artifact="${escapeHtml(item.profile_id)}" data-artifact-fingerprint="${escapeHtml(item.identity_fingerprint)}">Approve exact artifact</button>`
+      : '';
+    return `<article class="model-trust-card ${escapeHtml(item.status || 'unverifiable')}">
+      <header><div><span title="${escapeHtml((item.publisher_basis || 'unresolved').replaceAll('-', ' '))}">${escapeHtml(item.provider || 'local')} · ${escapeHtml(item.publisher || 'unknown publisher')}</span><h4>${escapeHtml(item.profile_id)}</h4></div><b>${escapeHtml((item.status || 'unknown').replaceAll('-', ' '))}</b></header>
+      <p>${escapeHtml(item.detail || '')}</p>
+      <dl><div><dt>Source</dt><dd>${escapeHtml(item.source_repo || item.model || 'unknown')}</dd></div><div><dt>Revision</dt><dd><code title="${escapeHtml(item.source_revision || '')}">${escapeHtml(shortDigest(item.source_revision))}</code></dd></div><div><dt>Local digest</dt><dd><code title="${escapeHtml(item.artifact_digest || '')}">${escapeHtml(shortDigest(item.artifact_digest))}</code></dd></div><div><dt>Signed by</dt><dd>${escapeHtml(attestation.approved_by || 'Not approved')}</dd></div></dl>
+      <footer><span>Identity <code title="${escapeHtml(item.identity_fingerprint || '')}">${escapeHtml(shortDigest(item.identity_fingerprint))}</code></span>${action}</footer>
+    </article>`;
+  }).join('') || '<div class="empty-inline compact-empty">No enabled model profiles were found.</div>';
+  applyAccessPermissions();
+}
+
+async function loadModelTrust(verifyFiles = false) {
+  try {
+    state.modelTrust = await api(`/api/model-trust${verifyFiles ? '?verify_files=true' : ''}`);
+    renderModelTrust();
+  } catch (error) {
+    $('#modelTrustProfiles').innerHTML = `<div class="empty-inline compact-empty">Model trust check failed: ${escapeHtml(error.message)}</div>`;
+  }
+}
+
+async function saveModelTrustPolicy(event) {
+  event.preventDefault();
+  const publishers = $('#modelTrustPublishers').value.split(',').map(value => value.trim().toLowerCase()).filter(Boolean);
+  const mode = $('#modelTrustPolicyMode').value;
+  if (mode === 'enforce' && !confirm('Enable fail-closed model artifact enforcement? The currently routed chat and security models must already have valid exact approvals.')) return;
+  try {
+    state.modelTrust = await api('/api/model-trust/policy', { method:'PUT', body:JSON.stringify({ mode, allowed_publishers:publishers }) });
+    renderModelTrust(); toast(mode === 'enforce' ? 'Exact model artifact enforcement enabled' : 'Model trust is reporting in audit mode');
+  } catch (error) { toast(error.message); }
+}
+
+async function approveModelArtifact(button) {
+  const profileId = button.dataset.approveModelArtifact;
+  const fingerprint = button.dataset.artifactFingerprint;
+  if (!confirm(`Approve and locally sign the exact currently installed artifact for ${profileId}? A future digest or revision change will require a new evaluation and approval.`)) return;
+  button.disabled = true; button.textContent = 'Verifying files…';
+  try {
+    await api(`/api/model-trust/profiles/${encodeURIComponent(profileId)}/approve`, { method:'POST', body:JSON.stringify({ expected_fingerprint:fingerprint }) });
+    await loadModelTrust(true); toast('Exact model artifact approved and signed locally');
+  } catch (error) { button.disabled = false; button.textContent = 'Approve exact artifact'; toast(error.message); }
+}
+
+async function revokeModelAttestation(button) {
+  const id = button.dataset.revokeModelAttestation;
+  if (!id || !confirm('Revoke this exact artifact approval? Enforcement may immediately block its activation or promotion.')) return;
+  try {
+    await api(`/api/model-trust/attestations/${encodeURIComponent(id)}/revoke`, { method:'POST', body:'{}' });
+    await loadModelTrust(); toast('Model artifact approval revoked');
+  } catch (error) { toast(error.message); }
 }
 
 function renderModelCatalog() {
@@ -910,7 +983,7 @@ async function pullModel(profileId, button) {
       job = await api(`/api/model-setup/pull/${job.id}`);
     }
     if (job.status !== 'complete') throw new Error(job.detail || 'Model download failed');
-    toast(job.kind === 'local-transformers' ? 'Local specialist installed · cloud inference is not required' : 'Model is ready in Ollama'); await loadModelReadiness(); renderModels();
+    toast(job.kind === 'local-transformers' ? 'Local specialist installed · approve its exact artifact after evaluation' : 'Model is ready in Ollama · approve its exact artifact after evaluation'); await Promise.all([loadModelReadiness(), loadModelTrust(true)]); renderModels();
   } catch (error) { button.disabled = false; button.textContent = 'Retry'; toast(error.message); }
 }
 
@@ -918,7 +991,7 @@ async function activateModel(profileId, button) {
   const original = button.textContent; button.disabled = true; button.textContent = 'Activating…';
   try {
     const result = await api('/api/model-setup/activate', { method:'POST', body:JSON.stringify({ profile_id:profileId, unload_other_signalroom_models:true }) });
-    toast(`Active model · ${result.executed_model}`); await loadModelReadiness(); renderModels();
+    toast(`Active model · ${result.executed_model}`); await Promise.all([loadModelReadiness(), loadModelTrust()]); renderModels();
   } catch (error) { button.disabled = false; button.textContent = original; toast(error.message); }
 }
 
@@ -1264,7 +1337,8 @@ function renderGoldenRun(run) {
   const scenarios = (run.results || []).map(item => `<article class="golden-result ${item.passed ? 'passed' : 'failed'} ${item.critical ? 'critical' : ''}"><header><div><span>${escapeHtml(item.task_type)} · ${item.duration_ms ? `${(item.duration_ms/1000).toFixed(1)}s` : 'not run'}</span><h5>${escapeHtml(item.title)}</h5></div><b>${Math.round(item.score)}/100</b></header><div class="golden-checks">${(item.checks || []).map(check => `<span class="${check.passed ? 'passed' : check.critical ? 'critical' : 'failed'}"><i></i>${escapeHtml(check.label)} <b>${Number(check.earned).toFixed(0)}/${Number(check.possible).toFixed(0)}</b></span>`).join('')}</div><details><summary>Inspect response and controls</summary>${item.error ? `<p class="validation-error">${escapeHtml(item.error)}</p>` : ''}<p>${escapeHtml(item.response || 'No response was produced.')}</p><small>Tools: ${escapeHtml((item.tools || []).map(call => call.name).join(', ') || 'none')} · Model: ${escapeHtml(item.model || 'not executed')}</small></details></article>`).join('');
   const comparisonText = comparison.has_baseline ? `${comparison.score_delta >= 0 ? '+' : ''}${comparison.score_delta} score · ${comparison.pass_rate_delta >= 0 ? '+' : ''}${Math.round(comparison.pass_rate_delta*100)} pass-rate points vs baseline` : 'No accepted baseline · eligible run can establish it';
   const feedbackText = feedback.total ? `${Math.round(Number(feedback.positive_rate || 0)*100)}% positive across ${feedback.total} analyst ratings` : 'No analyst ratings for this profile yet';
-  return `<article class="golden-decision ${gate.ready ? 'ready' : 'hold'} ${run.status === 'error' ? 'error' : ''}"><header><div><span>${decision}</span><h4>${escapeHtml(run.profile_id)} · ${escapeHtml(run.model)}</h4></div><b>${Math.round(run.score)}/100</b></header><p>${escapeHtml(run.error || gate.label || 'Benchmark is still running.')}</p><div class="golden-metrics"><span><b>${Math.round(Number(run.pass_rate || 0)*100)}%</b>scenario pass rate</span><span><b>${run.critical_failures || 0}</b>critical failures</span><span><b>${escapeHtml(run.suite_version)}</b>suite version</span><span><b>${escapeHtml(run.prompt_version)}</b>prompt version</span></div><div class="golden-comparison"><span>${escapeHtml(comparisonText)}</span><span>${escapeHtml(feedbackText)}</span></div>${blockers ? `<div class="golden-reasons blockers"><b>Promotion blockers</b><ul>${blockers}</ul></div>` : ''}${warnings ? `<div class="golden-reasons warnings"><b>Decision context</b><ul>${warnings}</ul></div>` : ''}<div class="golden-results">${scenarios}</div><footer><time>${escapeHtml(benchmarkTime(run.completed_at || run.created_at))}</time>${gate.ready && !run.is_baseline ? `<button class="button primary small" data-accept-golden-baseline="${escapeHtml(run.id)}">Accept as baseline</button>` : run.is_baseline ? '<span class="baseline-badge">Accepted baseline</span>' : ''}</footer></article>`;
+  const trust = gate.model_trust || run.artifact_binding || {};
+  return `<article class="golden-decision ${gate.ready ? 'ready' : 'hold'} ${run.status === 'error' ? 'error' : ''}"><header><div><span>${decision}</span><h4>${escapeHtml(run.profile_id)} · ${escapeHtml(run.model)}</h4></div><b>${Math.round(run.score)}/100</b></header><p>${escapeHtml(run.error || gate.label || 'Benchmark is still running.')}</p><div class="golden-metrics"><span><b>${Math.round(Number(run.pass_rate || 0)*100)}%</b>scenario pass rate</span><span><b>${run.critical_failures || 0}</b>critical failures</span><span><b>${escapeHtml(run.suite_version)}</b>suite version</span><span><b>${escapeHtml(run.prompt_version)}</b>prompt version</span><span><b>${escapeHtml((trust.status || 'legacy').replaceAll('-', ' '))}</b>artifact trust · ${escapeHtml(shortDigest(trust.identity_fingerprint || ''))}</span></div><div class="golden-comparison"><span>${escapeHtml(comparisonText)}</span><span>${escapeHtml(feedbackText)}</span></div>${blockers ? `<div class="golden-reasons blockers"><b>Promotion blockers</b><ul>${blockers}</ul></div>` : ''}${warnings ? `<div class="golden-reasons warnings"><b>Decision context</b><ul>${warnings}</ul></div>` : ''}<div class="golden-results">${scenarios}</div><footer><time>${escapeHtml(benchmarkTime(run.completed_at || run.created_at))}</time>${gate.ready && !run.is_baseline ? `<button class="button primary small" data-accept-golden-baseline="${escapeHtml(run.id)}">Accept as baseline</button>` : run.is_baseline ? '<span class="baseline-badge">Accepted baseline</span>' : ''}</footer></article>`;
 }
 
 function renderGoldenBenchmarks() {
@@ -3322,6 +3396,10 @@ document.addEventListener('click', async event => {
   if (tournamentPromotion) { await promoteModelTournament(tournamentPromotion); return; }
   const tournamentRollback = event.target.closest('[data-rollback-promotion]');
   if (tournamentRollback) { await rollbackModelPromotion(tournamentRollback); return; }
+  const approveArtifact = event.target.closest('[data-approve-model-artifact]');
+  if (approveArtifact) { await approveModelArtifact(approveArtifact); return; }
+  const revokeAttestation = event.target.closest('[data-revoke-model-attestation]');
+  if (revokeAttestation) { await revokeModelAttestation(revokeAttestation); return; }
   const showTournament = event.target.closest('[data-show-tournament]');
   if (showTournament && state.goldenBenchmarks?.tournament) {
     state.selectedTournamentId = showTournament.dataset.showTournament;
@@ -3583,6 +3661,7 @@ $('#discoveryJobHistory').addEventListener('click', event => {
 $('#runConnectionDiagnostics').addEventListener('click', runConnectionDiagnostics);
 $('#assuranceForm').addEventListener('submit', saveAssurancePolicy);
 $('#deliveryForm').addEventListener('submit', saveDeliveryPolicy);
+$('#modelTrustPolicyForm').addEventListener('submit', saveModelTrustPolicy);
 $('#approveDelivery').addEventListener('click', approveDeliveryPreview);
 $('#testDeliveryDestination').addEventListener('click', testDeliveryDestination);
 $('#testSoarDeliveryDestination').addEventListener('click', testDeliveryDestination);
@@ -3684,7 +3763,7 @@ const accessObserver = new MutationObserver(() => {
 accessObserver.observe(document.body, { childList:true, subtree:true });
 
 async function loadWorkspace() {
-  await Promise.all([loadSettings(), loadArtifacts(), loadCases(), loadLatestDiscovery(), loadDiscoveryJobs(), loadValidations(), loadDetections(), loadModelCatalog(), loadSplunkModels(), loadAssurance(), loadConnectionDiagnostics(), loadFeedbackBenchmarks(), loadGoldenBenchmarks()]);
+  await Promise.all([loadSettings(), loadArtifacts(), loadCases(), loadLatestDiscovery(), loadDiscoveryJobs(), loadValidations(), loadDetections(), loadModelCatalog(), loadModelTrust(), loadSplunkModels(), loadAssurance(), loadConnectionDiagnostics(), loadFeedbackBenchmarks(), loadGoldenBenchmarks()]);
   renderPromptTree(); renderValidations(); renderDetections(); handleDeepLink(); renderAuth();
   state.workspaceLoaded = true;
   if (!state.assuranceTimer) state.assuranceTimer = setInterval(() => {

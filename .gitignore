@@ -7,6 +7,7 @@ __pycache__/
 data/*.db
 data/*.json
 data/*.log
+data/*_signing.key
 data/config.json
 data/secrets.enc
 data/.vault.key
@@ -15,6 +16,8 @@ data/artifacts/*
 data/uploads/*
 !data/uploads/.gitkeep
 data/case_exports/*
+data/detection_exports/*
+data/model_attestations/*
 data/models/*
 !data/models/.gitkeep
 .env
