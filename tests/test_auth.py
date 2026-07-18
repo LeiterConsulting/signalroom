@@ -100,6 +100,7 @@ def test_roles_and_connection_assignment_are_independent(tmp_path) -> None:
     )
     assert allowed is False
     assert "Primary Splunk" in reason
+    assert service.authorize(analyst, "POST", "/api/discovery/jobs")[0] is False
     assert service.authorize(admin, "PUT", "/api/settings") == (True, "")
 
 

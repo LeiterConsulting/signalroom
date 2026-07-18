@@ -5,9 +5,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
-InvestigationMode = Literal[
-    "auto", "general", "discovery", "detection", "hunt", "triage", "spl", "brief"
-]
+InvestigationMode = Literal["auto", "general", "discovery", "detection", "hunt", "triage", "spl", "brief"]
 
 
 class SplunkConnection(BaseModel):
@@ -22,9 +20,7 @@ class ModelProfile(BaseModel):
     label: str
     provider: Literal["ollama", "huggingface"]
     model: str
-    task: Literal[
-        "chat", "security_reasoning", "embedding", "ner", "reranking", "classification"
-    ] = "chat"
+    task: Literal["chat", "security_reasoning", "embedding", "ner", "reranking", "classification"] = "chat"
     endpoint: str = ""
     enabled: bool = True
     description: str = ""
@@ -67,9 +63,7 @@ class AppSettings(BaseModel):
     allow_write_tools: bool = False
     max_agent_steps: int = 4
     demo_mode: bool = False
-    detection_repository: DetectionRepositorySettings = Field(
-        default_factory=DetectionRepositorySettings
-    )
+    detection_repository: DetectionRepositorySettings = Field(default_factory=DetectionRepositorySettings)
 
 
 class SettingsUpdate(BaseModel):
@@ -188,9 +182,9 @@ class ModelRecommendation(BaseModel):
     expected_result: str
     reason: str
     external: bool = False
-    availability: Literal[
-        "ready", "approval-required", "disabled", "unavailable", "install-required"
-    ] = "ready"
+    availability: Literal["ready", "approval-required", "disabled", "unavailable", "install-required"] = (
+        "ready"
+    )
     action_label: str
     prompt: str
     mode: InvestigationMode = "auto"
@@ -201,9 +195,7 @@ class EntityPivot(BaseModel):
     value: str
     entity_type: str
     confidence: float = 1.0
-    source: Literal["deterministic", "local-transformers", "hosted-transformers"] = (
-        "deterministic"
-    )
+    source: Literal["deterministic", "local-transformers", "hosted-transformers"] = "deterministic"
     prompt: str
     mode: InvestigationMode = "triage"
 
@@ -306,6 +298,41 @@ class DiscoveryRequest(BaseModel):
     depth: Literal["quick", "standard", "deep"] = "standard"
 
 
+DiscoveryJobStatus = Literal[
+    "queued",
+    "running",
+    "complete",
+    "partial",
+    "error",
+    "cancelled",
+    "budget-blocked",
+    "connection-blocked",
+]
+
+
+class DiscoveryJobRecord(BaseModel):
+    id: str
+    depth: Literal["quick", "standard", "deep"]
+    requested_by: str = "local-operator"
+    status: DiscoveryJobStatus
+    phase: str = "queued"
+    progress: int = 0
+    label: str = "Queued"
+    detail: str = ""
+    metrics: dict[str, Any] = Field(default_factory=dict)
+    summary: dict[str, Any] = Field(default_factory=dict)
+    result_run_id: str = ""
+    error: str = ""
+    call_budget: int = 0
+    calls_used: int = 0
+    cancel_requested: bool = False
+    recovery_count: int = 0
+    created_at: str
+    started_at: str | None = None
+    completed_at: str | None = None
+    updated_at: str
+
+
 AssuranceDepth = Literal["quick", "standard", "deep"]
 AssuranceRunStatus = Literal[
     "queued",
@@ -357,9 +384,7 @@ class AssuranceRunRecord(BaseModel):
 
 DeliverySignalKind = Literal["finding", "coverage", "inventory", "mltk", "collection"]
 DeliverySeverity = Literal["low", "medium", "high", "critical"]
-DeliveryDestinationKind = Literal[
-    "generic-webhook", "slack-incoming-webhook", "jira-cloud", "splunk-soar"
-]
+DeliveryDestinationKind = Literal["generic-webhook", "slack-incoming-webhook", "jira-cloud", "splunk-soar"]
 
 
 class DeliveryPolicyUpdate(BaseModel):
@@ -426,9 +451,7 @@ class DeliveryPolicyUpdate(BaseModel):
 
 
 class DeliveryApproval(BaseModel):
-    expected_payload_sha256: str = Field(
-        min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$"
-    )
+    expected_payload_sha256: str = Field(min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$")
 
 
 ValidationStatus = Literal["draft", "approved", "running", "complete", "error", "expired"]
@@ -508,59 +531,41 @@ class DetectionUpdate(BaseModel):
 
 class DetectionReviewRequest(BaseModel):
     decision: Literal["approve", "request-changes"]
-    expected_content_sha256: str = Field(
-        min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$"
-    )
+    expected_content_sha256: str = Field(min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$")
     reviewer: str = Field(default="Local reviewer", min_length=1, max_length=160)
     note: str = Field(default="", max_length=10000)
 
 
 class DetectionExportRequest(BaseModel):
-    expected_content_sha256: str = Field(
-        min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$"
-    )
+    expected_content_sha256: str = Field(min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$")
 
 
 class DetectionGitExportRequest(BaseModel):
-    expected_content_sha256: str = Field(
-        min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$"
-    )
+    expected_content_sha256: str = Field(min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$")
 
 
 class DetectionRepositoryPreviewRequest(BaseModel):
-    expected_content_sha256: str = Field(
-        min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$"
-    )
+    expected_content_sha256: str = Field(min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$")
 
 
 class DetectionRepositoryApprovalRequest(BaseModel):
-    expected_preview_sha256: str = Field(
-        min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$"
-    )
+    expected_preview_sha256: str = Field(min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$")
 
 
 class DetectionRepositoryRemoteRequest(BaseModel):
-    expected_commit_sha: str = Field(
-        min_length=40, max_length=64, pattern=r"^[0-9a-f]{40,64}$"
-    )
+    expected_commit_sha: str = Field(min_length=40, max_length=64, pattern=r"^[0-9a-f]{40,64}$")
 
 
 class DetectionRepositoryReviewRequest(BaseModel):
-    expected_commit_sha: str = Field(
-        min_length=40, max_length=64, pattern=r"^[0-9a-f]{40,64}$"
-    )
+    expected_commit_sha: str = Field(min_length=40, max_length=64, pattern=r"^[0-9a-f]{40,64}$")
 
 
 class DetectionRepositoryCaseRequest(BaseModel):
-    expected_snapshot_sha256: str = Field(
-        min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$"
-    )
+    expected_snapshot_sha256: str = Field(min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$")
 
 
 class DetectionDeploymentRefreshRequest(BaseModel):
-    expected_content_sha256: str = Field(
-        min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$"
-    )
+    expected_content_sha256: str = Field(min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$")
     target_app: str = Field(
         default="",
         max_length=160,
@@ -569,15 +574,11 @@ class DetectionDeploymentRefreshRequest(BaseModel):
 
 
 class DetectionDeploymentCaseRequest(BaseModel):
-    expected_snapshot_sha256: str = Field(
-        min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$"
-    )
+    expected_snapshot_sha256: str = Field(min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$")
 
 
 class DetectionRuntimeDraftRequest(BaseModel):
-    expected_snapshot_sha256: str = Field(
-        min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$"
-    )
+    expected_snapshot_sha256: str = Field(min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$")
     earliest_time: str = Field(default="", max_length=64)
     max_lag_seconds: int | None = Field(
         default=None,
@@ -587,15 +588,11 @@ class DetectionRuntimeDraftRequest(BaseModel):
 
 
 class DetectionRuntimeAssessmentRequest(BaseModel):
-    expected_runtime_check_sha256: str = Field(
-        min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$"
-    )
+    expected_runtime_check_sha256: str = Field(min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$")
 
 
 class DetectionRuntimeCaseRequest(BaseModel):
-    expected_assessment_sha256: str = Field(
-        min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$"
-    )
+    expected_assessment_sha256: str = Field(min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$")
 
 
 class DetectionRepositoryTestRequest(BaseModel):
@@ -603,15 +600,11 @@ class DetectionRepositoryTestRequest(BaseModel):
 
 
 class DetectionGateRunRequest(BaseModel):
-    expected_content_sha256: str = Field(
-        min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$"
-    )
+    expected_content_sha256: str = Field(min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$")
 
 
 class DetectionValidationDraftRequest(BaseModel):
-    expected_content_sha256: str = Field(
-        min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$"
-    )
+    expected_content_sha256: str = Field(min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$")
 
 
 class ValidationTaskRecord(ValidationTaskCreate):
@@ -636,9 +629,7 @@ class ToolCall(BaseModel):
 
 CaseStatus = Literal["open", "investigating", "contained", "monitoring", "closed"]
 CaseSeverity = Literal["informational", "low", "medium", "high", "critical"]
-CaseItemKind = Literal[
-    "observation", "context", "hypothesis", "note", "action", "decision", "evidence"
-]
+CaseItemKind = Literal["observation", "context", "hypothesis", "note", "action", "decision", "evidence"]
 
 
 class CaseCreate(BaseModel):

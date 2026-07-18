@@ -22,6 +22,8 @@ The local prototype defaults to localhost, opt-in demo mode, local specialist ex
 - Splunk MLTK scans use only `listmodels`, retain local definition fingerprints, and perform zero model writes. Dependency comparisons are explicitly scoped to SignalRoom's configured Ollama endpoint.
 - Continuous assurance is opt-in, single-concurrency, and protected by hard per-run MCP call and UTC daily run ceilings. It stores local notifications but never sends them externally or auto-approves validation SPL.
 - Interrupted assurance runs restart as fresh read-only collections; explicit cancellation is persisted and prevents recovery from silently resuming work.
+- Operator discovery uses a durable single-worker queue with depth-specific hard Splunk-call ceilings. Connection readiness is checked before discovery calls, progress and compact results remain local, and explicit cancellation is terminal.
+- Interrupted manual discovery is re-queued as a fresh read-only collection. The requesting username, restart count, call count, and terminal outcome are retained in local job and audit state.
 - Assurance packages remain local unless the separate outbound policy is enabled. Generated validation work is deduplicated, expires after seven days, and remains scoped to one explicitly approved execution.
 - Outbound response delivery is separately opt-in, requires HTTPS except for generic loopback testing, verifies TLS by default, does not follow redirects, and binds manual approval to the exact adapter-native payload bytes and destination identity. Generic webhooks receive an idempotency key; Slack and Jira do not; Splunk SOAR receives a deterministic source data identifier. Disabling delivery or changing adapter/transport identity cancels pending jobs.
 - Strict delivery redaction exposes opaque package metadata and aggregate signal counts while withholding source-derived package and signal text. Standard redaction adds bounded package text, titles, and subjects but never raw results, SPL, validation identifiers, signal fingerprints, discovery run identifiers, credentials, or endpoint configuration.
@@ -57,6 +59,8 @@ The local prototype defaults to localhost, opt-in demo mode, local specialist ex
 - Jira Cloud issue creation has no destination idempotency contract exposed by this integration. An analyst-requested retry after an unknown outcome can create a duplicate despite the embedded correlation label. Reconciliation is explicit rather than continuously polled, and Jira permissions can make a present issue indistinguishable from a missing issue through a 404 response.
 - SignalRoom does not yet provide Teams or email adapters, or destination-native update/delete workflows.
 - Enabling outbound delivery creates an explicit data-egress path. Operators must review destination ownership and redaction policy before enabling automatic mode.
+- Restart recovery is fresh execution, not exactly-once MCP execution. Calls completed before an interruption may be issued again after restart; Splunk service-role quotas and workload controls remain the authoritative resource boundary.
+- Cancellation stops scheduling further Splunk calls and cancels the async discovery plan. A local model pass already executing in a native worker thread may finish computation before its result is discarded.
 
 ## Recommended Splunk role
 

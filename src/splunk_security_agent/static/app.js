@@ -9,7 +9,9 @@ const state = {
   feedbackBenchmarks: null, goldenBenchmarks: null, selectedTournamentId: null, deliveryPolicyDirty: false,
   deliveryPreview: null, detections: [], activeDetection: null, detectionGitExport: null,
   repositoryStatus: null, repositoryHandoff: null, auth: null, authUsers: [],
-  workspaceLoaded: false, assuranceTimer: null
+  workspaceLoaded: false, assuranceTimer: null, discoveryJobs: null,
+  activeDiscoveryJob: null, discoveryPollTimer: null, discoveryPollBusy: false,
+  discoveryWatchingJobId: null
 };
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => [...document.querySelectorAll(selector)];
@@ -228,6 +230,7 @@ function applyAccessPermissions() {
   const authenticated = Boolean(state.auth?.authenticated);
   const canAdminister = Boolean(state.auth?.permissions?.can_administer);
   const canChange = Boolean(state.auth?.permissions?.can_change);
+  const canUseConnection = Boolean(state.auth?.permissions?.can_use_primary_connection);
   document.body.dataset.accessRole = state.auth?.principal?.role || '';
   document.body.classList.toggle('settings-readonly', authenticated && !canAdminister);
   $('#accessReadOnlyNote').hidden = !authenticated || canAdminister;
@@ -244,14 +247,29 @@ function applyAccessPermissions() {
   });
   if (canAdminister && state.settings) updateRepositoryControls();
   const mutationSelectors = [
-    '#chatInput', '#chatForm .send-button', '#runDiscovery', '#runConnectionDiagnostics',
+    '#chatInput', '#chatForm .send-button', '#runDiscovery', '#cancelDiscoveryJob', '#runConnectionDiagnostics',
     '#runAssuranceNow', '#assuranceForm button', '#deliveryForm button', '#scanSplunkModels',
     '#runModelTournament', '#runGoldenBenchmark', '#addArtifact', '#uploadArtifact',
     '#newCase', '#newDetection'
   ];
   $$(mutationSelectors.join(',')).forEach(node => {
     if (!canChange) { node.disabled = true; node.dataset.roleDisabled = 'true'; }
-    else if (node.dataset.roleDisabled) { node.disabled = false; delete node.dataset.roleDisabled; }
+    else if (node.dataset.roleDisabled) {
+      delete node.dataset.roleDisabled;
+      if (!node.dataset.jobDisabled && !node.dataset.connectionDisabled && !node.dataset.adminDisabled) node.disabled = false;
+    }
+  });
+  const connectionSelectors = [
+    '#chatInput', '#chatForm .send-button', '#runDiscovery', '#cancelDiscoveryJob',
+    '#runConnectionDiagnostics', '#runAssuranceNow', '#scanSplunkModels'
+  ];
+  $$(connectionSelectors.join(',')).forEach(node => {
+    if (authenticated && !canUseConnection) {
+      node.disabled = true; node.dataset.connectionDisabled = 'true';
+    } else if (node.dataset.connectionDisabled) {
+      delete node.dataset.connectionDisabled;
+      if (!node.dataset.jobDisabled && !node.dataset.roleDisabled && !node.dataset.adminDisabled) node.disabled = false;
+    }
   });
   const adminSelectors = [
     '#assuranceForm input', '#assuranceForm select', '#assuranceForm button[type="submit"]',
@@ -1450,6 +1468,125 @@ function updateDiscoveryProgress(event) {
   updateOperation(card, event);
 }
 
+function discoveryElapsed(job) {
+  const start = job?.started_at || job?.created_at;
+  if (!start) return '0s';
+  const seconds = Math.max(0, Math.round((Date.now() - new Date(start).getTime()) / 1000));
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60); const remainder = seconds % 60;
+  return `${minutes}m ${remainder}s`;
+}
+
+function discoveryStatusLabel(status) {
+  return ({
+    queued:'Queued', running:'Running', complete:'Complete', partial:'Partial',
+    error:'Failed', cancelled:'Cancelled', 'budget-blocked':'Call budget reached',
+    'connection-blocked':'Connection blocked'
+  })[status] || status;
+}
+
+function setDiscoveryRunState(job = null) {
+  const button = $('#runDiscovery');
+  if (job) {
+    button.disabled = true; button.dataset.jobDisabled = 'true';
+    button.textContent = job.status === 'queued' ? 'Discovery queued' : 'Discovering…';
+  } else {
+    delete button.dataset.jobDisabled;
+    if (!button.dataset.roleDisabled && !button.dataset.connectionDisabled) button.disabled = false;
+    button.textContent = 'Run discovery';
+  }
+}
+
+function renderDiscoveryJobOverview(value) {
+  state.discoveryJobs = value;
+  const active = value.active_job;
+  state.activeDiscoveryJob = active;
+  $('#discoveryWorker').textContent = value.worker?.online ? 'Worker online · 1 at a time' : 'Worker offline';
+  $('#discoveryWorker').classList.toggle('warning', !value.worker?.online);
+  setDiscoveryRunState(active);
+  if (active) {
+    beginDiscoveryProgress();
+    (value.active_events || []).forEach(updateDiscoveryProgress);
+    $('#discoveryElapsed').textContent = discoveryElapsed(active);
+    $('#discoveryStatus').textContent = `${discoveryStatusLabel(active.status)} · ${active.depth}`;
+    $('#discoveryJobContract').textContent = `${active.depth} · ${active.calls_used}/${active.call_budget} Splunk calls · ${active.id.slice(0, 8)}${active.recovery_count ? ` · recovered ${active.recovery_count}×` : ''}`;
+    $('#cancelDiscoveryJob').hidden = false;
+    $('#cancelDiscoveryJob').disabled = Boolean(active.cancel_requested);
+    $('#cancelDiscoveryJob').textContent = active.cancel_requested ? 'Stopping…' : 'Cancel run';
+  } else {
+    $('#cancelDiscoveryJob').hidden = true;
+  }
+  const jobs = value.jobs || [];
+  $('#discoveryJobHistory').innerHTML = jobs.length ? jobs.slice(0, 10).map(job => {
+    const terminal = !['queued','running'].includes(job.status);
+    const hasResult = Boolean(job.result_run_id);
+    const recovery = job.recovery_count ? ` · restarted ${job.recovery_count}×` : '';
+    const callContract = `${job.calls_used}/${job.call_budget} calls`;
+    const timestamp = new Date(job.completed_at || job.updated_at || job.created_at).toLocaleString();
+    return `<article class="discovery-job-row ${escapeHtml(job.status)}">
+      <div class="discovery-job-state"><span>${escapeHtml(discoveryStatusLabel(job.status))}</span><b>${escapeHtml(job.depth)}</b></div>
+      <div><b>${escapeHtml(job.label)}</b><p>${escapeHtml(job.detail || 'Waiting for activity.')}</p><small>${escapeHtml(timestamp)} · ${escapeHtml(callContract)}${escapeHtml(recovery)} · ${escapeHtml(job.requested_by)}</small></div>
+      <button class="button ghost small" type="button" data-inspect-discovery-job="${escapeHtml(job.id)}">${hasResult ? 'Open result' : (terminal ? 'Inspect run' : 'View live')}</button>
+    </article>`;
+  }).join('') : '<div class="empty-inline compact-empty">No durable manual discovery jobs have run yet.</div>';
+  applyAccessPermissions();
+}
+
+function scheduleDiscoveryPoll(active) {
+  clearTimeout(state.discoveryPollTimer); state.discoveryPollTimer = null;
+  if (!active) return;
+  state.discoveryPollTimer = setTimeout(() => loadDiscoveryJobs().catch(() => {}), 1000);
+}
+
+async function loadDiscoveryJobs() {
+  if (state.discoveryPollBusy) return;
+  state.discoveryPollBusy = true;
+  let active = null;
+  try {
+    const value = await api('/api/discovery/jobs?limit=12');
+    active = value.active_job;
+    renderDiscoveryJobOverview(value);
+    if (active) state.discoveryWatchingJobId = active.id;
+    if (!active && state.discoveryWatchingJobId) {
+      const completedId = state.discoveryWatchingJobId;
+      const completed = (value.jobs || []).find(item => item.id === completedId);
+      state.discoveryWatchingJobId = null;
+      if (completed?.result_run_id) {
+        const result = await api(`/api/discovery/jobs/${encodeURIComponent(completedId)}/result`);
+        renderDiscoveryResult(result);
+        await loadArtifacts();
+        toast(completed.status === 'partial' || completed.status === 'budget-blocked'
+          ? 'Discovery retained with collection gaps' : 'Discovery artifacts created');
+      } else if (completed) {
+        $('#discoveryStatus').textContent = discoveryStatusLabel(completed.status);
+        toast(completed.detail || discoveryStatusLabel(completed.status));
+      }
+    }
+  } finally {
+    state.discoveryPollBusy = false;
+    scheduleDiscoveryPoll(active);
+  }
+}
+
+async function inspectDiscoveryJob(jobId) {
+  try {
+    const detail = await api(`/api/discovery/jobs/${encodeURIComponent(jobId)}`);
+    beginDiscoveryProgress();
+    (detail.events || []).forEach(updateDiscoveryProgress);
+    const job = detail.job;
+    $('#discoveryElapsed').textContent = ['queued','running'].includes(job.status) ? discoveryElapsed(job) : discoveryStatusLabel(job.status);
+    $('#discoveryJobContract').textContent = `${job.depth} · ${job.calls_used}/${job.call_budget} Splunk calls · ${job.id.slice(0, 8)}${job.recovery_count ? ` · recovered ${job.recovery_count}×` : ''}`;
+    $('#cancelDiscoveryJob').hidden = !['queued','running'].includes(job.status);
+    if (detail.result_available) {
+      const result = await api(`/api/discovery/jobs/${encodeURIComponent(jobId)}/result`);
+      renderDiscoveryResult(result);
+    } else {
+      $('#discoveryStatus').textContent = `${discoveryStatusLabel(job.status)} · ${job.depth}`;
+    }
+    $('#discoveryProgress').scrollIntoView({ behavior:'smooth', block:'start' });
+  } catch (error) { toast(error.message); }
+}
+
 function renderEvidence(evidence = [], trace = [], ledger = []) {
   state.ledger = ledger;
   const toolObservations = ledger.filter(item => item.classification !== 'context' && item.status === 'observed');
@@ -1486,13 +1623,27 @@ async function sendChat(message, options = {}) {
 }
 
 async function runDiscovery() {
-  const button = $('#runDiscovery'); button.disabled = true; button.textContent = 'Discovering…';
-  $('#discoveryStatus').textContent = 'Running'; beginDiscoveryProgress();
+  const button = $('#runDiscovery'); button.disabled = true; button.textContent = 'Queuing…';
+  $('#discoveryStatus').textContent = 'Queuing durable job'; beginDiscoveryProgress();
   try {
-    const result = await streamApi('/api/discovery/stream', { depth:$('#discoveryDepth').value }, updateDiscoveryProgress);
-    renderDiscoveryResult(result); toast('Discovery artifacts created'); await loadArtifacts();
-  } catch (error) { $('#discoveryStatus').textContent = 'Failed'; toast(error.message); }
-  finally { button.disabled = false; button.textContent = 'Run discovery'; }
+    const job = await api('/api/discovery/jobs', { method:'POST', body:JSON.stringify({ depth:$('#discoveryDepth').value }) });
+    state.discoveryWatchingJobId = job.id;
+    toast('Discovery queued; you can safely refresh this page');
+    await loadDiscoveryJobs();
+  } catch (error) {
+    $('#discoveryStatus').textContent = 'Failed to queue'; toast(error.message);
+    setDiscoveryRunState(null);
+  }
+}
+
+async function cancelDiscoveryJob() {
+  const job = state.activeDiscoveryJob; if (!job) return;
+  try {
+    $('#cancelDiscoveryJob').disabled = true; $('#cancelDiscoveryJob').textContent = 'Stopping…';
+    await api(`/api/discovery/jobs/${encodeURIComponent(job.id)}/cancel`, { method:'POST', body:'{}' });
+    toast('Discovery cancellation requested');
+    await loadDiscoveryJobs();
+  } catch (error) { toast(error.message); }
 }
 
 function assuranceTime(value) {
@@ -3424,6 +3575,11 @@ $('#demoTourNext').addEventListener('click', () => {
 $('#toggleEvidence').addEventListener('click', () => $('.evidence-panel').classList.add('mobile-open'));
 $('#closeEvidence').addEventListener('click', () => $('.evidence-panel').classList.remove('mobile-open'));
 $('#runDiscovery').addEventListener('click', runDiscovery);
+$('#cancelDiscoveryJob').addEventListener('click', cancelDiscoveryJob);
+$('#discoveryJobHistory').addEventListener('click', event => {
+  const target = event.target.closest('[data-inspect-discovery-job]');
+  if (target) inspectDiscoveryJob(target.dataset.inspectDiscoveryJob);
+});
 $('#runConnectionDiagnostics').addEventListener('click', runConnectionDiagnostics);
 $('#assuranceForm').addEventListener('submit', saveAssurancePolicy);
 $('#deliveryForm').addEventListener('submit', saveDeliveryPolicy);
@@ -3528,7 +3684,7 @@ const accessObserver = new MutationObserver(() => {
 accessObserver.observe(document.body, { childList:true, subtree:true });
 
 async function loadWorkspace() {
-  await Promise.all([loadSettings(), loadArtifacts(), loadCases(), loadLatestDiscovery(), loadValidations(), loadDetections(), loadModelCatalog(), loadSplunkModels(), loadAssurance(), loadConnectionDiagnostics(), loadFeedbackBenchmarks(), loadGoldenBenchmarks()]);
+  await Promise.all([loadSettings(), loadArtifacts(), loadCases(), loadLatestDiscovery(), loadDiscoveryJobs(), loadValidations(), loadDetections(), loadModelCatalog(), loadSplunkModels(), loadAssurance(), loadConnectionDiagnostics(), loadFeedbackBenchmarks(), loadGoldenBenchmarks()]);
   renderPromptTree(); renderValidations(); renderDetections(); handleDeepLink(); renderAuth();
   state.workspaceLoaded = true;
   if (!state.assuranceTimer) state.assuranceTimer = setInterval(() => {

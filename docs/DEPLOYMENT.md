@@ -154,8 +154,14 @@ All lifecycle files stay inside the repository:
 | `signalroom.log` | Standard output |
 | `signalroom.err.log` | Server and startup errors |
 | `data/` | Configuration, encrypted secrets, evidence database, and artifacts |
+| `data/discovery_jobs.db` | Durable manual discovery queue, progress, cancellation, recovery, and compact results |
 
 The lifecycle manager validates that a PID belongs to SignalRoom before stopping it. A stale PID will never be used to terminate an unrelated process.
+
+Stopping or restarting SignalRoom does not discard a queued manual discovery. An active job is re-queued and
+starts a fresh read-only collection when the worker returns; it does not resume in the middle of an MCP plan.
+An operator cancellation remains terminal. Normal uninstall preserves this state with the rest of `data/`;
+purging data removes the job history and retained results.
 
 ## Port fallback
 

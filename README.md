@@ -11,6 +11,7 @@ This is a focused reimplementation inspired by [LeiterConsulting/splunk-discover
 - Layered Splunk MCP diagnostics across configuration, DNS, TCP, TLS identity, authentication, and depth-specific tool contracts
 - Parallel read-only quick, standard, and deep discovery with change detection, JSON blueprints, and briefs
 - First-class security discovery across telemetry freshness, detection health, data-model readiness, and reusable RAG knowledge
+- Durable manual discovery jobs with live retained progress, hard call ceilings, cancellation, restart recovery, and per-run results
 - Delta-aware model-team reuse with exact input fingerprints and visible cache provenance
 - Read-only Splunk MLTK model inventory with definition drift and endpoint-scoped dependency checks
 - Opt-in continuous assurance with durable schedules, cross-run signal correlation, response packages, and hard Splunk-call budgets
@@ -424,12 +425,21 @@ Standard and deep discovery run in this order:
 5. A deterministic reconciler rejects unknown evidence references, labels unsupported conclusions as needing
    validation, and promotes only evidence-linked hypotheses into investigation tracks.
 
+Operator-initiated discovery now runs through a durable local worker. `data/discovery_jobs.db` retains the
+requesting identity, queue and progress events, depth-specific hard Splunk-call ceiling, cancellation state,
+restart count, terminal summary, and compact renderable result for each run. Refreshing or closing the browser
+does not interrupt the job. A process restart re-queues an interrupted run as a fresh read-only collection;
+explicit cancellation is terminal. The Discovery page can reopen retained results and replay each run's activity.
+Full timestamped blueprints and briefs remain in the artifact directory, while the job database deliberately
+stores the smaller projection that excludes raw inventory catalogs.
+
 ### Continuous assurance
 
 The Discovery page can opt in to a local recurring schedule. The policy selects quick, standard, or deep
 discovery, an interval, a hard per-run Splunk MCP call ceiling, a maximum number of runs per UTC day, and
-notification categories. Scheduling is disabled by default. Manual and scheduled runs share the daily budget
-and one per-instance execution lane with interactive Discovery and MLTK inventory.
+notification categories. Scheduling is disabled by default. Manual and scheduled assurance runs share the daily
+assurance budget. Assurance, durable manual discovery, compatibility discovery endpoints, and MLTK inventory
+share one per-instance read-only execution lane.
 
 Run state and progress events are stored in `data/assurance.db`. A restart re-queues an interrupted read-only
 run as a fresh collection; an operator cancellation persists across restart. Completed runs classify inventory,
@@ -547,9 +557,10 @@ tamper-evident local record, not an external immutable audit sink.
 Splunk SOAR now has a duplicate-safe, create-container-only adapter with exact-payload approval, automation disabled,
 no artifacts, durable correlation, self-signed/private-CA transport support, and a read-only container-options test.
 Correlated Jira issues retain explicit read-only reconciliation and immutable local drift history. Optional local
-RBAC now gives those actions named role and connection boundaries. The next roadmap increment is durable manual
-discovery jobs with cancellation and restart recovery. Cross-model tournaments already compare promotion-ready
-local profiles before an explicitly approved routing change.
+RBAC now gives those actions named role and connection boundaries. Durable manual discovery now preserves progress,
+cancellation, restart recovery, and retained results. The next roadmap increment is publisher/revision allowlists
+and signed model-artifact policy around the existing model evaluation and promotion gates. Cross-model tournaments
+already compare promotion-ready local profiles before an explicitly approved routing change.
 
 ### Context
 

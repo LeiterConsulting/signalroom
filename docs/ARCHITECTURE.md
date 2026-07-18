@@ -96,13 +96,28 @@ enforces the complete Pydantic contract locally, including length and collection
 temperature-zero, and token-bounded; one repair or JSON-mode fallback is allowed and surfaced in the activity UI.
 Hosted inference is not part of discovery.
 
+### Manual discovery is a durable local job
+
+`DiscoveryJobStore` persists every operator request, bounded call contract, progress event, cancellation flag,
+restart count, terminal summary, and compact renderable result in `data/discovery_jobs.db`. The retained result
+uses `DiscoveryPipeline.latest_summary()`, which excludes the large raw inventory catalogs; timestamped full
+blueprints and briefs remain in the existing artifact store.
+
+`DiscoveryJobService` owns one local worker and applies the same depth-specific hard call ceilings used to size
+assurance runs. It runs connection diagnostics before any discovery call, then takes the shared single-instance
+read-only lane. Browser refresh and disconnection have no effect on execution. Explicit cancellation is terminal.
+Orderly or unclean process interruption re-queues the job and starts a fresh read-only collection after restart,
+rather than attempting to resume a partially executed MCP plan. Queue, cancel, completion, and failure decisions
+retain the requesting username in the local audit chain.
+
 ### Continuous assurance is durable but deliberately bounded
 
 `AssuranceStore` persists the singleton schedule policy, run state, progress events, and acknowledgeable notices.
-`AssuranceService` owns one local worker. Scheduled work, manual discovery, and MLTK scans share an async execution
-lock; no second scheduled run is queued while one is active. A `BudgetedSplunkClient` counts before delegation and
-refuses calls beyond the configured ceiling, including calls launched concurrently. On shutdown, active work is
-re-queued for a fresh read-only collection; an explicit cancellation is terminal and persists across restart.
+`AssuranceService` owns one local worker. Scheduled assurance, durable manual discovery, compatibility discovery
+requests, and MLTK scans share an async execution lock; no second scheduled assurance run is queued while one is
+active. A `BudgetedSplunkClient` counts before delegation and refuses calls beyond the configured ceiling, including
+calls launched concurrently. On shutdown, active work is re-queued for a fresh read-only collection; an explicit
+cancellation is terminal and persists across restart.
 
 The scheduler creates local notifications from deterministic result fields. `AssuranceResponseService` fingerprints
 findings, inventory changes, coverage changes, MLTK drift, and named collection failures. Medium and low signals stay
@@ -255,9 +270,8 @@ SignalRoom is an MCP client of a Splunk MCP server and an MCP server to agent ho
 
 ## Next production increments
 
-1. Durable background discovery jobs with cancellation and restart recovery
-2. Model revision allowlists and signed model artifacts around the implemented evaluation gates
-3. Search cost estimation, per-instance concurrency limits, and Splunk workload controls
-4. Broader operator-authored evaluation suites beyond the durable golden, tournament, and feedback history
-5. Audit events sent to a dedicated Splunk index
-6. OIDC/MFA integration, account recovery, and tenant boundaries beyond local RBAC
+1. Model publisher/revision allowlists and signed model artifacts around the implemented evaluation gates
+2. Search cost estimation, per-instance concurrency limits, and Splunk workload controls
+3. Broader operator-authored evaluation suites beyond the durable golden, tournament, and feedback history
+4. Audit events sent to a dedicated Splunk index
+5. OIDC/MFA integration, account recovery, and tenant boundaries beyond local RBAC

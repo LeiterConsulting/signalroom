@@ -35,7 +35,7 @@ from .detections import (
     DetectionService,
     DetectionStore,
 )
-from .discovery import DiscoveryPipeline
+from .discovery import DiscoveryJobService, DiscoveryJobStore, DiscoveryPipeline
 from .feedback import AnalystFeedbackStore
 from .mcp_server import MCPServer
 from .model_setup import ModelSetupService
@@ -135,38 +135,29 @@ class Services:
             self.cases,
             DATA / "detection_exports",
         )
-        self.detection_repository_store = DetectionRepositoryStore(
-            DATA / "detection_repository.db"
-        )
+        self.detection_repository_store = DetectionRepositoryStore(DATA / "detection_repository.db")
         self.detection_repository = DetectionRepositoryService(
             self.config,
             self.detections,
             self.detection_repository_store,
             DATA / "detection_repository_runtime",
         )
-        self.detection_deployment_store = DetectionDeploymentStore(
-            DATA / "detection_deployment.db"
-        )
+        self.detection_deployment_store = DetectionDeploymentStore(DATA / "detection_deployment.db")
         self.detection_deployment = DetectionDeploymentService(
             self.config,
             self.detections,
             self.detection_deployment_store,
             lambda: self.splunk,
         )
-        self.case_cockpit = CaseCockpitService(
-            self.cases, self.validation_store, self.evidence
-        )
+        self.case_cockpit = CaseCockpitService(self.cases, self.validation_store, self.evidence)
         self.audit = AuditStore(DATA / "audit.db")
         self.auth_store = AuthStore(DATA / "auth.db")
         self.auth = AuthService(self.auth_store, self.audit)
+        self.discovery_job_store = DiscoveryJobStore(DATA / "discovery_jobs.db")
         self.assurance_store = AssuranceStore(DATA / "assurance.db")
         self.delivery_store = DeliveryStore(DATA / "delivery.db")
-        self.connection_diagnostics_store = ConnectionDiagnosticsStore(
-            DATA / "connection_diagnostics.db"
-        )
-        self.connection_diagnostics = SplunkConnectionDiagnostics(
-            self.connection_diagnostics_store
-        )
+        self.connection_diagnostics_store = ConnectionDiagnosticsStore(DATA / "connection_diagnostics.db")
+        self.connection_diagnostics = SplunkConnectionDiagnostics(self.connection_diagnostics_store)
         self.discovery_lock = asyncio.Lock()
         self.benchmark_lock = asyncio.Lock()
         self.model_setup = ModelSetupService(self.config, self.evidence)
@@ -176,13 +167,20 @@ class Services:
         self._discovery: DiscoveryPipeline | None = None
         self._splunk_models: SplunkModelInventoryService | None = None
         self._validations: ValidationService | None = None
-        self.assurance_response = AssuranceResponseService(
-            self.assurance_store, lambda: self.validations
-        )
+        self.assurance_response = AssuranceResponseService(self.assurance_store, lambda: self.validations)
         self.delivery = AssuranceDeliveryService(
             self.delivery_store,
             self.assurance_store,
             self.config,
+            self.audit,
+        )
+        self.discovery_jobs = DiscoveryJobService(
+            self.discovery_job_store,
+            lambda: self.splunk,
+            self._assurance_pipeline,
+            self._manual_discovery_complete,
+            self.discovery_lock,
+            self._assurance_preflight,
             self.audit,
         )
         self.assurance = AssuranceService(
@@ -208,6 +206,11 @@ class Services:
         package = self.assurance_response.process(run_id, result)
         if package:
             self.delivery.consider_package(package)
+        if self._agent is not None:
+            self._agent.invalidate_context_cache()
+        self.model_setup.schedule_context_index()
+
+    async def _manual_discovery_complete(self, _job_id: str, _result: dict[str, Any]) -> None:
         if self._agent is not None:
             self._agent.invalidate_context_cache()
         self.model_setup.schedule_context_index()
@@ -244,9 +247,7 @@ class Services:
             self.config,
             self._splunk_models,
         )
-        self._validations = ValidationService(
-            self.validation_store, self._splunk, self.evidence, self.cases
-        )
+        self._validations = ValidationService(self.validation_store, self._splunk, self.evidence, self.cases)
         self._fingerprint = fingerprint
 
     @property
@@ -302,6 +303,7 @@ async def lifespan(app: FastAPI):
             )
         )
     services.model_setup.schedule_context_index()
+    await services.discovery_jobs.start()
     await services.assurance.start()
     await services.delivery.start()
     try:
@@ -309,6 +311,7 @@ async def lifespan(app: FastAPI):
     finally:
         await services.delivery.stop()
         await services.assurance.stop()
+        await services.discovery_jobs.stop()
 
 
 app = FastAPI(
@@ -331,11 +334,7 @@ AUTH_PUBLIC_PATHS = {
 @app.middleware("http")
 async def access_control(request: Request, call_next: Any) -> Response:
     path = request.url.path
-    if (
-        request.method == "OPTIONS"
-        or path in AUTH_PUBLIC_PATHS
-        or path.startswith("/static/")
-    ):
+    if request.method == "OPTIONS" or path in AUTH_PUBLIC_PATHS or path.startswith("/static/"):
         response = await call_next(request)
         if path.startswith("/api/auth/"):
             response.headers["Cache-Control"] = "no-store"
@@ -392,9 +391,7 @@ async def access_control(request: Request, call_next: Any) -> Response:
         reset_audit_actor(audit_actor)
 
 
-def _set_auth_cookies(
-    response: Response, request: Request, session: dict[str, Any]
-) -> None:
+def _set_auth_cookies(response: Response, request: Request, session: dict[str, Any]) -> None:
     secure = request.url.scheme == "https"
     max_age = services.auth_store.policy()["session_hours"] * 3600
     response.set_cookie(
@@ -437,6 +434,7 @@ async def health() -> dict[str, Any]:
         "configured": services.config.load().configured,
         "demo_mode": services.config.load().demo_mode,
         "artifacts": len(services.evidence.list()),
+        "discovery_worker": services.discovery_jobs.overview()["worker"]["online"],
         "assurance_worker": services.assurance.overview()["worker"]["online"],
         "connection_ready": bool(latest_diagnostic.get("ready")),
         "access_mode": "rbac" if auth_policy["enabled"] else "local-single-user",
@@ -450,9 +448,7 @@ async def auth_status(request: Request) -> dict[str, Any]:
 
 
 @app.post("/api/auth/bootstrap")
-async def auth_bootstrap(
-    value: AuthBootstrapRequest, request: Request, response: Response
-) -> dict[str, Any]:
+async def auth_bootstrap(value: AuthBootstrapRequest, request: Request, response: Response) -> dict[str, Any]:
     try:
         session = services.auth.bootstrap(
             username=value.username,
@@ -470,9 +466,7 @@ async def auth_bootstrap(
 
 
 @app.post("/api/auth/login")
-async def auth_login(
-    value: AuthLoginRequest, request: Request, response: Response
-) -> dict[str, Any]:
+async def auth_login(value: AuthLoginRequest, request: Request, response: Response) -> dict[str, Any]:
     try:
         session = services.auth.login(
             value.username,
@@ -502,9 +496,7 @@ async def auth_logout(request: Request, response: Response) -> dict[str, bool]:
 
 
 @app.post("/api/auth/disable")
-async def auth_disable(
-    value: AuthDisableRequest, request: Request, response: Response
-) -> dict[str, Any]:
+async def auth_disable(value: AuthDisableRequest, request: Request, response: Response) -> dict[str, Any]:
     principal = getattr(request.state, "principal", None)
     try:
         services.auth.disable(principal["id"] if principal else "", value.password)
@@ -521,25 +513,17 @@ async def auth_users() -> list[dict[str, Any]]:
 
 
 @app.post("/api/auth/users", status_code=201)
-async def auth_create_user(
-    value: AuthUserCreate, request: Request
-) -> dict[str, Any]:
+async def auth_create_user(value: AuthUserCreate, request: Request) -> dict[str, Any]:
     try:
-        return services.auth.create_user(
-            value, actor=request.state.principal
-        )
+        return services.auth.create_user(value, actor=request.state.principal)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.patch("/api/auth/users/{user_id}")
-async def auth_update_user(
-    user_id: str, value: AuthUserUpdate, request: Request
-) -> dict[str, Any]:
+async def auth_update_user(user_id: str, value: AuthUserUpdate, request: Request) -> dict[str, Any]:
     try:
-        return services.auth.update_user(
-            user_id, value, actor=request.state.principal
-        )
+        return services.auth.update_user(user_id, value, actor=request.state.principal)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="User not found") from exc
     except ValueError as exc:
@@ -582,12 +566,8 @@ async def put_settings(update: SettingsUpdate) -> dict[str, Any]:
             "verify_tls": update.settings.splunk.verify_ssl,
             "specialist_runtime": update.settings.specialist_runtime,
             "huggingface_policy": update.settings.huggingface_policy,
-            "detection_repository_enabled": (
-                update.settings.detection_repository.enabled
-            ),
-            "detection_repository_push": (
-                update.settings.detection_repository.allow_push
-            ),
+            "detection_repository_enabled": (update.settings.detection_repository.enabled),
+            "detection_repository_push": (update.settings.detection_repository.allow_push),
             "detection_repository_pull_request": (
                 update.settings.detection_repository.allow_draft_pull_request
             ),
@@ -772,40 +752,49 @@ async def _operation_stream(runner: Any):
                 yield json.dumps(event, default=str) + "\n"
             except TimeoutError:
                 sequence += 1
-                yield json.dumps(
-                    {
-                        "type": "heartbeat",
-                        "sequence": sequence,
-                        "phase": last_event.get("phase", "working"),
-                        "label": last_event.get("label", "Working"),
-                        "detail": last_event.get("detail", ""),
-                        "elapsed_seconds": round(time.monotonic() - started, 1),
-                    }
-                ) + "\n"
+                yield (
+                    json.dumps(
+                        {
+                            "type": "heartbeat",
+                            "sequence": sequence,
+                            "phase": last_event.get("phase", "working"),
+                            "label": last_event.get("label", "Working"),
+                            "detail": last_event.get("detail", ""),
+                            "elapsed_seconds": round(time.monotonic() - started, 1),
+                        }
+                    )
+                    + "\n"
+                )
         result = await task
         sequence += 1
-        yield json.dumps(
-            {
-                "type": "result",
-                "sequence": sequence,
-                "elapsed_seconds": round(time.monotonic() - started, 1),
-                "result": result,
-            },
-            default=str,
-        ) + "\n"
+        yield (
+            json.dumps(
+                {
+                    "type": "result",
+                    "sequence": sequence,
+                    "elapsed_seconds": round(time.monotonic() - started, 1),
+                    "result": result,
+                },
+                default=str,
+            )
+            + "\n"
+        )
     except asyncio.CancelledError:
         task.cancel()
         raise
     except Exception as exc:
         sequence += 1
-        yield json.dumps(
-            {
-                "type": "error",
-                "sequence": sequence,
-                "elapsed_seconds": round(time.monotonic() - started, 1),
-                "error": str(exc),
-            }
-        ) + "\n"
+        yield (
+            json.dumps(
+                {
+                    "type": "error",
+                    "sequence": sequence,
+                    "elapsed_seconds": round(time.monotonic() - started, 1),
+                    "error": str(exc),
+                }
+            )
+            + "\n"
+        )
 
 
 def _stream_response(runner: Any) -> StreamingResponse:
@@ -890,9 +879,7 @@ async def run_model_tournament(request: ModelTournamentRunCreate) -> StreamingRe
 
     async def run(progress: Any) -> dict[str, Any]:
         async with services.benchmark_lock:
-            return await services.model_tournaments.run(
-                request.profile_ids, request.target, progress
-            )
+            return await services.model_tournaments.run(request.profile_ids, request.target, progress)
 
     return _stream_response(run)
 
@@ -902,9 +889,7 @@ async def review_model_tournament(
     tournament_id: str, request: ModelTournamentReviewRequest
 ) -> dict[str, Any]:
     try:
-        result = services.model_tournaments.review(
-            tournament_id, request.pair_id, request.choice
-        )
+        result = services.model_tournaments.review(tournament_id, request.pair_id, request.choice)
     except KeyError as exc:
         raise HTTPException(404, str(exc)) from exc
     except ValueError as exc:
@@ -929,9 +914,7 @@ async def promote_model_tournament(
     tournament_id: str, request: ModelTournamentPromotionRequest
 ) -> dict[str, Any]:
     try:
-        result = services.model_tournaments.promote(
-            tournament_id, request.profile_id, request.fingerprint
-        )
+        result = services.model_tournaments.promote(tournament_id, request.profile_id, request.fingerprint)
     except KeyError as exc:
         raise HTTPException(404, str(exc)) from exc
     except ValueError as exc:
@@ -1030,6 +1013,90 @@ async def latest_discovery() -> dict[str, Any]:
     return services.discovery.latest_summary() or {}
 
 
+@app.get("/api/discovery/jobs")
+async def discovery_jobs(limit: int = 20) -> dict[str, Any]:
+    return services.discovery_jobs.overview(limit=max(1, min(limit, 100)))
+
+
+@app.post("/api/discovery/jobs", status_code=202)
+async def create_discovery_job(value: DiscoveryRequest, request: Request) -> dict[str, Any]:
+    principal = getattr(request.state, "principal", None) or {}
+    actor = str(principal.get("username") or "local-operator")
+    try:
+        job = services.discovery_jobs.enqueue(value.depth, actor)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    services.audit.record(
+        "discovery.job.queued",
+        "queue",
+        target_type="discovery-job",
+        target_id=job.id,
+        summary=f"A durable {job.depth} manual discovery job was queued.",
+        metadata={
+            "depth": job.depth,
+            "call_budget": job.call_budget,
+            "restart_recovery": "fresh-read-only-retry",
+        },
+        actor=actor,
+    )
+    return job.model_dump(mode="json")
+
+
+@app.get("/api/discovery/jobs/{job_id}")
+async def discovery_job(job_id: str) -> dict[str, Any]:
+    job = services.discovery_job_store.get_job(job_id)
+    if job is None:
+        raise HTTPException(404, "Manual discovery job not found")
+    return {
+        "job": job.model_dump(mode="json"),
+        "events": services.discovery_job_store.events(job_id, limit=100),
+        "result_available": services.discovery_job_store.result(job_id) is not None,
+    }
+
+
+@app.get("/api/discovery/jobs/{job_id}/events")
+async def discovery_job_events(job_id: str, after_id: int = 0, limit: int = 100) -> dict[str, Any]:
+    job = services.discovery_job_store.get_job(job_id)
+    if job is None:
+        raise HTTPException(404, "Manual discovery job not found")
+    return {
+        "job": job.model_dump(mode="json"),
+        "events": services.discovery_job_store.events(
+            job_id, limit=max(1, min(limit, 200)), after_id=max(0, after_id)
+        ),
+    }
+
+
+@app.get("/api/discovery/jobs/{job_id}/result")
+async def discovery_job_result(job_id: str) -> dict[str, Any]:
+    job = services.discovery_job_store.get_job(job_id)
+    if job is None:
+        raise HTTPException(404, "Manual discovery job not found")
+    result = services.discovery_job_store.result(job_id)
+    if result is None:
+        raise HTTPException(409, "This discovery job does not have a retained result")
+    return result
+
+
+@app.post("/api/discovery/jobs/{job_id}/cancel")
+async def cancel_discovery_job(job_id: str, request: Request) -> dict[str, Any]:
+    job = await services.discovery_jobs.cancel(job_id)
+    if job is None:
+        raise HTTPException(404, "Manual discovery job not found")
+    principal = getattr(request.state, "principal", None) or {}
+    services.audit.record(
+        "discovery.job.cancelled",
+        "cancel",
+        target_type="discovery-job",
+        target_id=job_id,
+        outcome="cancelled",
+        summary="Manual discovery cancellation was requested.",
+        metadata={"status": job.status, "splunk_calls": job.calls_used},
+        actor=str(principal.get("username") or "local-operator"),
+    )
+    return job.model_dump(mode="json")
+
+
 @app.post("/api/discovery/stream")
 async def discovery_stream(request: DiscoveryRequest) -> StreamingResponse:
     async def run(progress: Any) -> dict[str, Any]:
@@ -1073,9 +1140,7 @@ async def update_assurance_policy(request: AssurancePolicyUpdate) -> dict[str, A
         "update",
         target_type="assurance-policy",
         target_id="primary",
-        summary=(
-            f"Continuous assurance scheduling was {'enabled' if request.enabled else 'disabled'}."
-        ),
+        summary=(f"Continuous assurance scheduling was {'enabled' if request.enabled else 'disabled'}."),
         metadata=request.model_dump(mode="json"),
     )
     return await assurance_overview()
@@ -1179,9 +1244,7 @@ async def preview_assurance_delivery(package_id: str) -> dict[str, Any]:
 
 
 @app.post("/api/assurance/packages/{package_id}/delivery/approve", status_code=202)
-async def approve_assurance_delivery(
-    package_id: str, request: DeliveryApproval
-) -> dict[str, Any]:
+async def approve_assurance_delivery(package_id: str, request: DeliveryApproval) -> dict[str, Any]:
     try:
         return services.delivery.approve(package_id, request.expected_payload_sha256)
     except KeyError as exc:
@@ -1471,8 +1534,7 @@ async def preserve_detection_deployment_verification(
         target_id=snapshot["case_item_id"],
         outcome=snapshot["status"],
         summary=(
-            "An exact Splunk deployment verification snapshot was preserved "
-            "in the linked case timeline."
+            "An exact Splunk deployment verification snapshot was preserved in the linked case timeline."
         ),
         metadata={
             "detection_id": detection_id,
@@ -1517,9 +1579,7 @@ async def create_detection_runtime_draft(
         ),
         metadata={
             "detection_id": detection_id,
-            "deployment_snapshot_sha256": runtime[
-                "deployment_snapshot_sha256"
-            ],
+            "deployment_snapshot_sha256": runtime["deployment_snapshot_sha256"],
             "runtime_check_sha256": runtime["check_sha256"],
             "query_fingerprint": runtime["query_fingerprint"],
             "validation_task_id": runtime["validation_task_id"],
@@ -1531,9 +1591,7 @@ async def create_detection_runtime_draft(
     return {"runtime": runtime, "reused": reused}
 
 
-@app.post(
-    "/api/detections/{detection_id}/deployment-verification/runtime-assessment"
-)
+@app.post("/api/detections/{detection_id}/deployment-verification/runtime-assessment")
 async def assess_detection_runtime(
     detection_id: str,
     request: DetectionRuntimeAssessmentRequest,
@@ -1559,9 +1617,7 @@ async def assess_detection_runtime(
             "as snapshot-bound runtime evidence."
         ),
         metadata={
-            "deployment_snapshot_sha256": runtime[
-                "deployment_snapshot_sha256"
-            ],
+            "deployment_snapshot_sha256": runtime["deployment_snapshot_sha256"],
             "runtime_check_sha256": runtime["check_sha256"],
             "assessment_sha256": runtime["assessment_sha256"],
             "validation_task_id": runtime["validation_task_id"],
@@ -1574,9 +1630,7 @@ async def assess_detection_runtime(
     return runtime
 
 
-@app.post(
-    "/api/detections/{detection_id}/deployment-verification/runtime-case"
-)
+@app.post("/api/detections/{detection_id}/deployment-verification/runtime-case")
 async def preserve_detection_runtime(
     detection_id: str,
     request: DetectionRuntimeCaseRequest,
@@ -1597,15 +1651,10 @@ async def preserve_detection_runtime(
         target_type="case-item",
         target_id=runtime["case_item_id"],
         outcome=assessment["status"],
-        summary=(
-            "An exact snapshot-bound runtime assessment was preserved in the "
-            "linked case timeline."
-        ),
+        summary=("An exact snapshot-bound runtime assessment was preserved in the linked case timeline."),
         metadata={
             "detection_id": detection_id,
-            "deployment_snapshot_sha256": runtime[
-                "deployment_snapshot_sha256"
-            ],
+            "deployment_snapshot_sha256": runtime["deployment_snapshot_sha256"],
             "runtime_check_sha256": runtime["check_sha256"],
             "assessment_sha256": runtime["assessment_sha256"],
             "validation_task_id": runtime["validation_task_id"],
@@ -1619,9 +1668,7 @@ async def preserve_detection_runtime(
 
 
 @app.patch("/api/detections/{detection_id}")
-async def update_detection(
-    detection_id: str, request: DetectionUpdate
-) -> dict[str, Any]:
+async def update_detection(detection_id: str, request: DetectionUpdate) -> dict[str, Any]:
     prior = services.detection_store.get(detection_id)
     try:
         detection = services.detections.update(detection_id, request)
@@ -1669,9 +1716,7 @@ async def submit_detection(detection_id: str) -> dict[str, Any]:
 
 
 @app.post("/api/detections/{detection_id}/gate")
-async def run_detection_gate(
-    detection_id: str, request: DetectionGateRunRequest
-) -> dict[str, Any]:
+async def run_detection_gate(detection_id: str, request: DetectionGateRunRequest) -> dict[str, Any]:
     try:
         gate = services.detections.run_gate(detection_id, request)
     except KeyError as exc:
@@ -1708,19 +1753,13 @@ async def create_detection_validation_draft(
     detection_id: str, request: DetectionValidationDraftRequest
 ) -> dict[str, Any]:
     try:
-        task, reused = services.detections.create_validation_draft(
-            detection_id, request
-        )
+        task, reused = services.detections.create_validation_draft(detection_id, request)
     except KeyError as exc:
         raise HTTPException(404, str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from exc
     services.audit.record(
-        (
-            "detection.validation.reused"
-            if reused
-            else "detection.validation.draft.created"
-        ),
+        ("detection.validation.reused" if reused else "detection.validation.draft.created"),
         "reuse" if reused else "create",
         target_type="validation-task",
         target_id=task.id,
@@ -1728,8 +1767,7 @@ async def create_detection_validation_draft(
             "An existing exact validation contract was reused for the detection gate."
             if reused
             else (
-                "A bounded validation draft was created for analyst approval; "
-                "no Splunk search was executed."
+                "A bounded validation draft was created for analyst approval; no Splunk search was executed."
             )
         ),
         metadata={
@@ -1744,9 +1782,7 @@ async def create_detection_validation_draft(
 
 
 @app.post("/api/detections/{detection_id}/review")
-async def review_detection(
-    detection_id: str, request: DetectionReviewRequest
-) -> dict[str, Any]:
+async def review_detection(detection_id: str, request: DetectionReviewRequest) -> dict[str, Any]:
     try:
         detection = services.detections.review(detection_id, request)
     except ValueError as exc:
@@ -1782,9 +1818,7 @@ async def review_detection(
 
 
 @app.post("/api/detections/{detection_id}/export")
-async def export_detection(
-    detection_id: str, request: DetectionExportRequest
-) -> dict[str, Any]:
+async def export_detection(detection_id: str, request: DetectionExportRequest) -> dict[str, Any]:
     try:
         detection, path = services.detections.export(detection_id, request)
     except KeyError as exc:
@@ -1993,10 +2027,7 @@ async def open_detection_repository_pull_request(
         "create",
         target_type="detection-repository-handoff",
         target_id=handoff_id,
-        summary=(
-            "A draft pull request was explicitly opened for the exact pushed "
-            "detection commit."
-        ),
+        summary=("A draft pull request was explicitly opened for the exact pushed detection commit."),
         metadata={
             "detection_id": result["detection_id"],
             "branch_name": result["branch_name"],
@@ -2029,10 +2060,7 @@ async def refresh_detection_repository_review(
         target_type="detection-repository-handoff",
         target_id=handoff_id,
         outcome=review["risk_level"],
-        summary=(
-            "An explicit read-only GitHub refresh captured exact pull-request, "
-            "review, and CI state."
-        ),
+        summary=("An explicit read-only GitHub refresh captured exact pull-request, review, and CI state."),
         metadata={
             "detection_id": result["detection_id"],
             "commit_sha": result["commit_sha"],
@@ -2070,10 +2098,7 @@ async def preserve_detection_repository_review(
         target_type="case-item",
         target_id=review["case_item_id"],
         outcome=review["risk_level"],
-        summary=(
-            "An exact repository feedback snapshot was preserved in the "
-            "linked case timeline."
-        ),
+        summary=("An exact repository feedback snapshot was preserved in the linked case timeline."),
         metadata={
             "detection_id": result["detection_id"],
             "handoff_id": handoff_id,
@@ -2223,9 +2248,7 @@ async def add_case_item(case_id: str, request: CaseItemCreate) -> dict[str, Any]
 
 
 @app.patch("/api/cases/{case_id}/items/{item_id}")
-async def update_case_item(
-    case_id: str, item_id: str, request: CaseItemUpdate
-) -> dict[str, Any]:
+async def update_case_item(case_id: str, item_id: str, request: CaseItemUpdate) -> dict[str, Any]:
     item = services.cases.update_item(case_id, item_id, request)
     if not item:
         raise HTTPException(404, "Case timeline item not found")
