@@ -180,11 +180,18 @@ notable-event creation, suppression behavior, or response delivery.
 
 ## Outbound delivery is a separate authority
 
-`AssuranceDeliveryService` owns a separately opt-in generic webhook policy and restart-safe delivery worker. A
-deterministic redactor creates the exact payload preview; manual approval binds its SHA-256 to the destination
-fingerprint. Automatic policy is a separate operator choice and still applies severity and signal-kind routing.
-Requests carry an idempotency key, do not follow redirects, use verified TLS by default, and have bounded exponential
-retries. The payload contract explicitly grants no Splunk execution or validation approval authority.
+`AssuranceDeliveryService` owns a separately opt-in adapter policy and restart-safe delivery worker. The durable
+adapter identity currently selects a generic JSON webhook or Slack Incoming Webhook. A deterministic redactor creates
+the exact adapter-native payload preview; manual approval binds its SHA-256 to the destination fingerprint. Automatic
+policy is a separate operator choice and still applies severity and signal-kind routing. Any adapter or transport
+identity change cancels stale queued work and requires a new preview.
+
+Generic requests carry an idempotency key and may use an encrypted authorization value. Slack requests use verified
+TLS, an allowlisted Incoming Webhook URL shape, and `plain_text` Block Kit objects; generic authorization and
+idempotency headers are not sent to Slack. Both adapters refuse redirects and use bounded exponential retries, but
+Slack delivery is explicitly at-least-once because Incoming Webhooks do not document a destination idempotency key
+and an ambiguous retry can duplicate a post. Every adapter contract grants no Splunk execution or validation
+approval authority.
 
 `AuditStore` records delivery and major control-plane decisions in an append-only local SHA-256 hash chain. Secrets
 are redacted before persistence. The UI verifies the chain, but the local database is not a substitute for a remote

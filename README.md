@@ -20,7 +20,7 @@ This is a focused reimplementation inspired by [LeiterConsulting/splunk-discover
 - Deterministic SPL cost and reuse intelligence before approval, including safer staged contracts and exact-result reuse
 - Local analyst feedback and model/task outcome scorecards with no telemetry export
 - Versioned local golden investigations with isolated evidence, instrumented tool selection, durable baselines, and explicit promotion gates
-- Opt-in generic webhook delivery with exact redaction previews, hash-bound approval, idempotent retries, and a tamper-evident local audit chain
+- Opt-in generic JSON and Slack Incoming Webhook adapters with exact redaction previews, hash-bound approval, guarded routing, and a tamper-evident local audit chain
 - Evidence-bound detection-as-code projects with immutable versions, exact-hash review, case linkage, and disabled-by-default Splunk packages
 - Ollama chat and tool-capable model support
 - Hugging Face chat, embedding, and token-classification adapters
@@ -416,14 +416,24 @@ resolved. Repeated medium/low signals and first-seen high/critical signals creat
 Each package can pivot into Investigate, a case, or the validation queue. Continuous assurance never approves or
 executes proposed validation SPL automatically.
 
-Outbound response-package delivery is independently disabled by default. The first adapter is a generic HTTPS
-webhook (with loopback HTTP permitted only for local testing). Strict redaction sends package metadata and aggregate
-signal counts; standard redaction may additionally include bounded signal titles and subjects. Neither level includes
-raw events, SPL, validation identifiers, signal fingerprints, discovery run identifiers, Splunk credentials, or
-endpoint configuration. Manual mode binds approval to the exact payload SHA-256 and destination identity. Automatic
-mode must be separately enabled and applies severity/category policy before creating an idempotent delivery job.
-Attempt state, exponential backoff, explicit retry batches, and restart recovery are durable. Disabling delivery
-cancels queued work; saved destination and authorization secrets can also be explicitly removed.
+Outbound response-package delivery is independently disabled by default. Operators can select a generic JSON webhook
+(with loopback HTTP permitted only for local testing) or a Slack Incoming Webhook. Strict redaction sends opaque
+package metadata and aggregate signal counts while withholding source-derived package and signal text. Standard
+redaction may additionally include bounded package text, signal titles, and subjects. Neither level includes raw
+events, SPL, validation identifiers, signal fingerprints, discovery run identifiers, Splunk credentials, or endpoint
+configuration. Manual mode binds approval to the exact payload SHA-256 and destination identity. Automatic mode must
+be separately enabled and applies severity/category policy before creating a locally deduplicated delivery job.
+
+The Slack adapter accepts only complete `hooks.slack.com` or `hooks.slack-gov.com` URLs, requires verified TLS, emits
+only `plain_text` Block Kit objects, and never sends the generic authorization header. Slack controls the destination
+channel, sender name, and icon. Incoming Webhooks do not expose a delete operation or document a destination
+idempotency key, so an ambiguous retry can duplicate a notification. These limits are shown in the exact-payload
+approval modal. See Slack's
+[Incoming Webhooks documentation](https://docs.slack.dev/messaging/sending-messages-using-incoming-webhooks/).
+
+Attempt state, exponential backoff, explicit retry batches, and restart recovery are durable. Changing the adapter,
+URL, authorization identity, TLS policy, or private CA cancels stale queued work and requires a fresh preview.
+Disabling delivery also cancels queued work; saved destination and authorization secrets can be explicitly removed.
 
 Ollama model switching is serialized to avoid local accelerator contention. Generative passes use deterministic,
 token-bounded structured output, strict local validation, and one visible repair/fallback attempt when necessary.
@@ -477,8 +487,9 @@ Major local control-plane decisions and every outbound delivery action are writt
 append-only SHA-256 hash chain. Audit metadata applies key-based secret redaction and the Discovery interface reports
 chain integrity. This is a tamper-evident local record, not an external immutable audit sink.
 
-The next assurance increment is destination adapters and guarded routing beyond the generic webhook. Cross-model
-tournaments now compare promotion-ready local profiles before an explicitly approved routing change.
+The next assurance integration increment is a destination-specific ticketing or SOAR adapter with an explicit
+authority contract, operator-controlled field mapping, and durable external-record correlation. Cross-model
+tournaments already compare promotion-ready local profiles before an explicitly approved routing change.
 
 ### Context
 

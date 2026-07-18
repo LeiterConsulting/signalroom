@@ -36,3 +36,13 @@ def test_discovery_presents_securebert_labels_as_validated_candidates() -> None:
     assert "Entity labels are candidates, not findings." in APP_JS
     assert "suppressed before synthesis and RAG" in APP_JS
     assert "<h4>SecureBERT enrichment</h4>" not in APP_JS
+
+
+def test_delivery_exposes_adapter_semantics_before_approval() -> None:
+    assert 'id="deliveryKind"' in INDEX_HTML
+    assert 'value="slack-incoming-webhook"' in INDEX_HTML
+    assert 'id="deliveryAdapterHelp"' in INDEX_HTML
+    assert 'id="deliveryWarnings"' in INDEX_HTML
+    assert "Configure generic webhook policy" not in INDEX_HTML
+    assert "Slack receives plain-text notification blocks only over verified TLS." in APP_JS
+    assert "no SPL execution or validation approval" in APP_JS

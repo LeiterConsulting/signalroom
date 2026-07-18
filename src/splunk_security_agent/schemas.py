@@ -323,11 +323,13 @@ class AssuranceRunRecord(BaseModel):
 
 DeliverySignalKind = Literal["finding", "coverage", "inventory", "mltk", "collection"]
 DeliverySeverity = Literal["low", "medium", "high", "critical"]
+DeliveryDestinationKind = Literal["generic-webhook", "slack-incoming-webhook"]
 
 
 class DeliveryPolicyUpdate(BaseModel):
     enabled: bool = False
     mode: Literal["manual", "automatic"] = "manual"
+    destination_kind: DeliveryDestinationKind = "generic-webhook"
     minimum_severity: DeliverySeverity = "high"
     signal_kinds: list[DeliverySignalKind] = Field(
         default_factory=lambda: ["finding", "coverage", "inventory", "mltk", "collection"],

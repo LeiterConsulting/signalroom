@@ -1315,11 +1315,49 @@ async function closeAssurancePackage(packageId) {
   catch (error) { toast(error.message); }
 }
 
+function deliveryAdapterName(kind) {
+  return kind === 'slack-incoming-webhook' ? 'Slack Incoming Webhook' : 'Generic JSON webhook';
+}
+
+function updateDeliveryAdapter(destination = state.assurance?.delivery?.destination || {}) {
+  const kind = $('#deliveryKind').value;
+  const isSlack = kind === 'slack-incoming-webhook';
+  const adapterChanged = Boolean(destination.kind && destination.kind !== kind);
+  $('#deliveryAuthorizationField').hidden = isSlack;
+  $('#deliveryClearAuthorizationField').hidden = isSlack;
+  $('#deliveryAuthorization').disabled = isSlack;
+  $('#deliveryClearAuthorization').disabled = isSlack;
+  $('#deliveryVerifyTls').disabled = isSlack;
+  $('#deliveryCaField').hidden = isSlack;
+  $('#deliveryCaBundle').disabled = isSlack;
+  if (isSlack) $('#deliveryVerifyTls').checked = true;
+  $('#deliveryTlsField small').textContent = isSlack
+    ? 'Required for the public Slack destination and cannot be disabled.'
+    : 'Recommended. A private CA path can be supplied for internal destinations.';
+  $('#deliveryUrlLabel').textContent = isSlack ? 'Slack Incoming Webhook URL' : 'HTTPS webhook URL';
+  $('#deliveryUrlHelp').textContent = isSlack
+    ? 'Use the complete encrypted hooks.slack.com or hooks.slack-gov.com /services/ URL. SignalRoom never returns the secret path.'
+    : 'HTTPS required; loopback HTTP is accepted only for local testing.';
+  $('#deliveryAdapterHelp').textContent = isSlack
+    ? `Slack receives plain-text notification blocks only over verified TLS. Its configured channel, sender, and icon cannot be overridden.${destination.authorization_configured ? ' A saved generic authorization value remains encrypted but is not sent.' : ''}`
+    : 'Generic webhooks receive the exact previewed JSON, a payload hash, an idempotency key, and the optional authorization header.';
+  if (!$('#deliveryWebhookUrl').value) {
+    $('#deliveryWebhookUrl').placeholder = adapterChanged
+      ? `Enter a ${deliveryAdapterName(kind)} URL to change adapters`
+      : destination.configured
+        ? 'Encrypted destination configured · leave blank to keep'
+        : isSlack
+          ? 'https://hooks.slack.com/services/…'
+          : 'https://automation.example/hooks/signalroom';
+  }
+}
+
 function hydrateDeliveryPolicy(value) {
   if (!value?.policy || state.deliveryPolicyDirty) return;
   const policy = value.policy;
   $('#deliveryEnabled').checked = Boolean(policy.enabled);
   $('#deliveryMode').value = policy.mode;
+  $('#deliveryKind').value = policy.destination_kind || 'generic-webhook';
   $('#deliverySeverity').value = policy.minimum_severity;
   $('#deliveryLabel').value = policy.destination_label;
   $('#deliveryRedaction').value = policy.redaction_level;
@@ -1332,18 +1370,18 @@ function hydrateDeliveryPolicy(value) {
   $('#deliveryAuthorization').value = '';
   $('#deliveryClearWebhookUrl').checked = false;
   $('#deliveryClearAuthorization').checked = false;
-  $('#deliveryWebhookUrl').placeholder = value.destination?.configured ? 'Encrypted destination configured · leave blank to keep' : 'https://automation.example/hooks/signalroom';
   $('#deliveryAuthorization').placeholder = value.destination?.authorization_configured ? 'Encrypted authorization configured · leave blank to keep' : 'Optional · Bearer …';
+  updateDeliveryAdapter(value.destination);
 }
 
 function renderDelivery(value) {
   const delivery = value.delivery || {}; const policy = delivery.policy || {}; const destination = delivery.destination || {};
   hydrateDeliveryPolicy(delivery);
   const ready = Boolean(policy.enabled && destination.configured);
-  $('#deliveryStatus').textContent = ready ? `${policy.mode} · ${destination.origin}` : policy.enabled ? 'Destination required' : 'Disabled · local only';
+  $('#deliveryStatus').textContent = ready ? `${deliveryAdapterName(destination.kind)} · ${policy.mode}` : policy.enabled ? 'Destination required' : 'Disabled · local only';
   $('#deliveryStatus').className = `subtle-pill ${ready ? 'ok' : policy.enabled ? 'warn' : ''}`;
   $('#deliveryDestinationHint').textContent = destination.configured
-    ? `${destination.origin} · ${destination.transport} · ${destination.authorization_configured ? 'authorization configured' : 'no authorization header'}`
+    ? `${deliveryAdapterName(destination.kind)} · ${destination.origin} · ${destination.transport} · ${destination.delivery_semantics}`
     : 'No outbound destination configured';
   const jobs = delivery.jobs || [];
   $('#deliveryJobs').innerHTML = jobs.length ? jobs.slice(0,12).map(job => {
@@ -1353,7 +1391,7 @@ function renderDelivery(value) {
         ? `<button class="button ghost small" data-cancel-delivery="${escapeHtml(job.id)}">Cancel</button>`
         : '';
     const timing = job.status === 'delivered' ? `Delivered ${assuranceTime(job.delivered_at)}` : job.next_attempt_at ? `Next attempt ${assuranceTime(job.next_attempt_at)}` : assuranceTime(job.updated_at);
-    return `<article class="delivery-job ${escapeHtml(job.status)}"><header><span>${escapeHtml(job.approval_mode.replaceAll('-', ' '))}</span><b>${escapeHtml(job.status)}</b></header><p>Package <code>${escapeHtml(job.package_id.slice(0,8))}</code> → ${escapeHtml(job.destination_label)}</p><div><span>${job.attempt_count}/${job.max_attempts} attempts</span><span>HTTP ${job.http_status || '—'}</span><span>Hash <code>${escapeHtml(job.payload_sha256.slice(0,12))}</code></span></div>${job.last_error ? `<small>${escapeHtml(job.last_error)}</small>` : ''}<footer><time>${escapeHtml(timing)}</time>${action}</footer></article>`;
+    return `<article class="delivery-job ${escapeHtml(job.status)}"><header><span>${escapeHtml(job.approval_mode.replaceAll('-', ' '))}</span><b>${escapeHtml(job.status)}</b></header><p>Package <code>${escapeHtml(job.package_id.slice(0,8))}</code> → ${escapeHtml(job.destination_label)}</p><div><span>${escapeHtml(deliveryAdapterName(job.destination_kind))}</span><span>${job.attempt_count}/${job.max_attempts} attempts</span><span>HTTP ${job.http_status || '—'}</span><span>Hash <code>${escapeHtml(job.payload_sha256.slice(0,12))}</code></span></div>${job.last_error ? `<small>${escapeHtml(job.last_error)}</small>` : ''}<footer><time>${escapeHtml(timing)}</time>${action}</footer></article>`;
   }).join('') : '<div class="empty-inline compact-empty">No outbound package has been approved. Preview an eligible response package to start.</div>';
   const audit = value.audit || {}; const chain = audit.chain || {};
   $('#auditChainStatus').textContent = chain.valid ? `${chain.event_count || 0} events · chain valid` : `Integrity break at event ${chain.broken_sequence || 'unknown'}`;
@@ -1368,6 +1406,7 @@ async function saveDeliveryPolicy(event) {
   const payload = {
     enabled:$('#deliveryEnabled').checked,
     mode:$('#deliveryMode').value,
+    destination_kind:$('#deliveryKind').value,
     minimum_severity:$('#deliverySeverity').value,
     signal_kinds:signalKinds,
     redaction_level:$('#deliveryRedaction').value,
@@ -1391,8 +1430,9 @@ async function previewAssuranceDelivery(packageId) {
   try {
     const preview = await api(`/api/assurance/packages/${encodeURIComponent(packageId)}/delivery/preview`, {method:'POST'});
     state.deliveryPreview = preview;
-    $('#deliveryPreviewContract').innerHTML = `<span><b>${escapeHtml(preview.destination.label)}</b>${escapeHtml(preview.destination.origin)}</span><span><b>${preview.payload_bytes} bytes</b>${escapeHtml(preview.redaction_level)} redaction</span><span><b>SHA-256</b><code>${escapeHtml(preview.payload_sha256)}</code></span><span><b>Authority</b>Delivery only · no SPL execution</span>`;
+    $('#deliveryPreviewContract').innerHTML = `<span><b>${escapeHtml(preview.destination.label)}</b>${escapeHtml(deliveryAdapterName(preview.destination.kind))} · ${escapeHtml(preview.destination.origin)}</span><span><b>${preview.payload_bytes} bytes</b>${escapeHtml(preview.redaction_level)} redaction</span><span><b>SHA-256</b><code>${escapeHtml(preview.payload_sha256)}</code></span><span><b>Authority</b>Delivery only · no SPL execution or validation approval</span><span><b>Delivery behavior</b>${escapeHtml(preview.destination.delivery_semantics)}</span>`;
     $('#deliveryRedactions').innerHTML = preview.redactions.map(item => `<li>${escapeHtml(item)}</li>`).join('');
+    $('#deliveryWarnings').innerHTML = (preview.warnings || []).map(item => `<li>${escapeHtml(item)}</li>`).join('');
     $('#deliveryPreviewPayload').textContent = JSON.stringify(preview.payload, null, 2);
     $('#approveDelivery').textContent = preview.approval_required ? 'Approve exact payload and queue' : 'Queue exact payload under automatic policy';
     $('#deliveryPreviewModal').hidden = false;
@@ -2928,6 +2968,7 @@ $('#approveDelivery').addEventListener('click', approveDeliveryPreview);
 $('#runAssuranceNow').addEventListener('click', runAssuranceNow);
 $('#cancelAssuranceRun').addEventListener('click', cancelAssuranceRun);
 $('#assuranceDepth').addEventListener('change', updateAssuranceBudgetHelp);
+$('#deliveryKind').addEventListener('change', () => updateDeliveryAdapter());
 $$('#assuranceForm input,#assuranceForm select').forEach(node => node.addEventListener('change', () => { state.assurancePolicyDirty = true; }));
 $$('#deliveryForm input,#deliveryForm select').forEach(node => node.addEventListener('change', () => { state.deliveryPolicyDirty = true; }));
 $('#scanSplunkModels').addEventListener('click', scanSplunkModels);

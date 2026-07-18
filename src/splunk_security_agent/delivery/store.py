@@ -11,6 +11,7 @@ from uuid import uuid4
 from ..schemas import DeliveryPolicyUpdate
 
 DEFAULT_SIGNAL_KINDS = ["finding", "coverage", "inventory", "mltk", "collection"]
+DEFAULT_DESTINATION_KIND = "generic-webhook"
 
 
 def _now() -> str:
@@ -40,6 +41,7 @@ class DeliveryStore:
                     id INTEGER PRIMARY KEY CHECK (id=1),
                     enabled INTEGER NOT NULL,
                     mode TEXT NOT NULL,
+                    destination_kind TEXT NOT NULL DEFAULT 'generic-webhook',
                     minimum_severity TEXT NOT NULL,
                     signal_kinds TEXT NOT NULL,
                     redaction_level TEXT NOT NULL,
@@ -55,6 +57,7 @@ class DeliveryStore:
                     package_id TEXT NOT NULL,
                     status TEXT NOT NULL,
                     approval_mode TEXT NOT NULL,
+                    destination_kind TEXT NOT NULL DEFAULT 'generic-webhook',
                     destination_label TEXT NOT NULL,
                     destination_fingerprint TEXT NOT NULL,
                     payload TEXT NOT NULL,
@@ -89,12 +92,29 @@ class DeliveryStore:
                     ON delivery_attempts(job_id, id DESC);
                 """
             )
+            policy_columns = {
+                str(row["name"]) for row in db.execute("PRAGMA table_info(delivery_policy)").fetchall()
+            }
+            if "destination_kind" not in policy_columns:
+                db.execute(
+                    "ALTER TABLE delivery_policy ADD COLUMN destination_kind "
+                    "TEXT NOT NULL DEFAULT 'generic-webhook'"
+                )
+            job_columns = {
+                str(row["name"]) for row in db.execute("PRAGMA table_info(delivery_jobs)").fetchall()
+            }
+            if "destination_kind" not in job_columns:
+                db.execute(
+                    "ALTER TABLE delivery_jobs ADD COLUMN destination_kind "
+                    "TEXT NOT NULL DEFAULT 'generic-webhook'"
+                )
             db.execute(
                 """INSERT OR IGNORE INTO delivery_policy
-                (id,enabled,mode,minimum_severity,signal_kinds,redaction_level,
+                (id,enabled,mode,destination_kind,minimum_severity,signal_kinds,redaction_level,
                 destination_label,verify_tls,ca_bundle,max_attempts,retry_backoff_seconds,
                 updated_at)
-                VALUES (1,0,'manual','high',?,'strict','Primary webhook',1,'',3,60,?)""",
+                VALUES (1,0,'manual','generic-webhook','high',?,'strict',
+                'Primary webhook',1,'',3,60,?)""",
                 (json.dumps(DEFAULT_SIGNAL_KINDS), now),
             )
 
@@ -109,12 +129,13 @@ class DeliveryStore:
         with self._lock, self.connect() as db:
             db.execute(
                 """UPDATE delivery_policy SET enabled=?,mode=?,minimum_severity=?,
-                signal_kinds=?,redaction_level=?,destination_label=?,verify_tls=?,
+                destination_kind=?,signal_kinds=?,redaction_level=?,destination_label=?,verify_tls=?,
                 ca_bundle=?,max_attempts=?,retry_backoff_seconds=?,updated_at=? WHERE id=1""",
                 (
                     int(value.enabled),
                     value.mode,
                     value.minimum_severity,
+                    value.destination_kind,
                     json.dumps(sorted(set(value.signal_kinds))),
                     value.redaction_level,
                     value.destination_label,
@@ -132,6 +153,7 @@ class DeliveryStore:
         *,
         package_id: str,
         approval_mode: str,
+        destination_kind: str,
         destination_label: str,
         destination_fingerprint: str,
         payload: dict[str, Any],
@@ -155,14 +177,16 @@ class DeliveryStore:
             else:
                 db.execute(
                     """INSERT INTO delivery_jobs
-                    (id,package_id,status,approval_mode,destination_label,destination_fingerprint,
+                    (id,package_id,status,approval_mode,destination_kind,destination_label,
+                    destination_fingerprint,
                     payload,payload_sha256,idempotency_key,attempt_count,max_attempts,next_attempt_at,
                     last_error,http_status,created_at,approved_at,delivered_at,updated_at)
-                    VALUES (?,?,'queued',?,?,?,?,?,?,0,?,?,'',NULL,?,?,NULL,?)""",
+                    VALUES (?,?,'queued',?,?,?,?,?,?,?,0,?,?,'',NULL,?,?,NULL,?)""",
                     (
                         job_id,
                         package_id,
                         approval_mode,
+                        destination_kind,
                         destination_label,
                         destination_fingerprint,
                         json.dumps(
@@ -350,7 +374,7 @@ class DeliveryStore:
         with self._lock, self.connect() as db:
             changed = db.execute(
                 """UPDATE delivery_jobs SET status='retrying',next_attempt_at=?,
-                last_error='Process restarted during delivery; retry remains idempotent.',
+                last_error='Process restarted during delivery; retry uses the original approved payload.',
                 updated_at=? WHERE status='sending'""",
                 (now, now),
             ).rowcount
@@ -381,6 +405,7 @@ class DeliveryStore:
         return {
             "enabled": bool(row["enabled"]),
             "mode": row["mode"],
+            "destination_kind": row["destination_kind"] or DEFAULT_DESTINATION_KIND,
             "minimum_severity": row["minimum_severity"],
             "signal_kinds": json.loads(row["signal_kinds"]),
             "redaction_level": row["redaction_level"],
@@ -404,6 +429,7 @@ class DeliveryStore:
             "package_id": row["package_id"],
             "status": row["status"],
             "approval_mode": row["approval_mode"],
+            "destination_kind": row["destination_kind"] or DEFAULT_DESTINATION_KIND,
             "destination_label": row["destination_label"],
             "destination_fingerprint": row["destination_fingerprint"],
             "payload": json.loads(row["payload"]),
