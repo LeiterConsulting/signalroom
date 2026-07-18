@@ -65,6 +65,29 @@ Lifecycle commands intentionally mirror the Splunk Discovery Tool:
 
 See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for port fallback, logs, unattended installs, data preservation, and Docker.
 
+## Optional named access
+
+A new install starts in **local single-user mode**. No login is required, the local operator has administrator
+authority, and demo/POC setup remains as simple as opening the installer URL. This mode is intended for one trusted
+operator on a loopback-bound service.
+
+When the workspace is ready to be shared, open **Setup → Access control · optional** and create the first named
+administrator. SignalRoom immediately establishes that administrator's session and begins enforcing:
+
+- **Viewer:** read-only access to workspace evidence and state
+- **Analyst:** investigation, curation, validation, cases, and other non-policy workflows
+- **Admin:** workspace policy, model installation/routing, repository authority, and user administration
+- **Connection assignment:** a separate per-user grant for actions that call the Primary Splunk MCP connection
+
+Local passwords are scrypt-hashed; opaque sessions are time-limited, stored only as SHA-256 digests, use an
+HttpOnly same-site cookie, and require a separate same-site CSRF token for changes. Repeated failed logins are
+throttled. Disabling RBAC requires the current administrator password, revokes every session, and preserves users
+so named access can be re-enabled later.
+
+Local mode is not an authentication boundary: keep SignalRoom bound to localhost until RBAC is enabled. RBAC does
+not add transport TLS, tenant isolation, or an external identity provider; use an HTTPS reverse proxy and a
+deployment-specific threat model before network exposure.
+
 ## Connect Splunk
 
 Open **Setup** and configure:
@@ -514,18 +537,19 @@ outcome, non-success count, last-run lag, and runtime duration against a cron-de
 assessment links the deployment digest, query fingerprint, validation artifact, and optional case entry while
 remaining explicit that scheduler activity is not alert-firing or response-delivery proof.
 
-### Local audit and recommended next increment
+### Named authorization and local audit
 
 Major local control-plane decisions and every outbound delivery action are written to `data/audit.db` as an
 append-only SHA-256 hash chain. Audit metadata applies key-based secret redaction and the Discovery interface reports
-chain integrity. This is a tamper-evident local record, not an external immutable audit sink.
+chain integrity. When RBAC is active, request-scoped audit records carry the named username. This is a
+tamper-evident local record, not an external immutable audit sink.
 
 Splunk SOAR now has a duplicate-safe, create-container-only adapter with exact-payload approval, automation disabled,
 no artifacts, durable correlation, self-signed/private-CA transport support, and a read-only container-options test.
-Correlated Jira issues retain explicit read-only reconciliation and immutable local drift history. The next
-production boundary is authenticated multi-user sessions with role-based access control and connection assignment,
-so approvals and external delivery authority can be assigned to named operators. Cross-model tournaments already
-compare promotion-ready local profiles before an explicitly approved routing change.
+Correlated Jira issues retain explicit read-only reconciliation and immutable local drift history. Optional local
+RBAC now gives those actions named role and connection boundaries. The next roadmap increment is durable manual
+discovery jobs with cancellation and restart recovery. Cross-model tournaments already compare promotion-ready
+local profiles before an explicitly approved routing change.
 
 ### Context
 
@@ -548,7 +572,10 @@ open tickets, or change Splunk; external workflow automation remains an explicit
 
 ## Production boundary
 
-This release is an operator-grade prototype, not a finished multi-user security product. Before external exposure, add authentication and authorization, per-user Splunk connection assignment, audit logging, rate limiting, background job execution, retention controls, and a deployment-specific threat model. Keep it bound to localhost until those controls exist.
+This release is an operator-grade prototype with optional local RBAC, not a complete multi-tenant security product.
+Before external exposure, enable RBAC and add HTTPS, trusted proxy configuration, centralized identity and recovery,
+remote immutable audit export, broader rate limiting, retention controls, and a deployment-specific threat model.
+Keep local single-user mode bound to localhost.
 
 ## License and attribution
 

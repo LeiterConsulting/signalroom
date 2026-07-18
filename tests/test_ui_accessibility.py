@@ -64,3 +64,20 @@ def test_delivery_exposes_adapter_semantics_before_approval() -> None:
     assert "Not found or not visible" in APP_JS
     assert "no issue mutation" in APP_JS
     assert "no SPL execution or validation approval" in APP_JS
+
+
+def test_optional_rbac_is_visible_and_keyboard_operable() -> None:
+    assert 'id="accessCard"' in INDEX_HTML
+    assert 'id="loginModal"' in INDEX_HTML
+    assert 'id="loginForm"' in INDEX_HTML
+    assert 'id="accessControlSection"' in INDEX_HTML
+    assert "Access control · optional" in INDEX_HTML
+    assert "POC mode · RBAC off" in INDEX_HTML
+    assert 'value="viewer"' in INDEX_HTML
+    assert 'value="analyst"' in INDEX_HTML
+    assert 'value="admin"' in INDEX_HTML
+    assert 'id="newAuthPrimaryConnection"' in INDEX_HTML
+    assert "X-SignalRoom-CSRF" in APP_JS
+    assert "await loadAuthStatus()" in APP_JS
+    assert "if (state.auth.enabled && !state.auth.authenticated) return" in APP_JS
+    assert ".access-user-controls" in STYLES_CSS

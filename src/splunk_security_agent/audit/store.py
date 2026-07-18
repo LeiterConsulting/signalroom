@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+from contextvars import ContextVar, Token
 from datetime import UTC, datetime
 from pathlib import Path
 from threading import RLock
@@ -17,6 +18,17 @@ SENSITIVE_KEY_PARTS = (
     "token",
     "webhook_url",
 )
+_AUDIT_ACTOR: ContextVar[str] = ContextVar(
+    "signalroom_audit_actor", default="local-operator"
+)
+
+
+def bind_audit_actor(actor: str) -> Token[str]:
+    return _AUDIT_ACTOR.set(str(actor)[:120] or "local-operator")
+
+
+def reset_audit_actor(token: Token[str]) -> None:
+    _AUDIT_ACTOR.reset(token)
 
 
 def _now() -> str:
@@ -73,7 +85,7 @@ class AuditStore:
         outcome: str = "success",
         summary: str = "",
         metadata: dict[str, Any] | None = None,
-        actor: str = "local-operator",
+        actor: str | None = None,
     ) -> dict[str, Any]:
         event_id = str(uuid4())
         created_at = _now()
@@ -82,7 +94,7 @@ class AuditStore:
             "id": event_id,
             "event_type": str(event_type)[:120],
             "action": str(action)[:120],
-            "actor": str(actor)[:120],
+            "actor": str(actor or _AUDIT_ACTOR.get())[:120],
             "target_type": str(target_type)[:120],
             "target_id": str(target_id)[:240],
             "outcome": str(outcome)[:40],

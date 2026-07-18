@@ -24,6 +24,11 @@
         <button class="nav-item" data-view="models"><span class="nav-icon">◇</span><span>Models</span></button>
       </nav>
       <div class="rail-footer">
+        <div class="access-card" id="accessCard">
+          <span class="access-avatar" id="accessAvatar" aria-hidden="true">L</span>
+          <div><strong id="accessIdentity">Local operator</strong><small id="accessMode">POC mode · RBAC off</small></div>
+          <button id="logoutButton" type="button" hidden>Sign out</button>
+        </div>
         <div class="connection-card">
           <span class="status-dot" id="connectionDot"></span>
           <div><strong id="connectionLabel">Primary Splunk</strong><small id="connectionDetail">Endpoint missing</small></div>
@@ -359,6 +364,23 @@
     </main>
   </div>
 
+  <div class="modal-backdrop auth-backdrop" id="loginModal" hidden>
+    <section class="modal compact login-modal" role="dialog" aria-modal="true" aria-labelledby="loginTitle">
+      <header><div><p class="eyebrow">NAMED ACCESS</p><h2 id="loginTitle">Sign in to SignalRoom</h2></div></header>
+      <form id="loginForm">
+        <div class="form-section">
+          <p>RBAC is enabled for this workspace. Use the local account issued by a SignalRoom administrator.</p>
+          <div class="form-grid">
+            <label class="full"><span>Username</span><input id="loginUsername" autocomplete="username" required minlength="3" maxlength="64"></label>
+            <label class="full"><span>Password</span><input id="loginPassword" type="password" autocomplete="current-password" required maxlength="1024"></label>
+          </div>
+          <p class="auth-result" id="loginResult" role="alert" aria-live="polite"></p>
+        </div>
+        <footer><span>Sessions are local, time-limited, and protected against cross-site requests.</span><button class="button primary" type="submit">Sign in</button></footer>
+      </form>
+    </section>
+  </div>
+
   <div class="modal-backdrop" id="settingsModal" hidden>
     <section class="modal" role="dialog" aria-modal="true" aria-labelledby="settingsTitle">
       <header><div><p class="eyebrow">LOCAL-FIRST SETUP</p><h2 id="settingsTitle">Connect the workspace</h2></div><button class="icon-button" id="closeSettings" aria-label="Close">×</button></header>
@@ -425,8 +447,43 @@
           </div>
           <div class="connection-test-row"><button class="button ghost small" type="button" id="testRepository">Inspect repository</button><span class="test-result" id="repositoryTestResult"></span></div>
         </div>
+        <div class="form-section access-control-section" id="accessControlSection">
+          <h3>Access control · optional</h3>
+          <p id="accessControlSummary">SignalRoom is in local single-user mode. This keeps POC and guided-demo setup frictionless; keep the service bound to localhost until named access is enabled.</p>
+          <div class="access-mode-banner" id="accessModeBanner"><span>LOCAL OPERATOR</span><div><b>No login required on this host</b><small>Local mode has administrator authority. Enable RBAC before sharing the service.</small></div></div>
+          <div id="rbacLocalSetup">
+            <div class="form-grid">
+              <label><span>First admin username</span><input id="rbacBootstrapUsername" autocomplete="username" minlength="3" maxlength="64" placeholder="security-admin"></label>
+              <label><span>Display name</span><input id="rbacBootstrapDisplayName" autocomplete="name" maxlength="120" placeholder="Security administrator"></label>
+              <label class="full"><span>Admin password</span><input id="rbacBootstrapPassword" type="password" autocomplete="new-password" minlength="12" maxlength="1024" placeholder="At least 12 characters"><small class="field-help" id="rbacBootstrapHelp">Enabling RBAC creates the first named administrator and signs this browser in without interrupting setup.</small></label>
+            </div>
+            <div class="access-actions"><button class="button primary small" id="enableRbac" type="button">Enable named access</button><span id="enableRbacResult" role="status" aria-live="polite"></span></div>
+          </div>
+          <div id="rbacEnabledNotice" class="access-mode-banner enabled" hidden><span>RBAC ACTIVE</span><div><b id="rbacPrincipalSummary">Named access is enforced</b><small>Roles and connection assignments are evaluated for every API request.</small></div></div>
+          <div id="rbacAdminControls" hidden>
+            <div class="access-user-heading"><div><b>Named users</b><small>Role and Splunk assignment are separate controls.</small></div><span id="rbacUserCount">0 users</span></div>
+            <div class="access-user-list" id="rbacUsers"></div>
+            <div class="access-create-user">
+              <h4>Add a user</h4>
+              <div class="form-grid">
+                <label><span>Username</span><input id="newAuthUsername" autocomplete="off" minlength="3" maxlength="64"></label>
+                <label><span>Display name</span><input id="newAuthDisplayName" autocomplete="off" maxlength="120"></label>
+                <label><span>Role</span><select id="newAuthRole"><option value="viewer">Viewer · read only</option><option value="analyst" selected>Analyst · investigate and curate</option><option value="admin">Admin · platform control</option></select></label>
+                <label><span>Temporary password</span><input id="newAuthPassword" type="password" autocomplete="new-password" minlength="12" maxlength="1024"></label>
+                <label class="full access-connection-check"><input id="newAuthPrimaryConnection" type="checkbox" checked><span>Assign Primary Splunk connection</span></label>
+              </div>
+              <div class="access-actions"><button class="button ghost small" id="createAuthUser" type="button">Create user</button><span id="createAuthUserResult" role="status" aria-live="polite"></span></div>
+            </div>
+            <div class="access-disable">
+              <div><b>Return to local POC mode</b><small>Disabling RBAC revokes every session but preserves named identities for later re-enablement.</small></div>
+              <input id="disableRbacPassword" type="password" autocomplete="current-password" placeholder="Current admin password">
+              <button class="button danger small" id="disableRbac" type="button">Disable RBAC</button>
+            </div>
+          </div>
+          <p class="access-read-only-note" id="accessReadOnlyNote" hidden>Only a SignalRoom administrator can change workspace or access policy. These settings are shown read-only.</p>
+        </div>
         <div class="form-section"><h3>Agent execution policy</h3><label class="switch-line"><span><b>Allow write-capable Splunk tools</b><small>Keep disabled for analyst workspaces; repository handoff has its own narrower controls above</small></span><input type="checkbox" id="allowWrites" disabled><span class="switch-control" aria-hidden="true"></span></label></div>
-        <footer><span><i class="lock-icon">◆</i> Tokens are encrypted at rest and never returned by the API.</span><button class="button primary" type="submit">Save workspace</button></footer>
+        <footer><span><i class="lock-icon">◆</i> Tokens are encrypted at rest and never returned by the API.</span><button class="button primary" id="saveWorkspace" type="submit">Save workspace</button></footer>
       </form>
     </section>
   </div>

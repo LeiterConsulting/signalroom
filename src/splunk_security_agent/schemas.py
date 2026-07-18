@@ -78,6 +78,40 @@ class SettingsUpdate(BaseModel):
     huggingface_token: str | None = None
 
 
+AccessRole = Literal["viewer", "analyst", "admin"]
+
+
+class AuthLoginRequest(BaseModel):
+    username: str = Field(min_length=3, max_length=64)
+    password: str = Field(min_length=1, max_length=1024)
+
+
+class AuthBootstrapRequest(BaseModel):
+    username: str = Field(min_length=3, max_length=64)
+    display_name: str = Field(min_length=1, max_length=120)
+    password: str = Field(min_length=12, max_length=1024)
+
+
+class AuthDisableRequest(BaseModel):
+    password: str = Field(min_length=1, max_length=1024)
+
+
+class AuthUserCreate(BaseModel):
+    username: str = Field(min_length=3, max_length=64)
+    display_name: str = Field(min_length=1, max_length=120)
+    role: AccessRole = "analyst"
+    password: str = Field(min_length=12, max_length=1024)
+    connection_ids: list[str] = Field(default_factory=lambda: ["primary"], max_length=16)
+
+
+class AuthUserUpdate(BaseModel):
+    display_name: str | None = Field(default=None, min_length=1, max_length=120)
+    role: AccessRole | None = None
+    password: str | None = Field(default=None, min_length=12, max_length=1024)
+    active: bool | None = None
+    connection_ids: list[str] | None = Field(default=None, max_length=16)
+
+
 class ConnectionTestRequest(BaseModel):
     kind: Literal["splunk", "model"]
     profile_id: str | None = None

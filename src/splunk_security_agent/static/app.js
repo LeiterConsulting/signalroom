@@ -8,7 +8,8 @@ const state = {
   assurance: null, assurancePolicyDirty: false, connectionDiagnostics: null, queryIntelligence: null,
   feedbackBenchmarks: null, goldenBenchmarks: null, selectedTournamentId: null, deliveryPolicyDirty: false,
   deliveryPreview: null, detections: [], activeDetection: null, detectionGitExport: null,
-  repositoryStatus: null, repositoryHandoff: null
+  repositoryStatus: null, repositoryHandoff: null, auth: null, authUsers: [],
+  workspaceLoaded: false, assuranceTimer: null
 };
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => [...document.querySelectorAll(selector)];
@@ -100,13 +101,21 @@ const DEMO_TOUR_STEPS = [
 ];
 
 async function api(path, options = {}) {
+  const method = String(options.method || 'GET').toUpperCase();
+  const csrf = readCookie('signalroom_csrf');
+  const securityHeaders = csrf && ['POST','PUT','PATCH','DELETE'].includes(method)
+    ? { 'X-SignalRoom-CSRF': csrf } : {};
   const response = await fetch(path, {
     ...options,
-    headers: { ...(options.body instanceof FormData ? {} : { 'Content-Type': 'application/json' }), ...(options.headers || {}) }
+    headers: { ...(options.body instanceof FormData ? {} : { 'Content-Type': 'application/json' }), ...securityHeaders, ...(options.headers || {}) }
   });
   if (!response.ok) {
     let message = `${response.status} ${response.statusText}`;
-    try { const body = await response.json(); message = body.detail || body.error || message; } catch (_) {}
+    try {
+      const body = await response.json(); const detail = body.detail || body.error;
+      message = Array.isArray(detail) ? detail.map(item => item.msg || String(item)).join(' · ') : (detail || message);
+    } catch (_) {}
+    if (response.status === 401 && !path.startsWith('/api/auth/login')) showLogin();
     throw new Error(message);
   }
   if (response.status === 204) return null;
@@ -114,12 +123,17 @@ async function api(path, options = {}) {
 }
 
 async function streamApi(path, payload, onEvent) {
+  const csrf = readCookie('signalroom_csrf');
   const response = await fetch(path, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload)
+    method: 'POST', headers: { 'Content-Type': 'application/json', ...(csrf ? { 'X-SignalRoom-CSRF':csrf } : {}) }, body: JSON.stringify(payload)
   });
   if (!response.ok) {
     let message = `${response.status} ${response.statusText}`;
-    try { const body = await response.json(); message = body.detail || body.error || message; } catch (_) {}
+    try {
+      const body = await response.json(); const detail = body.detail || body.error;
+      message = Array.isArray(detail) ? detail.map(item => item.msg || String(item)).join(' · ') : (detail || message);
+    } catch (_) {}
+    if (response.status === 401) showLogin();
     throw new Error(message);
   }
   if (!response.body) throw new Error('This browser cannot read streamed operation updates.');
@@ -146,6 +160,12 @@ async function streamApi(path, payload, onEvent) {
   return result;
 }
 
+function readCookie(name) {
+  const prefix = `${name}=`;
+  const value = document.cookie.split(';').map(item => item.trim()).find(item => item.startsWith(prefix));
+  return value ? decodeURIComponent(value.slice(prefix.length)) : '';
+}
+
 function escapeHtml(value = '') {
   return String(value).replace(/[&<>'"]/g, char => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', "'":'&#39;', '"':'&quot;' })[char]);
 }
@@ -163,6 +183,218 @@ function renderMarkdown(value = '') {
 function toast(message) {
   const node = $('#toast'); node.textContent = message; node.classList.add('show');
   clearTimeout(node._timer); node._timer = setTimeout(() => node.classList.remove('show'), 2600);
+}
+
+function showLogin() {
+  if (!state.auth?.enabled) return;
+  $('#loginModal').hidden = false;
+  document.body.classList.add('auth-locked');
+  $('.app-shell').inert = true;
+  setTimeout(() => $('#loginUsername').focus(), 0);
+}
+
+function hideLogin() {
+  $('#loginModal').hidden = true;
+  document.body.classList.remove('auth-locked');
+  $('.app-shell').inert = false;
+  $('#loginResult').textContent = '';
+  $('#loginPassword').value = '';
+}
+
+function renderAuthUsers() {
+  const users = state.authUsers || [];
+  $('#rbacUserCount').textContent = `${users.length} user${users.length === 1 ? '' : 's'}`;
+  $('#rbacUsers').innerHTML = users.length ? users.map(user => `
+    <article class="access-user" data-auth-user="${escapeHtml(user.id)}">
+      <header><div><b>${escapeHtml(user.display_name)}</b><small>@${escapeHtml(user.username)}${user.last_login_at ? ` · last sign-in ${escapeHtml(new Date(user.last_login_at).toLocaleString())}` : ' · never signed in'}</small></div><span class="${user.active ? '' : 'inactive'}">${user.active ? escapeHtml(user.role) : 'inactive'}</span></header>
+      <div class="access-user-controls">
+        <label><span>Role</span><select data-auth-role><option value="viewer" ${user.role === 'viewer' ? 'selected' : ''}>Viewer · read only</option><option value="analyst" ${user.role === 'analyst' ? 'selected' : ''}>Analyst · investigate</option><option value="admin" ${user.role === 'admin' ? 'selected' : ''}>Admin · platform control</option></select></label>
+        <label><span>Replace password · optional</span><input data-auth-password type="password" autocomplete="new-password" minlength="12" maxlength="1024" placeholder="Leave unchanged"></label>
+        <div class="access-user-checks"><label><input data-auth-active type="checkbox" ${user.active ? 'checked' : ''}> Active account</label><label><input data-auth-primary type="checkbox" ${(user.connection_ids || []).includes('primary') ? 'checked' : ''}> Primary Splunk assigned</label></div>
+        <button class="button ghost small" type="button" data-save-auth-user>Save access</button>
+      </div>
+    </article>`).join('') : '<div class="empty-inline compact-empty">No named users exist.</div>';
+}
+
+async function loadAuthUsers() {
+  if (!state.auth?.enabled || !state.auth?.permissions?.can_administer) {
+    state.authUsers = []; renderAuthUsers(); return;
+  }
+  state.authUsers = await api('/api/auth/users');
+  renderAuthUsers();
+}
+
+function applyAccessPermissions() {
+  const authenticated = Boolean(state.auth?.authenticated);
+  const canAdminister = Boolean(state.auth?.permissions?.can_administer);
+  const canChange = Boolean(state.auth?.permissions?.can_change);
+  document.body.dataset.accessRole = state.auth?.principal?.role || '';
+  document.body.classList.toggle('settings-readonly', authenticated && !canAdminister);
+  $('#accessReadOnlyNote').hidden = !authenticated || canAdminister;
+  $('#saveWorkspace').disabled = authenticated && !canAdminister;
+  $$('#settingsForm input,#settingsForm select,#settingsForm textarea,#settingsForm button').forEach(node => {
+    if (node.id === 'allowWrites') return;
+    if (!canAdminister) {
+      node.disabled = true;
+      node.dataset.accessDisabled = 'true';
+    } else if (node.dataset.accessDisabled) {
+      node.disabled = false;
+      delete node.dataset.accessDisabled;
+    }
+  });
+  if (canAdminister && state.settings) updateRepositoryControls();
+  const mutationSelectors = [
+    '#chatInput', '#chatForm .send-button', '#runDiscovery', '#runConnectionDiagnostics',
+    '#runAssuranceNow', '#assuranceForm button', '#deliveryForm button', '#scanSplunkModels',
+    '#runModelTournament', '#runGoldenBenchmark', '#addArtifact', '#uploadArtifact',
+    '#newCase', '#newDetection'
+  ];
+  $$(mutationSelectors.join(',')).forEach(node => {
+    if (!canChange) { node.disabled = true; node.dataset.roleDisabled = 'true'; }
+    else if (node.dataset.roleDisabled) { node.disabled = false; delete node.dataset.roleDisabled; }
+  });
+  const adminSelectors = [
+    '#assuranceForm input', '#assuranceForm select', '#assuranceForm button[type="submit"]',
+    '#deliveryForm input', '#deliveryForm select', '#deliveryForm button',
+    '[data-pull-profile]', '[data-activate-model]', '[data-promote-tournament]',
+    '[data-rollback-promotion]', '[data-preview-repository]', '[data-apply-repository]',
+    '[data-push-repository]', '[data-pull-request-repository]',
+    '[data-refresh-repository-review]', '[data-preserve-repository-review]',
+    '[data-export-detection]', '[data-export-detection-git]', '[data-retire-detection]'
+  ];
+  $$(adminSelectors.join(',')).forEach(node => {
+    if (!canAdminister) { node.disabled = true; node.dataset.adminDisabled = 'true'; }
+    else if (node.dataset.adminDisabled) { node.disabled = false; delete node.dataset.adminDisabled; }
+  });
+}
+
+function renderAuth() {
+  const auth = state.auth; if (!auth) return;
+  const principal = auth.principal;
+  $('#accessIdentity').textContent = principal?.display_name || 'Sign-in required';
+  $('#accessAvatar').textContent = (principal?.display_name || '?').trim().charAt(0).toUpperCase();
+  $('#accessMode').textContent = auth.enabled
+    ? `${principal?.role || 'locked'} · ${auth.permissions?.can_use_primary_connection ? 'Primary Splunk' : 'no Splunk assignment'}`
+    : 'POC mode · RBAC off';
+  $('#logoutButton').hidden = !auth.enabled || !auth.authenticated;
+  $('#rbacLocalSetup').hidden = auth.enabled;
+  $('#rbacEnabledNotice').hidden = !auth.enabled;
+  $('#rbacAdminControls').hidden = !auth.enabled || !auth.permissions?.can_administer;
+  $('#accessModeBanner').hidden = auth.enabled;
+  $('#rbacPrincipalSummary').textContent = principal
+    ? `${principal.display_name} is signed in as ${principal.role}`
+    : 'Named access is enforced';
+  const reenable = Boolean(auth.reenable_required);
+  $('#rbacBootstrapDisplayName').closest('label').hidden = reenable;
+  $('#rbacBootstrapHelp').textContent = reenable
+    ? `${auth.identity_count} preserved identit${auth.identity_count === 1 ? 'y' : 'ies'} found. Enter an existing administrator username and password to re-enable RBAC.`
+    : 'Enabling RBAC creates the first named administrator and signs this browser in without interrupting setup.';
+  $('#enableRbac').textContent = reenable ? 'Re-enable named access' : 'Enable named access';
+  $('#accessControlSummary').textContent = auth.enabled
+    ? 'Named users, roles, local sessions, CSRF protection, and per-user Splunk connection assignment are active.'
+    : 'SignalRoom is in local single-user mode. This keeps POC and guided-demo setup frictionless; keep the service bound to localhost until named access is enabled.';
+  applyAccessPermissions();
+  if (auth.enabled && !auth.authenticated) showLogin(); else hideLogin();
+}
+
+async function loadAuthStatus() {
+  state.auth = await api('/api/auth/status');
+  renderAuth();
+  if (state.auth.enabled && state.auth.authenticated && state.auth.permissions?.can_administer) await loadAuthUsers();
+  return state.auth;
+}
+
+async function signIn(event) {
+  event.preventDefault();
+  const output = $('#loginResult'); output.textContent = 'Signing in…';
+  try {
+    state.auth = await api('/api/auth/login', { method:'POST', body:JSON.stringify({
+      username:$('#loginUsername').value.trim(),
+      password:$('#loginPassword').value
+    })});
+    hideLogin(); renderAuth();
+    if (state.auth.permissions?.can_administer) await loadAuthUsers();
+    await loadWorkspace();
+  } catch (error) {
+    output.textContent = error.message;
+    $('#loginPassword').select();
+  }
+}
+
+async function signOut() {
+  try { await api('/api/auth/logout', { method:'POST', body:'{}' }); }
+  catch (_) {}
+  state.workspaceLoaded = false;
+  await loadAuthStatus();
+}
+
+async function enableRbac() {
+  const output = $('#enableRbacResult'); output.textContent = 'Enabling named access…';
+  const username = $('#rbacBootstrapUsername').value.trim();
+  const displayName = $('#rbacBootstrapDisplayName').value.trim();
+  const password = $('#rbacBootstrapPassword').value;
+  if (username.length < 3 || (!state.auth?.reenable_required && !displayName) || password.length < 12) {
+    output.textContent = 'Enter a valid username, display name, and password of at least 12 characters.';
+    return;
+  }
+  try {
+    state.auth = await api('/api/auth/bootstrap', { method:'POST', body:JSON.stringify({
+      username,
+      display_name:displayName || 'Existing administrator',
+      password
+    })});
+    $('#rbacBootstrapPassword').value = '';
+    renderAuth(); await loadAuthUsers();
+    output.textContent = 'RBAC enabled. This browser is signed in.';
+    toast('Named access enabled');
+  } catch (error) { output.textContent = error.message; }
+}
+
+async function disableRbac() {
+  const password = $('#disableRbacPassword').value;
+  if (!password || !confirm('Disable RBAC and revoke every active session? Named users will be preserved for later re-enablement.')) return;
+  try {
+    state.auth = await api('/api/auth/disable', { method:'POST', body:JSON.stringify({ password }) });
+    state.authUsers = []; $('#disableRbacPassword').value = ''; renderAuth(); renderAuthUsers();
+    toast('Returned to local single-user mode');
+  } catch (error) { toast(error.message); }
+}
+
+async function createAuthUser() {
+  const output = $('#createAuthUserResult'); output.textContent = 'Creating user…';
+  const username = $('#newAuthUsername').value.trim();
+  const displayName = $('#newAuthDisplayName').value.trim();
+  const password = $('#newAuthPassword').value;
+  if (username.length < 3 || !displayName || password.length < 12) {
+    output.textContent = 'Enter a valid username, display name, and temporary password of at least 12 characters.';
+    return;
+  }
+  try {
+    await api('/api/auth/users', { method:'POST', body:JSON.stringify({
+      username,
+      display_name:displayName,
+      role:$('#newAuthRole').value,
+      password,
+      connection_ids:$('#newAuthPrimaryConnection').checked ? ['primary'] : []
+    })});
+    ['#newAuthUsername','#newAuthDisplayName','#newAuthPassword'].forEach(selector => $(selector).value = '');
+    $('#newAuthRole').value = 'analyst'; $('#newAuthPrimaryConnection').checked = true;
+    await loadAuthUsers(); output.textContent = 'Named user created.';
+  } catch (error) { output.textContent = error.message; }
+}
+
+async function saveAuthUser(button) {
+  const card = button.closest('[data-auth-user]');
+  const password = card.querySelector('[data-auth-password]').value;
+  try {
+    await api(`/api/auth/users/${encodeURIComponent(card.dataset.authUser)}`, { method:'PATCH', body:JSON.stringify({
+      role:card.querySelector('[data-auth-role]').value,
+      active:card.querySelector('[data-auth-active]').checked,
+      connection_ids:card.querySelector('[data-auth-primary]').checked ? ['primary'] : [],
+      password:password || null
+    })});
+    await loadAuthUsers(); toast('User access updated');
+  } catch (error) { toast(error.message); }
 }
 
 function renderPromptTree(path = state.promptPath) {
@@ -361,6 +593,7 @@ function hydrateSettings() {
   $('#connectionLabel').textContent = settings.demo_mode ? 'Demo workspace' : settings.splunk.name;
   $('#connectionDetail').textContent = settings.demo_mode ? 'Guided sample workspace' : (settings.splunk.url || 'Endpoint missing');
   $('#startDemoTour').hidden = !settings.demo_mode;
+  applyAccessPermissions();
 }
 
 async function loadSettings() {
@@ -2893,6 +3126,8 @@ function navigateView(name) {
 }
 
 document.addEventListener('click', async event => {
+  const saveAccess = event.target.closest('[data-save-auth-user]');
+  if (saveAccess) { await saveAuthUser(saveAccess); return; }
   const openDetectionButton = event.target.closest('[data-open-detection]');
   if (openDetectionButton) { setView('detections'); await openDetection(openDetectionButton.dataset.openDetection); return; }
   const createDetectionButton = event.target.closest('[data-create-detection]');
@@ -3171,6 +3406,11 @@ document.addEventListener('click', async event => {
 });
 
 $('#chatForm').addEventListener('submit', event => { event.preventDefault(); sendChat($('#chatInput').value); });
+$('#loginForm').addEventListener('submit', signIn);
+$('#logoutButton').addEventListener('click', signOut);
+$('#enableRbac').addEventListener('click', enableRbac);
+$('#disableRbac').addEventListener('click', disableRbac);
+$('#createAuthUser').addEventListener('click', createAuthUser);
 $('#chatInput').addEventListener('input', resizeComposer);
 $('#chatInput').addEventListener('keydown', event => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); $('#chatForm').requestSubmit(); } });
 $('#newConversation').addEventListener('click', resetConversation);
@@ -3282,4 +3522,26 @@ document.addEventListener('keydown', event => {
   else if (!$('#caseModal').hidden) { $('#caseModal').hidden = true; state.pendingCaseItem = null; }
 });
 
-Promise.all([loadSettings(), loadArtifacts(), loadCases(), loadLatestDiscovery(), loadValidations(), loadDetections(), loadModelCatalog(), loadSplunkModels(), loadAssurance(), loadConnectionDiagnostics(), loadFeedbackBenchmarks(), loadGoldenBenchmarks()]).then(() => { renderPromptTree(); renderValidations(); renderDetections(); handleDeepLink(); setInterval(loadAssurance, 3000); }).catch(error => toast(error.message));
+const accessObserver = new MutationObserver(() => {
+  if (state.auth) applyAccessPermissions();
+});
+accessObserver.observe(document.body, { childList:true, subtree:true });
+
+async function loadWorkspace() {
+  await Promise.all([loadSettings(), loadArtifacts(), loadCases(), loadLatestDiscovery(), loadValidations(), loadDetections(), loadModelCatalog(), loadSplunkModels(), loadAssurance(), loadConnectionDiagnostics(), loadFeedbackBenchmarks(), loadGoldenBenchmarks()]);
+  renderPromptTree(); renderValidations(); renderDetections(); handleDeepLink(); renderAuth();
+  state.workspaceLoaded = true;
+  if (!state.assuranceTimer) state.assuranceTimer = setInterval(() => {
+    if (state.auth?.authenticated) loadAssurance().catch(() => {});
+  }, 3000);
+}
+
+async function initialize() {
+  try {
+    await loadAuthStatus();
+    if (state.auth.enabled && !state.auth.authenticated) return;
+    await loadWorkspace();
+  } catch (error) { toast(error.message); }
+}
+
+initialize();

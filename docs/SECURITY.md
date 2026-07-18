@@ -7,6 +7,11 @@ The local prototype defaults to localhost, opt-in demo mode, local specialist ex
 - Splunk and Hugging Face tokens are held in a Fernet-encrypted file.
 - Secret values are never included in the settings response.
 - Environment variables may supply secrets without persistence.
+- Named access is optional. Local single-user mode preserves the zero-login POC path; enabling RBAC creates or authenticates a first admin and immediately protects API and MCP routes with named sessions.
+- RBAC separates viewer, analyst, and admin roles from per-user Primary Splunk connection assignment. Administrative platform policy and identity operations require the admin role.
+- Passwords use salted scrypt hashes. Opaque session and CSRF values are stored only as SHA-256 digests; browser sessions use strict same-site cookies, an HttpOnly session cookie, and a separate header-bound CSRF cookie.
+- Failed login attempts are throttled per normalized username and source. Role, connection, active-state, and password changes revoke affected sessions; disabling RBAC revokes all sessions and requires the current admin password.
+- Request-scoped audit events inherit the authenticated username. Authentication enablement, disablement, login, logout, user changes, and authorization denials are explicitly audited.
 - Known modifying/high-risk SPL commands are blocked in the chat execution path.
 - Uploaded context is restricted to text-like extensions and 2 MB.
 - Retrieved context is framed as untrusted evidence, not instructions.
@@ -39,7 +44,9 @@ The local prototype defaults to localhost, opt-in demo mode, local specialist ex
 ## Known limitations
 
 - The local Fernet key is adjacent to encrypted secrets. This protects against accidental disclosure, not a fully compromised host. Use an OS keychain or secret manager in production.
-- There is no authentication or tenant isolation. Do not bind externally.
+- Local single-user mode intentionally performs no authentication and grants local-admin authority to every caller. Do not bind that mode externally.
+- Local RBAC is not tenant isolation, OIDC/SSO, MFA, account self-service, or a recovery system. Protect `data/auth.db`, retain at least one active admin, and use a controlled HTTPS reverse proxy and external identity boundary for production exposure.
+- The app does not terminate HTTPS itself. Session cookies receive the `Secure` attribute only when the request scheme is HTTPS; configure and validate trusted proxy behavior in the deployment environment.
 - SPL command blocking is a guardrail, not a parser or authorization boundary. Enforce read-only roles in Splunk.
 - Model output can contain incorrect or unsafe recommendations. Human verification remains required.
 - Hugging Face model loading remains a supply-chain decision. Production deployments should add publisher/revision allowlists and artifact signatures around the recorded immutable revision.

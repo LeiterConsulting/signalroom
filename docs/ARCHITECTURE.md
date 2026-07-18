@@ -6,6 +6,9 @@ SignalRoom uses a deliberately narrow pipeline:
 Browser or MCP client
         │
         ▼
+Optional local RBAC gate ── role + connection assignment + CSRF
+        │
+        ▼
 FastAPI application ───── outward MCP tools
         │
         ├── SecurityAgent ── mode + capability router ── Ollama / local Transformers / HF cloud
@@ -33,6 +36,20 @@ AssuranceService ── SQLite policy + runs + events + notices
 ```
 
 ## Design decisions
+
+### Access control is a promotion, not an installation prerequisite
+
+The durable access policy defaults to `local-single-user`, which represents one trusted loopback operator with
+administrator and Primary Splunk authority. Enabling RBAC is an explicit Settings action that creates or
+re-authenticates the first admin, creates an opaque local session, and atomically switches subsequent API and MCP
+requests to named enforcement. Disabling requires the current admin password, revokes all sessions, and preserves
+identities for authenticated re-enablement.
+
+Roles and connection authority are orthogonal. Viewers are read-only; analysts may change investigation state;
+admins additionally control workspace policy, models, repository authority, and users. Splunk-backed mutations
+also require the Primary Splunk assignment. Browser mutation requests require a strict same-site CSRF cookie/header
+pair whose digest is bound to the opaque session. Passwords use scrypt, only session and CSRF digests persist, and
+request-scoped audit events inherit the named username.
 
 ### Models are capabilities
 
@@ -238,9 +255,9 @@ SignalRoom is an MCP client of a Splunk MCP server and an MCP server to agent ho
 
 ## Next production increments
 
-1. Authenticated multi-user sessions with RBAC and connection assignment
-2. Durable background discovery jobs with cancellation and restart recovery
-3. Model revision allowlists and signed model artifacts around the implemented evaluation gates
-4. Search cost estimation, per-instance concurrency limits, and Splunk workload controls
-5. Broader operator-authored evaluation suites beyond the durable golden, tournament, and feedback history
-6. Audit events sent to a dedicated Splunk index
+1. Durable background discovery jobs with cancellation and restart recovery
+2. Model revision allowlists and signed model artifacts around the implemented evaluation gates
+3. Search cost estimation, per-instance concurrency limits, and Splunk workload controls
+4. Broader operator-authored evaluation suites beyond the durable golden, tournament, and feedback history
+5. Audit events sent to a dedicated Splunk index
+6. OIDC/MFA integration, account recovery, and tenant boundaries beyond local RBAC

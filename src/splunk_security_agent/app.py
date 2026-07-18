@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hmac
 import json
 import os
 import time
@@ -8,13 +9,15 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated, Any
 
-from fastapi import FastAPI, File, HTTPException, Request, UploadFile
+from fastapi import FastAPI, File, HTTPException, Request, Response, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from .agents import SecurityAgent
 from .assurance import AssuranceResponseService, AssuranceService, AssuranceStore
-from .audit import AuditStore
+from .audit import AuditStore, bind_audit_actor, reset_audit_actor
+from .auth import AuthService, AuthStore
+from .auth.service import CSRF_COOKIE, SESSION_COOKIE
 from .benchmarks import (
     GoldenBenchmarkService,
     GoldenBenchmarkStore,
@@ -44,6 +47,11 @@ from .schemas import (
     ArtifactUpdate,
     AssurancePolicyUpdate,
     AssuranceRunCreate,
+    AuthBootstrapRequest,
+    AuthDisableRequest,
+    AuthLoginRequest,
+    AuthUserCreate,
+    AuthUserUpdate,
     CaseCreate,
     CaseExportRequest,
     CaseItemCreate,
@@ -149,6 +157,8 @@ class Services:
             self.cases, self.validation_store, self.evidence
         )
         self.audit = AuditStore(DATA / "audit.db")
+        self.auth_store = AuthStore(DATA / "auth.db")
+        self.auth = AuthService(self.auth_store, self.audit)
         self.assurance_store = AssuranceStore(DATA / "assurance.db")
         self.delivery_store = DeliveryStore(DATA / "delivery.db")
         self.connection_diagnostics_store = ConnectionDiagnosticsStore(
@@ -309,6 +319,108 @@ app = FastAPI(
 )
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
 
+AUTH_PUBLIC_PATHS = {
+    "/",
+    "/api/health",
+    "/api/auth/status",
+    "/api/auth/bootstrap",
+    "/api/auth/login",
+}
+
+
+@app.middleware("http")
+async def access_control(request: Request, call_next: Any) -> Response:
+    path = request.url.path
+    if (
+        request.method == "OPTIONS"
+        or path in AUTH_PUBLIC_PATHS
+        or path.startswith("/static/")
+    ):
+        response = await call_next(request)
+        if path.startswith("/api/auth/"):
+            response.headers["Cache-Control"] = "no-store"
+        return response
+
+    policy = services.auth_store.policy()
+    if not policy["enabled"]:
+        request.state.principal = services.auth.status()["principal"]
+        request.state.auth_session = None
+        return await call_next(request)
+
+    token = request.cookies.get(SESSION_COOKIE, "")
+    session = services.auth.authenticate(token)
+    if not session:
+        return JSONResponse(
+            {"detail": "Authentication is required"},
+            status_code=401,
+            headers={"Cache-Control": "no-store"},
+        )
+    user = session["user"]
+    if request.method in {"POST", "PUT", "PATCH", "DELETE"}:
+        csrf_header = request.headers.get("X-SignalRoom-CSRF", "")
+        csrf_cookie = request.cookies.get(CSRF_COOKIE, "")
+        if (
+            not csrf_header
+            or not csrf_cookie
+            or not hmac.compare_digest(csrf_header, csrf_cookie)
+            or not services.auth.verify_csrf(session, csrf_header)
+        ):
+            return JSONResponse(
+                {"detail": "The request did not include a valid CSRF token"},
+                status_code=403,
+                headers={"Cache-Control": "no-store"},
+            )
+    allowed, reason = services.auth.authorize(user, request.method, path)
+    if not allowed:
+        services.audit.record(
+            "auth.request.denied",
+            "authorize",
+            target_type="api-route",
+            target_id=path,
+            outcome="denied",
+            summary=reason,
+            metadata={"method": request.method, "role": user["role"]},
+            actor=user["username"],
+        )
+        return JSONResponse({"detail": reason}, status_code=403)
+    request.state.principal = user
+    request.state.auth_session = session
+    audit_actor = bind_audit_actor(user["username"])
+    try:
+        return await call_next(request)
+    finally:
+        reset_audit_actor(audit_actor)
+
+
+def _set_auth_cookies(
+    response: Response, request: Request, session: dict[str, Any]
+) -> None:
+    secure = request.url.scheme == "https"
+    max_age = services.auth_store.policy()["session_hours"] * 3600
+    response.set_cookie(
+        SESSION_COOKIE,
+        session["token"],
+        max_age=max_age,
+        httponly=True,
+        secure=secure,
+        samesite="strict",
+        path="/",
+    )
+    response.set_cookie(
+        CSRF_COOKIE,
+        session["csrf_token"],
+        max_age=max_age,
+        httponly=False,
+        secure=secure,
+        samesite="strict",
+        path="/",
+    )
+
+
+def _clear_auth_cookies(response: Response) -> None:
+    response.delete_cookie(SESSION_COOKIE, path="/", samesite="strict")
+    response.delete_cookie(CSRF_COOKIE, path="/", samesite="strict")
+
 
 @app.get("/")
 async def index() -> FileResponse:
@@ -318,6 +430,7 @@ async def index() -> FileResponse:
 @app.get("/api/health")
 async def health() -> dict[str, Any]:
     latest_diagnostic = services.connection_diagnostics_store.latest() or {}
+    auth_policy = services.auth_store.policy()
     return {
         "ok": True,
         "version": app.version,
@@ -326,7 +439,111 @@ async def health() -> dict[str, Any]:
         "artifacts": len(services.evidence.list()),
         "assurance_worker": services.assurance.overview()["worker"]["online"],
         "connection_ready": bool(latest_diagnostic.get("ready")),
+        "access_mode": "rbac" if auth_policy["enabled"] else "local-single-user",
     }
+
+
+@app.get("/api/auth/status")
+async def auth_status(request: Request) -> dict[str, Any]:
+    token = request.cookies.get(SESSION_COOKIE, "")
+    return services.auth.status(token)
+
+
+@app.post("/api/auth/bootstrap")
+async def auth_bootstrap(
+    value: AuthBootstrapRequest, request: Request, response: Response
+) -> dict[str, Any]:
+    try:
+        session = services.auth.bootstrap(
+            username=value.username,
+            display_name=value.display_name,
+            password=value.password,
+            source=request.client.host if request.client else "unknown",
+        )
+    except PermissionError as exc:
+        raise HTTPException(status_code=401, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _set_auth_cookies(response, request, session)
+    response.headers["Cache-Control"] = "no-store"
+    return services.auth.status(session["token"])
+
+
+@app.post("/api/auth/login")
+async def auth_login(
+    value: AuthLoginRequest, request: Request, response: Response
+) -> dict[str, Any]:
+    try:
+        session = services.auth.login(
+            value.username,
+            value.password,
+            request.client.host if request.client else "unknown",
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=429, detail=str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=401, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _set_auth_cookies(response, request, session)
+    response.headers["Cache-Control"] = "no-store"
+    return services.auth.status(session["token"])
+
+
+@app.post("/api/auth/logout")
+async def auth_logout(request: Request, response: Response) -> dict[str, bool]:
+    services.auth.logout(
+        request.cookies.get(SESSION_COOKIE, ""),
+        getattr(request.state, "principal", None),
+    )
+    _clear_auth_cookies(response)
+    response.headers["Cache-Control"] = "no-store"
+    return {"ok": True}
+
+
+@app.post("/api/auth/disable")
+async def auth_disable(
+    value: AuthDisableRequest, request: Request, response: Response
+) -> dict[str, Any]:
+    principal = getattr(request.state, "principal", None)
+    try:
+        services.auth.disable(principal["id"] if principal else "", value.password)
+    except PermissionError as exc:
+        raise HTTPException(status_code=401, detail=str(exc)) from exc
+    _clear_auth_cookies(response)
+    response.headers["Cache-Control"] = "no-store"
+    return services.auth.status()
+
+
+@app.get("/api/auth/users")
+async def auth_users() -> list[dict[str, Any]]:
+    return services.auth.users()
+
+
+@app.post("/api/auth/users", status_code=201)
+async def auth_create_user(
+    value: AuthUserCreate, request: Request
+) -> dict[str, Any]:
+    try:
+        return services.auth.create_user(
+            value, actor=request.state.principal
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.patch("/api/auth/users/{user_id}")
+async def auth_update_user(
+    user_id: str, value: AuthUserUpdate, request: Request
+) -> dict[str, Any]:
+    try:
+        return services.auth.update_user(
+            user_id, value, actor=request.state.principal
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="User not found") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.get("/api/settings")

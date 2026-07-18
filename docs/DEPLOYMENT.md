@@ -32,6 +32,26 @@ For a terminal-driven deployment:
 
 External installation and model downloads are always opt-in. Local SecureBERT installation is initiated from Setup so the operator sees the exact profile, purpose, and progress. On macOS, `--install-ollama` opens the signed app download; finish the app installation and rerun with `--pull-models`.
 
+## Optional access promotion
+
+The installer deliberately does not require an administrator account. SignalRoom starts in local single-user mode
+so one trusted operator can evaluate demo mode, connect Splunk, and validate models with no login ceremony.
+
+Before allowing another person or host to reach the service:
+
+1. Open **Setup → Access control · optional**.
+2. Create the first named administrator with a password of at least 12 characters.
+3. Add viewer, analyst, or admin identities and independently choose whether each may use Primary Splunk.
+4. Put SignalRoom behind a controlled HTTPS reverse proxy and verify the browser observes HTTPS.
+
+Enabling RBAC signs the first administrator into the current browser, so setup is not interrupted. Disabling it
+requires that administrator's password, revokes all sessions, and returns to local mode without deleting identities.
+Re-enabling requires an existing administrator credential. Identity state is stored in `data/auth.db` and is
+preserved by normal uninstall; `-PurgeData` / `--purge-data` removes it with the rest of the data directory.
+
+Local mode gives every caller administrator authority. It must remain loopback-bound. Local RBAC supplies named
+authorization but not TLS, MFA, SSO, tenant isolation, or password recovery.
+
 ## Splunk TLS certificates
 
 Setup exposes a **Verify TLS certificates** toggle for the Splunk MCP connection. Verification is enabled by default and should remain enabled for production connections.
