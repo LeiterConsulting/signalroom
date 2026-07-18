@@ -139,7 +139,7 @@
                   <form id="deliveryForm">
                     <label class="switch-line"><span><b>Enable outbound response delivery</b><small>Opt in separately from continuous assurance; nothing is sent while disabled</small></span><input type="checkbox" id="deliveryEnabled"><span class="switch-control" aria-hidden="true"></span></label>
                     <div class="delivery-policy-grid">
-                      <label><span>Destination adapter</span><select id="deliveryKind"><option value="generic-webhook">Generic JSON webhook</option><option value="slack-incoming-webhook">Slack Incoming Webhook</option><option value="jira-cloud">Jira Cloud · create issue</option></select></label>
+                      <label><span>Destination adapter</span><select id="deliveryKind"><option value="generic-webhook">Generic JSON webhook</option><option value="slack-incoming-webhook">Slack Incoming Webhook</option><option value="jira-cloud">Jira Cloud · create issue</option><option value="splunk-soar">Splunk SOAR · create container</option></select></label>
                       <label><span>Approval mode</span><select id="deliveryMode"><option value="manual">Manual · preview and approve every package</option><option value="automatic">Automatic · apply the policy to eligible packages</option></select></label>
                       <div class="delivery-adapter-note full" id="deliveryAdapterHelp" role="note">Generic webhooks receive the exact previewed JSON and optional authorization header.</div>
                       <label><span>Minimum severity</span><select id="deliverySeverity"><option value="critical">Critical</option><option value="high" selected>High</option><option value="medium">Medium</option><option value="low">Low</option></select></label>
@@ -166,6 +166,25 @@
                           <label><span>Low priority</span><input id="deliveryJiraLowPriority" maxlength="120" value="Low"><small>Leave a priority name blank to omit that field.</small></label>
                         </div>
                         <div class="delivery-destination-test"><button class="button ghost small" type="button" id="testDeliveryDestination">Test saved project and issue type</button><span id="deliveryTestResult" role="status" aria-live="polite">Save changes before testing. The test reads create metadata and does not create an issue.</span></div>
+                      </fieldset>
+                      <fieldset class="delivery-soar-fields full" id="deliverySoarFields" hidden>
+                        <legend>Splunk SOAR create-container mapping</legend>
+                        <div class="delivery-soar-grid">
+                          <label class="full"><span>Splunk SOAR auth token</span><input id="deliverySoarAuthToken" type="password" maxlength="4000" autocomplete="off" placeholder="Leave blank to keep the encrypted auth token"><small>Sent only as <code>ph-auth-token</code>. SignalRoom never returns this encrypted value.</small></label>
+                          <label class="full secret-revoke"><input id="deliveryClearSoarAuthToken" type="checkbox"><span>Remove the saved Splunk SOAR auth token when this policy is saved</span></label>
+                          <label><span>Container label</span><input id="deliverySoarLabel" maxlength="120" value="events"><small>Must already exist and be permitted for this token.</small></label>
+                          <label><span>Container type</span><select id="deliverySoarContainerType"><option value="default">Event · default container</option><option value="case">Case</option></select></label>
+                          <label><span>Initial status</span><input id="deliverySoarStatus" maxlength="120" value="new"></label>
+                          <label><span>Sensitivity</span><select id="deliverySoarSensitivity"><option value="red">Red</option><option value="amber" selected>Amber</option><option value="green">Green</option><option value="white">White</option></select></label>
+                          <label><span>Name prefix</span><input id="deliverySoarPrefix" maxlength="80" value="[SignalRoom]"></label>
+                          <label><span>Tenant ID <em>optional</em></span><input id="deliverySoarTenantId" maxlength="120"><small>Required only when SOAR multi-tenancy requires it.</small></label>
+                          <label class="full"><span>Tags</span><input id="deliverySoarTags" maxlength="1000" value="signalroom, security-assurance"><small>Comma-separated tags. No artifact data is sent.</small></label>
+                          <label><span>Critical severity</span><input id="deliverySoarCriticalSeverity" maxlength="120" value="high"></label>
+                          <label><span>High severity</span><input id="deliverySoarHighSeverity" maxlength="120" value="high"></label>
+                          <label><span>Medium severity</span><input id="deliverySoarMediumSeverity" maxlength="120" value="medium"></label>
+                          <label><span>Low severity</span><input id="deliverySoarLowSeverity" maxlength="120" value="low"></label>
+                        </div>
+                        <div class="delivery-destination-test"><button class="button ghost small" type="button" id="testSoarDeliveryDestination">Test saved container mapping</button><span id="deliverySoarTestResult" role="status" aria-live="polite">Save changes before testing. The test reads container options and does not create a container.</span></div>
                       </fieldset>
                       <label id="deliveryAttemptsField"><span>Maximum attempts</span><input id="deliveryAttempts" type="number" min="1" max="8" value="3"></label>
                       <label id="deliveryBackoffField"><span>Initial retry backoff</span><select id="deliveryBackoff"><option value="10">10 seconds</option><option value="60" selected>1 minute</option><option value="300">5 minutes</option><option value="900">15 minutes</option></select></label>

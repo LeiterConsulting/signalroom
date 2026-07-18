@@ -324,7 +324,7 @@ class AssuranceRunRecord(BaseModel):
 DeliverySignalKind = Literal["finding", "coverage", "inventory", "mltk", "collection"]
 DeliverySeverity = Literal["low", "medium", "high", "critical"]
 DeliveryDestinationKind = Literal[
-    "generic-webhook", "slack-incoming-webhook", "jira-cloud"
+    "generic-webhook", "slack-incoming-webhook", "jira-cloud", "splunk-soar"
 ]
 
 
@@ -368,6 +368,27 @@ class DeliveryPolicyUpdate(BaseModel):
     jira_api_token: str | None = Field(default=None, max_length=4000)
     clear_jira_email: bool = False
     clear_jira_api_token: bool = False
+    soar_label: str = Field(default="events", min_length=1, max_length=120)
+    soar_container_type: Literal["default", "case"] = "default"
+    soar_status: str = Field(default="new", min_length=1, max_length=120)
+    soar_name_prefix: str = Field(default="[SignalRoom]", max_length=80)
+    soar_sensitivity: Literal["red", "amber", "green", "white"] = "amber"
+    soar_tags: list[str] = Field(
+        default_factory=lambda: ["signalroom", "security-assurance"],
+        max_length=12,
+    )
+    soar_severity_map: dict[DeliverySeverity, str] = Field(
+        default_factory=lambda: {
+            "critical": "high",
+            "high": "high",
+            "medium": "medium",
+            "low": "low",
+        },
+        max_length=4,
+    )
+    soar_tenant_id: str = Field(default="", max_length=120)
+    soar_auth_token: str | None = Field(default=None, max_length=4000)
+    clear_soar_auth_token: bool = False
 
 
 class DeliveryApproval(BaseModel):

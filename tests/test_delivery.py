@@ -233,6 +233,14 @@ def test_delivery_store_migrates_legacy_destination_columns(tmp_path):
         "jira_summary_prefix",
         "jira_labels",
         "jira_priority_map",
+        "soar_label",
+        "soar_container_type",
+        "soar_status",
+        "soar_name_prefix",
+        "soar_sensitivity",
+        "soar_tags",
+        "soar_severity_map",
+        "soar_tenant_id",
     } <= policy_columns
     assert {
         "external_record_id",
@@ -341,6 +349,37 @@ def jira_policy(**overrides: Any) -> DeliveryPolicyUpdate:
         },
         "jira_email": "analyst@example.com",
         "jira_api_token": "jira-api-token",
+    }
+    values.update(overrides)
+    return DeliveryPolicyUpdate(**values)
+
+
+def soar_policy(**overrides: Any) -> DeliveryPolicyUpdate:
+    values: dict[str, Any] = {
+        "enabled": True,
+        "destination_kind": "splunk-soar",
+        "webhook_url": "https://soar.internal:8443",
+        "destination_label": "Security operations SOAR",
+        "minimum_severity": "high",
+        "signal_kinds": ["coverage"],
+        "redaction_level": "strict",
+        "verify_tls": False,
+        "max_attempts": 3,
+        "retry_backoff_seconds": 10,
+        "soar_label": "events",
+        "soar_container_type": "default",
+        "soar_status": "new",
+        "soar_name_prefix": "[SignalRoom]",
+        "soar_sensitivity": "amber",
+        "soar_tags": ["signalroom", "security-assurance"],
+        "soar_severity_map": {
+            "critical": "high",
+            "high": "high",
+            "medium": "medium",
+            "low": "low",
+        },
+        "soar_tenant_id": "tenant-blue",
+        "soar_auth_token": "soar-auth-token",
     }
     values.update(overrides)
     return DeliveryPolicyUpdate(**values)
@@ -1028,4 +1067,278 @@ async def test_jira_destination_test_reads_metadata_without_creating_issue(tmp_p
         "/rest/api/3/issue/createmeta/SEC/issuetypes"
     )
     assert calls[0]["client"]["verify"] is True
+    assert calls[0]["client"]["follow_redirects"] is False
+
+
+def test_soar_adapter_builds_bounded_create_only_container_payload(tmp_path):
+    assurance = AssuranceStore(tmp_path / "assurance.db")
+    package = package_fixture(assurance)
+    config = ConfigStore(tmp_path / "config")
+    service = AssuranceDeliveryService(
+        DeliveryStore(tmp_path / "delivery.db"),
+        assurance,
+        config,
+        AuditStore(tmp_path / "audit.db"),
+    )
+
+    for invalid_url in (
+        "http://soar.internal",
+        "https://soar.internal/rest/container",
+        "https://user:password@soar.internal",
+        "https://soar.internal?redirect=true",
+    ):
+        with pytest.raises(ValueError):
+            service.update_policy(soar_policy(webhook_url=invalid_url))
+    with pytest.raises(ValueError, match="tags"):
+        service.update_policy(soar_policy(soar_tags=["not\nprintable"]))
+    with pytest.raises(ValueError, match="auth token"):
+        service.update_policy(soar_policy(soar_auth_token="token with spaces"))
+
+    overview = service.update_policy(soar_policy())
+    assert overview["destination"]["configured"] is True
+    assert overview["destination"]["authorization_supported"] is False
+    assert overview["destination"]["soar_auth_token_configured"] is True
+    assert overview["destination"]["transport"] == (
+        "encrypted without certificate verification"
+    )
+    assert overview["worker"]["external_authority"] == "create-container-only"
+    assert overview["worker"]["external_read_authority"] == (
+        "read-container-options-only"
+    )
+    assert "soar_auth_token" not in overview["destination"]
+
+    preview = service.preview(package["id"])
+    payload = preview["payload"]
+    serialized = json.dumps(payload)
+
+    assert payload["name"].startswith("[SignalRoom] [HIGH] Assurance response")
+    assert payload["label"] == "events"
+    assert payload["severity"] == "high"
+    assert payload["sensitivity"] == "amber"
+    assert payload["status"] == "new"
+    assert payload["container_type"] == "default"
+    assert payload["tenant_id"] == "tenant-blue"
+    assert payload["tags"] == ["signalroom", "security-assurance"]
+    assert payload["run_automation"] is False
+    assert payload["source_data_identifier"] == (
+        f"signalroom-{preview['correlation_id']}"
+    )
+    assert "artifacts" not in payload
+    assert "data" not in payload
+    assert "Identity telemetry coverage changed" not in serialized
+    assert "Raw environment detail" not in serialized
+    assert "vpn-authentication" not in serialized
+    assert "Assurance response · identity coverage" not in serialized
+    assert preview["authority"]["external_create"] is True
+    assert "automation disabled" in preview["destination"]["delivery_semantics"]
+    assert any("no artifacts" in warning for warning in preview["warnings"])
+
+    service.update_policy(
+        soar_policy(webhook_url=None, redaction_level="standard")
+    )
+    standard = json.dumps(service.preview(package["id"])["payload"])
+    assert "Identity telemetry coverage changed" in standard
+    assert "vpn-authentication" in standard
+    assert "Raw environment detail" not in standard
+
+
+@pytest.mark.asyncio
+async def test_soar_worker_creates_or_recovers_container_without_expanded_authority(
+    tmp_path,
+):
+    assurance = AssuranceStore(tmp_path / "assurance.db")
+    package = package_fixture(assurance)
+
+    class SoarResponse:
+        def __init__(self, status_code: int, value: dict[str, Any]):
+            self.status_code = status_code
+            self.value = value
+
+        def json(self) -> dict[str, Any]:
+            return self.value
+
+    async def deliver(
+        root: str, response: SoarResponse
+    ) -> tuple[dict[str, Any], dict[str, Any], DeliveryStore]:
+        calls: list[dict[str, Any]] = []
+
+        class SoarClient(FakeDeliveryClient):
+            async def post(
+                self, url: str, *, content: bytes, headers: dict[str, str]
+            ) -> SoarResponse:
+                self.calls.append(
+                    {
+                        "url": url,
+                        "content": content,
+                        "headers": headers,
+                        "client": self.kwargs,
+                    }
+                )
+                return response
+
+        store = DeliveryStore(tmp_path / root / "delivery.db")
+        service = AssuranceDeliveryService(
+            store,
+            assurance,
+            ConfigStore(tmp_path / root / "config"),
+            AuditStore(tmp_path / root / "audit.db"),
+            client_factory=lambda **kwargs: SoarClient(calls, **kwargs),
+        )
+        service.update_policy(soar_policy())
+        preview = service.preview(package["id"])
+        job = service.approve(package["id"], preview["payload_sha256"])
+        await service._deliver(job)
+        assert len(calls) == 1
+        return store.get(job["id"]), calls[0], store
+
+    created, create_call, create_store = await deliver(
+        "created", SoarResponse(200, {"id": 52, "success": True})
+    )
+    assert created["status"] == "delivered"
+    assert created["external_record"]["id"] == "52"
+    assert created["external_record"]["key"] == "Container 52"
+    assert created["external_record"]["url"] == (
+        "https://soar.internal:8443/mission/52"
+    )
+    assert create_call["url"] == "https://soar.internal:8443/rest/container"
+    assert create_call["headers"]["ph-auth-token"] == "soar-auth-token"
+    assert "Authorization" not in create_call["headers"]
+    assert "Idempotency-Key" not in create_call["headers"]
+    assert create_call["client"]["verify"] is False
+    sent = json.loads(create_call["content"])
+    assert sent["run_automation"] is False
+    assert "artifacts" not in sent
+
+    duplicate, _, _ = await deliver(
+        "duplicate",
+        SoarResponse(
+            409,
+            {
+                "failed": True,
+                "existing_container_id": 87,
+                "message": (
+                    "duplicate container with matching source_data_identifier"
+                ),
+            },
+        ),
+    )
+    assert duplicate["status"] == "delivered"
+    assert duplicate["external_record"]["key"] == "Container 87"
+
+    contradictory, _, _ = await deliver(
+        "contradictory", SoarResponse(400, {"id": 99, "success": True})
+    )
+    assert contradictory["status"] == "failed"
+    assert contradictory["external_record"] is None
+    assert "contradictory success body" in contradictory["last_error"]
+
+    with create_store.connect() as db:
+        db.execute(
+            "UPDATE delivery_jobs SET status='sending',delivered_at=NULL WHERE id=?",
+            (created["id"],),
+        )
+    assert create_store.recover_interrupted() == {
+        "correlated": 1,
+        "uncertain": 0,
+        "retrying": 0,
+    }
+
+
+@pytest.mark.asyncio
+async def test_soar_ambiguous_create_uses_bounded_source_identifier_retry(tmp_path):
+    assurance = AssuranceStore(tmp_path / "assurance.db")
+    package = package_fixture(assurance)
+    store = DeliveryStore(tmp_path / "delivery.db")
+
+    class UnknownSoarClient(FakeDeliveryClient):
+        async def post(
+            self, url: str, *, content: bytes, headers: dict[str, str]
+        ) -> FakeResponse:
+            raise httpx.ReadTimeout("response not received")
+
+    service = AssuranceDeliveryService(
+        store,
+        assurance,
+        ConfigStore(tmp_path / "config"),
+        AuditStore(tmp_path / "audit.db"),
+        client_factory=lambda **kwargs: UnknownSoarClient([], **kwargs),
+    )
+    service.update_policy(soar_policy(max_attempts=3))
+    preview = service.preview(package["id"])
+    job = service.approve(package["id"], preview["payload_sha256"])
+
+    await service._deliver(job)
+
+    retrying = store.get(job["id"])
+    assert retrying["status"] == "retrying"
+    assert retrying["attempt_count"] == 1
+    assert retrying["next_attempt_at"]
+    assert "same deterministic source data identifier" in retrying["last_error"]
+
+
+@pytest.mark.asyncio
+async def test_soar_destination_test_reads_options_without_creating_container(tmp_path):
+    assurance = AssuranceStore(tmp_path / "assurance.db")
+    calls: list[dict[str, Any]] = []
+
+    class OptionsResponse:
+        status_code = 200
+
+        @staticmethod
+        def json() -> dict[str, Any]:
+            return {
+                "label": ["events", "incident"],
+                "status": [{"name": "new"}, {"name": "closed"}],
+                "severity": [
+                    {"name": "high"},
+                    {"name": "medium"},
+                    {"name": "low"},
+                ],
+                "sensitivity": [["amber", "TLP:Amber"], ["green", "TLP:Green"]],
+            }
+
+    class OptionsClient(FakeDeliveryClient):
+        async def get(
+            self, url: str, *, headers: dict[str, str]
+        ) -> OptionsResponse:
+            self.calls.append(
+                {
+                    "method": "GET",
+                    "url": url,
+                    "headers": headers,
+                    "client": self.kwargs,
+                }
+            )
+            return OptionsResponse()
+
+        async def post(
+            self, url: str, *, content: bytes, headers: dict[str, str]
+        ) -> FakeResponse:
+            raise AssertionError(
+                "The destination test must not create a Splunk SOAR container"
+            )
+
+    service = AssuranceDeliveryService(
+        DeliveryStore(tmp_path / "delivery.db"),
+        assurance,
+        ConfigStore(tmp_path / "config"),
+        AuditStore(tmp_path / "audit.db"),
+        client_factory=lambda **kwargs: OptionsClient(calls, **kwargs),
+    )
+    service.update_policy(soar_policy())
+
+    result = await service.test_destination()
+
+    assert result["ok"] is True
+    assert result["authority"] == "read-container-options-only"
+    assert result["availability"] == {
+        "label": True,
+        "status": True,
+        "sensitivity": True,
+        "severity_map": True,
+    }
+    assert calls[0]["method"] == "GET"
+    assert calls[0]["url"].endswith("/rest/container_options")
+    assert calls[0]["headers"]["ph-auth-token"] == "soar-auth-token"
+    assert calls[0]["client"]["verify"] is False
     assert calls[0]["client"]["follow_redirects"] is False

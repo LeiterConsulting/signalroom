@@ -181,10 +181,11 @@ notable-event creation, suppression behavior, or response delivery.
 ## Outbound delivery is a separate authority
 
 `AssuranceDeliveryService` owns a separately opt-in adapter policy and restart-safe delivery worker. The durable
-adapter identity selects a generic JSON webhook, Slack Incoming Webhook, or Jira Cloud issue creation. A deterministic
+adapter identity selects a generic JSON webhook, Slack Incoming Webhook, Jira Cloud issue creation, or Splunk SOAR
+container creation. A deterministic
 redactor creates the exact adapter-native payload preview; manual approval binds its SHA-256 to the destination
 fingerprint. Automatic policy is a separate operator choice and still applies severity and signal-kind routing. Any
-adapter, transport, Jira credential, or Jira field-mapping identity change cancels stale queued work and requires a
+adapter, transport, destination credential, or adapter field-mapping identity change cancels stale queued work and requires a
 new preview.
 
 Generic requests carry an idempotency key and may use an encrypted authorization value. Slack requests use verified
@@ -212,6 +213,21 @@ as `not-found-or-not-visible`, not as deletion, because Jira visibility permissi
 Reads are explicit rather than scheduled, require the unchanged destination fingerprint, and add no external
 mutation authority.
 
+Splunk SOAR accepts an HTTPS site origin and a dedicated encrypted `ph-auth-token`. Unlike the public Slack and Jira
+adapters, it supports verified TLS with a private CA or an explicit operator-selected verification override for a
+trusted self-signed internal endpoint. The adapter's only mutation is `POST /rest/container`; it never sends
+artifacts, sets `run_automation` to `false`, and has no update, assignment, comment, action, playbook, or delete
+route. Operator mappings select label, container type, initial status, sensitivity, tags, optional tenant ID, name
+prefix, and severity values. A read-only setup test may call `GET /rest/container_options` and does not create a
+container.
+
+Every approved SOAR payload carries a deterministic `source_data_identifier` bound to package, destination
+fingerprint, and redaction policy. A valid create response must contain a positive numeric container ID. A
+documented duplicate response is accepted only when it names both a duplicate and `source_data_identifier` and
+contains a positive `existing_container_id`. SignalRoom constructs the trusted `/mission/{id}` link from the
+configured origin and persists the correlation before completing the job. Ambiguous responses use bounded retries
+with the same source ID; a restart completes a durably correlated create locally or retries an uncorrelated one.
+
 `AuditStore` records delivery and major control-plane decisions in an append-only local SHA-256 hash chain. Secrets
 are redacted before persistence. The UI verifies the chain, but the local database is not a substitute for a remote
 immutable audit sink on a fully compromised host.
@@ -228,4 +244,3 @@ SignalRoom is an MCP client of a Splunk MCP server and an MCP server to agent ho
 4. Search cost estimation, per-instance concurrency limits, and Splunk workload controls
 5. Broader operator-authored evaluation suites beyond the durable golden, tournament, and feedback history
 6. Audit events sent to a dedicated Splunk index
-7. Splunk SOAR create-only adapter with an explicit authority and field-mapping contract

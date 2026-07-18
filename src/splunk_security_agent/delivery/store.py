@@ -53,6 +53,15 @@ class DeliveryStore:
                     jira_labels TEXT NOT NULL DEFAULT '["signalroom","security-assurance"]',
                     jira_priority_map TEXT NOT NULL DEFAULT
                         '{"critical":"Highest","high":"High","medium":"Medium","low":"Low"}',
+                    soar_label TEXT NOT NULL DEFAULT 'events',
+                    soar_container_type TEXT NOT NULL DEFAULT 'default',
+                    soar_status TEXT NOT NULL DEFAULT 'new',
+                    soar_name_prefix TEXT NOT NULL DEFAULT '[SignalRoom]',
+                    soar_sensitivity TEXT NOT NULL DEFAULT 'amber',
+                    soar_tags TEXT NOT NULL DEFAULT '["signalroom","security-assurance"]',
+                    soar_severity_map TEXT NOT NULL DEFAULT
+                        '{"critical":"high","high":"high","medium":"medium","low":"low"}',
+                    soar_tenant_id TEXT NOT NULL DEFAULT '',
                     verify_tls INTEGER NOT NULL,
                     ca_bundle TEXT NOT NULL,
                     max_attempts INTEGER NOT NULL,
@@ -133,6 +142,19 @@ class DeliveryStore:
                     "TEXT NOT NULL DEFAULT "
                     """'{"critical":"Highest","high":"High","medium":"Medium","low":"Low"}'"""
                 ),
+                "soar_label": "TEXT NOT NULL DEFAULT 'events'",
+                "soar_container_type": "TEXT NOT NULL DEFAULT 'default'",
+                "soar_status": "TEXT NOT NULL DEFAULT 'new'",
+                "soar_name_prefix": "TEXT NOT NULL DEFAULT '[SignalRoom]'",
+                "soar_sensitivity": "TEXT NOT NULL DEFAULT 'amber'",
+                "soar_tags": (
+                    """TEXT NOT NULL DEFAULT '["signalroom","security-assurance"]'"""
+                ),
+                "soar_severity_map": (
+                    "TEXT NOT NULL DEFAULT "
+                    """'{"critical":"high","high":"high","medium":"medium","low":"low"}'"""
+                ),
+                "soar_tenant_id": "TEXT NOT NULL DEFAULT ''",
             }
             for column, definition in policy_migrations.items():
                 if column not in policy_columns:
@@ -179,6 +201,8 @@ class DeliveryStore:
                 destination_kind=?,signal_kinds=?,redaction_level=?,destination_label=?,verify_tls=?,
                 ca_bundle=?,max_attempts=?,retry_backoff_seconds=?,jira_project_key=?,
                 jira_issue_type=?,jira_summary_prefix=?,jira_labels=?,jira_priority_map=?,
+                soar_label=?,soar_container_type=?,soar_status=?,soar_name_prefix=?,
+                soar_sensitivity=?,soar_tags=?,soar_severity_map=?,soar_tenant_id=?,
                 updated_at=? WHERE id=1""",
                 (
                     int(value.enabled),
@@ -197,6 +221,14 @@ class DeliveryStore:
                     value.jira_summary_prefix,
                     json.dumps(value.jira_labels),
                     json.dumps(value.jira_priority_map, sort_keys=True),
+                    value.soar_label,
+                    value.soar_container_type,
+                    value.soar_status,
+                    value.soar_name_prefix,
+                    value.soar_sensitivity,
+                    json.dumps(value.soar_tags),
+                    json.dumps(value.soar_severity_map, sort_keys=True),
+                    value.soar_tenant_id,
                     now,
                 ),
             )
@@ -453,10 +485,11 @@ class DeliveryStore:
         with self._lock, self.connect() as db:
             correlated = db.execute(
                 """UPDATE delivery_jobs SET status='delivered',next_attempt_at=NULL,
-                last_error='Recovered after Jira correlation was durably recorded.',
+                last_error='Recovered after the external record correlation was durably recorded.',
                 delivered_at=COALESCE(delivered_at,external_record_created_at,?),
-                updated_at=? WHERE status='sending' AND destination_kind='jira-cloud'
-                AND external_record_key<>''""",
+                updated_at=? WHERE status='sending'
+                AND destination_kind IN ('jira-cloud','splunk-soar')
+                AND external_record_id<>''""",
                 (now, now),
             ).rowcount
             uncertain = db.execute(
@@ -573,6 +606,14 @@ class DeliveryStore:
             "jira_summary_prefix": row["jira_summary_prefix"],
             "jira_labels": json.loads(row["jira_labels"]),
             "jira_priority_map": json.loads(row["jira_priority_map"]),
+            "soar_label": row["soar_label"],
+            "soar_container_type": row["soar_container_type"],
+            "soar_status": row["soar_status"],
+            "soar_name_prefix": row["soar_name_prefix"],
+            "soar_sensitivity": row["soar_sensitivity"],
+            "soar_tags": json.loads(row["soar_tags"]),
+            "soar_severity_map": json.loads(row["soar_severity_map"]),
+            "soar_tenant_id": row["soar_tenant_id"],
             "verify_tls": bool(row["verify_tls"]),
             "ca_bundle": row["ca_bundle"] or None,
             "max_attempts": int(row["max_attempts"]),

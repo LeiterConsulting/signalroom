@@ -1318,6 +1318,7 @@ async function closeAssurancePackage(packageId) {
 function deliveryAdapterName(kind) {
   if (kind === 'slack-incoming-webhook') return 'Slack Incoming Webhook';
   if (kind === 'jira-cloud') return 'Jira Cloud issue';
+  if (kind === 'splunk-soar') return 'Splunk SOAR container';
   return 'Generic JSON webhook';
 }
 
@@ -1325,14 +1326,18 @@ function updateDeliveryAdapter(destination = state.assurance?.delivery?.destinat
   const kind = $('#deliveryKind').value;
   const isSlack = kind === 'slack-incoming-webhook';
   const isJira = kind === 'jira-cloud';
+  const isSoar = kind === 'splunk-soar';
   const requiresPublicTls = isSlack || isJira;
+  const usesDedicatedAuth = requiresPublicTls || isSoar;
   const adapterChanged = Boolean(destination.kind && destination.kind !== kind);
-  $('#deliveryAuthorizationField').hidden = requiresPublicTls;
-  $('#deliveryClearAuthorizationField').hidden = requiresPublicTls;
-  $('#deliveryAuthorization').disabled = requiresPublicTls;
-  $('#deliveryClearAuthorization').disabled = requiresPublicTls;
+  $('#deliveryAuthorizationField').hidden = usesDedicatedAuth;
+  $('#deliveryClearAuthorizationField').hidden = usesDedicatedAuth;
+  $('#deliveryAuthorization').disabled = usesDedicatedAuth;
+  $('#deliveryClearAuthorization').disabled = usesDedicatedAuth;
   $('#deliveryJiraFields').hidden = !isJira;
   $$('#deliveryJiraFields input,#deliveryJiraFields button').forEach(node => { node.disabled = !isJira; });
+  $('#deliverySoarFields').hidden = !isSoar;
+  $$('#deliverySoarFields input,#deliverySoarFields select,#deliverySoarFields button').forEach(node => { node.disabled = !isSoar; });
   $('#deliveryVerifyTls').disabled = requiresPublicTls;
   $('#deliveryCaField').hidden = requiresPublicTls;
   $('#deliveryCaBundle').disabled = requiresPublicTls;
@@ -1345,22 +1350,30 @@ function updateDeliveryAdapter(destination = state.assurance?.delivery?.destinat
     ? 'Required for Jira Cloud and cannot be disabled.'
     : isSlack
       ? 'Required for the public Slack destination and cannot be disabled.'
-      : 'Recommended. A private CA path can be supplied for internal destinations.';
+      : isSoar
+        ? 'Recommended. Disable only for a trusted self-signed SOAR endpoint, or supply a private CA path.'
+        : 'Recommended. A private CA path can be supplied for internal destinations.';
   $('#deliveryUrlLabel').textContent = isJira
     ? 'Jira Cloud site URL'
     : isSlack
       ? 'Slack Incoming Webhook URL'
-      : 'HTTPS webhook URL';
+      : isSoar
+        ? 'Splunk SOAR site URL'
+        : 'HTTPS webhook URL';
   $('#deliveryUrlHelp').textContent = isJira
     ? 'Use only the encrypted site origin for your atlassian.net tenant, such as https://security.atlassian.net.'
     : isSlack
       ? 'Use the complete encrypted hooks.slack.com or hooks.slack-gov.com /services/ URL. SignalRoom never returns the secret path.'
-      : 'HTTPS required; loopback HTTP is accepted only for local testing.';
+      : isSoar
+        ? 'Use the HTTPS site origin only, such as https://soar.internal:8443. SignalRoom appends the REST container path.'
+        : 'HTTPS required; loopback HTTP is accepted only for local testing.';
   $('#deliveryAdapterHelp').textContent = isJira
     ? 'Jira receives one redacted create-issue request after approval. SignalRoom can explicitly refresh a correlated issue’s minimal workflow fields, but cannot update, transition, comment on, assign, attach to, or delete it. Unknown create outcomes stop for analyst review.'
     : isSlack
       ? `Slack receives plain-text notification blocks only over verified TLS. Its configured channel, sender, and icon cannot be overridden.${destination.authorization_configured ? ' A saved generic authorization value remains encrypted but is not sent.' : ''}`
-      : 'Generic webhooks receive the exact previewed JSON, a payload hash, an idempotency key, and the optional authorization header.';
+      : isSoar
+        ? 'Splunk SOAR receives one redacted container after approval. SignalRoom explicitly disables automation, sends no artifacts, and cannot update, assign, comment on, run actions or playbooks against, or delete the container. A deterministic source ID makes ambiguous retries duplicate-safe.'
+        : 'Generic webhooks receive the exact previewed JSON, a payload hash, an idempotency key, and the optional authorization header.';
   if (!$('#deliveryWebhookUrl').value) {
     $('#deliveryWebhookUrl').placeholder = adapterChanged
       ? `Enter a ${deliveryAdapterName(kind)} URL to change adapters`
@@ -1370,7 +1383,9 @@ function updateDeliveryAdapter(destination = state.assurance?.delivery?.destinat
           ? 'https://security.atlassian.net'
           : isSlack
             ? 'https://hooks.slack.com/services/…'
-            : 'https://automation.example/hooks/signalroom';
+            : isSoar
+              ? 'https://soar.internal:8443'
+              : 'https://automation.example/hooks/signalroom';
   }
 }
 
@@ -1395,20 +1410,36 @@ function hydrateDeliveryPolicy(value) {
   $('#deliveryJiraHighPriority').value = policy.jira_priority_map?.high ?? 'High';
   $('#deliveryJiraMediumPriority').value = policy.jira_priority_map?.medium ?? 'Medium';
   $('#deliveryJiraLowPriority').value = policy.jira_priority_map?.low ?? 'Low';
+  $('#deliverySoarLabel').value = policy.soar_label || 'events';
+  $('#deliverySoarContainerType').value = policy.soar_container_type || 'default';
+  $('#deliverySoarStatus').value = policy.soar_status || 'new';
+  $('#deliverySoarPrefix').value = policy.soar_name_prefix ?? '[SignalRoom]';
+  $('#deliverySoarSensitivity').value = policy.soar_sensitivity || 'amber';
+  $('#deliverySoarTags').value = (policy.soar_tags || []).join(', ');
+  $('#deliverySoarCriticalSeverity').value = policy.soar_severity_map?.critical ?? 'high';
+  $('#deliverySoarHighSeverity').value = policy.soar_severity_map?.high ?? 'high';
+  $('#deliverySoarMediumSeverity').value = policy.soar_severity_map?.medium ?? 'medium';
+  $('#deliverySoarLowSeverity').value = policy.soar_severity_map?.low ?? 'low';
+  $('#deliverySoarTenantId').value = policy.soar_tenant_id || '';
   $$('.delivery-categories input').forEach(input => { input.checked = (policy.signal_kinds || []).includes(input.value); });
   $('#deliveryWebhookUrl').value = '';
   $('#deliveryAuthorization').value = '';
   $('#deliveryJiraEmail').value = '';
   $('#deliveryJiraApiToken').value = '';
+  $('#deliverySoarAuthToken').value = '';
   $('#deliveryClearWebhookUrl').checked = false;
   $('#deliveryClearAuthorization').checked = false;
   $('#deliveryClearJiraEmail').checked = false;
   $('#deliveryClearJiraApiToken').checked = false;
+  $('#deliveryClearSoarAuthToken').checked = false;
   $('#deliveryAuthorization').placeholder = value.destination?.authorization_configured ? 'Encrypted authorization configured · leave blank to keep' : 'Optional · Bearer …';
   $('#deliveryJiraEmail').placeholder = value.destination?.jira_email_configured ? 'Encrypted account email configured · leave blank to keep' : 'analyst@example.com';
   $('#deliveryJiraApiToken').placeholder = value.destination?.jira_api_token_configured ? 'Encrypted API token configured · leave blank to keep' : 'Paste a Jira API token';
+  $('#deliverySoarAuthToken').placeholder = value.destination?.soar_auth_token_configured ? 'Encrypted auth token configured · leave blank to keep' : 'Paste a Splunk SOAR auth token';
   $('#deliveryTestResult').textContent = 'Save changes before testing. The test reads create metadata and does not create an issue.';
   $('#deliveryTestResult').className = '';
+  $('#deliverySoarTestResult').textContent = 'Save changes before testing. The test reads container options and does not create a container.';
+  $('#deliverySoarTestResult').className = '';
   updateDeliveryAdapter(value.destination);
 }
 
@@ -1473,7 +1504,7 @@ function renderDelivery(value) {
   const jobs = delivery.jobs || [];
   $('#deliveryJobs').innerHTML = jobs.length ? jobs.slice(0,12).map(job => {
     const primaryAction = job.status === 'failed'
-      ? `<button class="button ghost small" data-retry-delivery="${escapeHtml(job.id)}">${job.destination_kind === 'jira-cloud' ? 'Review and retry create' : 'Retry bounded batch'}</button>`
+      ? `<button class="button ghost small" data-retry-delivery="${escapeHtml(job.id)}">${job.destination_kind === 'jira-cloud' ? 'Review and retry create' : job.destination_kind === 'splunk-soar' ? 'Retry source-ID-safe create' : 'Retry bounded batch'}</button>`
       : ['queued','retrying'].includes(job.status)
         ? `<button class="button ghost small" data-cancel-delivery="${escapeHtml(job.id)}">Cancel</button>`
         : '';
@@ -1483,7 +1514,7 @@ function renderDelivery(value) {
     const action = `${primaryAction}${reconcileAction}`;
     const timing = job.status === 'delivered' ? `Delivered ${assuranceTime(job.delivered_at)}` : job.next_attempt_at ? `Next attempt ${assuranceTime(job.next_attempt_at)}` : assuranceTime(job.updated_at);
     const externalRecord = job.external_record
-      ? `<div class="delivery-external-record"><a href="${escapeHtml(job.external_record.url)}" target="_blank" rel="noopener noreferrer">Open correlated Jira issue ${escapeHtml(job.external_record.key)} ↗</a></div>`
+      ? `<div class="delivery-external-record"><a href="${escapeHtml(job.external_record.url)}" target="_blank" rel="noopener noreferrer">${job.destination_kind === 'splunk-soar' ? `Open correlated Splunk SOAR ${escapeHtml(job.external_record.key)}` : `Open correlated Jira issue ${escapeHtml(job.external_record.key)}`} ↗</a></div>`
       : '';
     const reconciliation = job.destination_kind === 'jira-cloud' && job.external_record ? renderJiraReconciliation(job) : '';
     return `<article class="delivery-job ${escapeHtml(job.status)}"><header><span>${escapeHtml(job.approval_mode.replaceAll('-', ' '))}</span><b>${escapeHtml(job.status)}</b></header><p>Package <code>${escapeHtml(job.package_id.slice(0,8))}</code> → ${escapeHtml(job.destination_label)}</p><div><span>${escapeHtml(deliveryAdapterName(job.destination_kind))}</span><span>${job.attempt_count}/${job.max_attempts} attempts</span><span>HTTP ${job.http_status || '—'}</span><span>Hash <code>${escapeHtml(job.payload_sha256.slice(0,12))}</code></span></div>${externalRecord}${reconciliation}${job.last_error ? `<small>${escapeHtml(job.last_error)}</small>` : ''}<footer><time>${escapeHtml(timing)}</time><div>${action}</div></footer></article>`;
@@ -1529,7 +1560,22 @@ async function saveDeliveryPolicy(event) {
     jira_email:$('#deliveryJiraEmail').value.trim() || null,
     jira_api_token:$('#deliveryJiraApiToken').value.trim() || null,
     clear_jira_email:$('#deliveryClearJiraEmail').checked,
-    clear_jira_api_token:$('#deliveryClearJiraApiToken').checked
+    clear_jira_api_token:$('#deliveryClearJiraApiToken').checked,
+    soar_label:$('#deliverySoarLabel').value.trim() || 'events',
+    soar_container_type:$('#deliverySoarContainerType').value,
+    soar_status:$('#deliverySoarStatus').value.trim() || 'new',
+    soar_name_prefix:$('#deliverySoarPrefix').value.trim(),
+    soar_sensitivity:$('#deliverySoarSensitivity').value,
+    soar_tags:$('#deliverySoarTags').value.split(',').map(item => item.trim()).filter(Boolean),
+    soar_severity_map:{
+      critical:$('#deliverySoarCriticalSeverity').value.trim(),
+      high:$('#deliverySoarHighSeverity').value.trim(),
+      medium:$('#deliverySoarMediumSeverity').value.trim(),
+      low:$('#deliverySoarLowSeverity').value.trim()
+    },
+    soar_tenant_id:$('#deliverySoarTenantId').value.trim(),
+    soar_auth_token:$('#deliverySoarAuthToken').value.trim() || null,
+    clear_soar_auth_token:$('#deliveryClearSoarAuthToken').checked
   };
   try {
     await api('/api/delivery/policy', {method:'PUT',body:JSON.stringify(payload)});
@@ -1538,22 +1584,32 @@ async function saveDeliveryPolicy(event) {
 }
 
 async function testDeliveryDestination() {
-  const result = $('#deliveryTestResult');
+  const isSoar = $('#deliveryKind').value === 'splunk-soar';
+  const result = $(isSoar ? '#deliverySoarTestResult' : '#deliveryTestResult');
   if (state.deliveryPolicyDirty) {
     result.className = 'error';
     result.textContent = 'Save the current adapter settings before running the read-only test.';
     return;
   }
-  const button = $('#testDeliveryDestination');
+  const button = $(isSoar ? '#testSoarDeliveryDestination' : '#testDeliveryDestination');
   button.disabled = true;
   result.className = '';
-  result.textContent = 'Reading Jira create metadata… no issue will be created.';
+  result.textContent = isSoar
+    ? 'Reading Splunk SOAR container options… no container will be created.'
+    : 'Reading Jira create metadata… no issue will be created.';
   try {
     const value = await api('/api/delivery/test', {method:'POST'});
     result.className = value.ok ? 'ok' : 'error';
-    result.textContent = value.ok
-      ? `Verified ${value.project_key} · ${value.issue_type}. Test authority: read create metadata only.`
-      : `${value.project_key} is reachable, but ${value.issue_type} is unavailable. Available: ${(value.available_issue_types || []).join(', ') || 'none returned'}.`;
+    if (isSoar) {
+      const missing = Object.entries(value.availability || {}).filter(([, available]) => !available).map(([name]) => name);
+      result.textContent = value.ok
+        ? `Verified label ${value.configured.label}, status ${value.configured.status}, ${value.configured.sensitivity} sensitivity, and the severity mapping. Test authority: read container options only.`
+        : `Splunk SOAR is reachable, but the configured ${missing.join(', ') || 'container mapping'} is unavailable. No container was created.`;
+    } else {
+      result.textContent = value.ok
+        ? `Verified ${value.project_key} · ${value.issue_type}. Test authority: read create metadata only.`
+        : `${value.project_key} is reachable, but ${value.issue_type} is unavailable. Available: ${(value.available_issue_types || []).join(', ') || 'none returned'}.`;
+    }
   } catch (error) {
     result.className = 'error';
     result.textContent = error.message;
@@ -1567,7 +1623,9 @@ async function previewAssuranceDelivery(packageId) {
     const preview = await api(`/api/assurance/packages/${encodeURIComponent(packageId)}/delivery/preview`, {method:'POST'});
     state.deliveryPreview = preview;
     const authority = preview.authority?.external_create
-      ? 'Create one external issue · no update, transition, comment, delete, SPL execution, or validation approval'
+      ? preview.destination.kind === 'splunk-soar'
+        ? 'Create one container · no artifacts, automation, update, action, playbook, delete, SPL execution, or validation approval'
+        : 'Create one external issue · no update, transition, comment, delete, SPL execution, or validation approval'
       : 'Delivery only · no SPL execution or validation approval';
     $('#deliveryPreviewContract').innerHTML = `<span><b>${escapeHtml(preview.destination.label)}</b>${escapeHtml(deliveryAdapterName(preview.destination.kind))} · ${escapeHtml(preview.destination.origin)}</span><span><b>${preview.payload_bytes} bytes</b>${escapeHtml(preview.redaction_level)} redaction</span><span><b>SHA-256</b><code>${escapeHtml(preview.payload_sha256)}</code></span><span><b>Authority</b>${escapeHtml(authority)}</span><span><b>Delivery behavior</b>${escapeHtml(preview.destination.delivery_semantics)}</span>`;
     $('#deliveryRedactions').innerHTML = preview.redactions.map(item => `<li>${escapeHtml(item)}</li>`).join('');
@@ -3131,6 +3189,7 @@ $('#assuranceForm').addEventListener('submit', saveAssurancePolicy);
 $('#deliveryForm').addEventListener('submit', saveDeliveryPolicy);
 $('#approveDelivery').addEventListener('click', approveDeliveryPreview);
 $('#testDeliveryDestination').addEventListener('click', testDeliveryDestination);
+$('#testSoarDeliveryDestination').addEventListener('click', testDeliveryDestination);
 $('#runAssuranceNow').addEventListener('click', runAssuranceNow);
 $('#cancelAssuranceRun').addEventListener('click', cancelAssuranceRun);
 $('#assuranceDepth').addEventListener('change', updateAssuranceBudgetHelp);

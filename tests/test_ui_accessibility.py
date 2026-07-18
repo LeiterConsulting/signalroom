@@ -42,14 +42,22 @@ def test_delivery_exposes_adapter_semantics_before_approval() -> None:
     assert 'id="deliveryKind"' in INDEX_HTML
     assert 'value="slack-incoming-webhook"' in INDEX_HTML
     assert 'value="jira-cloud"' in INDEX_HTML
+    assert 'value="splunk-soar"' in INDEX_HTML
     assert 'id="deliveryAdapterHelp"' in INDEX_HTML
     assert 'id="deliveryJiraFields"' in INDEX_HTML
     assert 'id="testDeliveryDestination"' in INDEX_HTML
+    assert 'id="deliverySoarFields"' in INDEX_HTML
+    assert 'id="testSoarDeliveryDestination"' in INDEX_HTML
+    assert "reads container options and does not create a container" in INDEX_HTML
     assert "reads create metadata and does not create an issue" in INDEX_HTML
     assert 'id="deliveryWarnings"' in INDEX_HTML
     assert "Configure generic webhook policy" not in INDEX_HTML
     assert "Slack receives plain-text notification blocks only over verified TLS." in APP_JS
     assert "cannot update, transition, comment on, assign, attach to, or delete it" in APP_JS
+    assert "explicitly disables automation, sends no artifacts" in APP_JS
+    assert "Open correlated Splunk SOAR" in APP_JS
+    assert "const usesDedicatedAuth = requiresPublicTls || isSoar" in APP_JS
+    assert "$('#deliveryAuthorizationField').hidden = usesDedicatedAuth" in APP_JS
     assert "Open correlated Jira issue" in APP_JS
     assert "Refresh Jira status" in APP_JS
     assert "Explicit read only · minimal correlated issue fields" in APP_JS

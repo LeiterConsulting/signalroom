@@ -167,6 +167,7 @@ class ConfigStore:
             "delivery_authorization": "SIGNALROOM_WEBHOOK_AUTHORIZATION",
             "delivery_jira_email": "SIGNALROOM_JIRA_EMAIL",
             "delivery_jira_api_token": "SIGNALROOM_JIRA_API_TOKEN",
+            "delivery_soar_auth_token": "SIGNALROOM_SOAR_AUTH_TOKEN",
         }
         env_name = env_names.get(name, "")
         return bool(env_name and os.getenv(env_name, ""))
@@ -179,6 +180,7 @@ class ConfigStore:
             "delivery_authorization": "SIGNALROOM_WEBHOOK_AUTHORIZATION",
             "delivery_jira_email": "SIGNALROOM_JIRA_EMAIL",
             "delivery_jira_api_token": "SIGNALROOM_JIRA_API_TOKEN",
+            "delivery_soar_auth_token": "SIGNALROOM_SOAR_AUTH_TOKEN",
         }
         return os.getenv(env_names.get(name, ""), "") or self.vault.load().get(name, "")
 

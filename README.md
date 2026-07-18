@@ -417,8 +417,8 @@ Each package can pivot into Investigate, a case, or the validation queue. Contin
 executes proposed validation SPL automatically.
 
 Outbound response-package delivery is independently disabled by default. Operators can select a generic JSON
-webhook (with loopback HTTP permitted only for local testing), a Slack Incoming Webhook, or a Jira Cloud
-create-issue adapter. Strict redaction sends opaque package metadata and aggregate signal counts while withholding
+webhook (with loopback HTTP permitted only for local testing), a Slack Incoming Webhook, a Jira Cloud
+create-issue adapter, or a Splunk SOAR create-container adapter. Strict redaction sends opaque package metadata and aggregate signal counts while withholding
 source-derived package and signal text. Standard redaction may additionally include bounded package text, signal
 titles, and subjects. Neither level includes raw events, SPL, validation identifiers, signal fingerprints, discovery
 run identifiers, Splunk credentials, or endpoint configuration. Manual mode binds approval to the exact payload
@@ -452,8 +452,19 @@ permission to browse the issue; SignalRoom does not claim the issue was deleted.
 does not add issue update authority. See Atlassian's
 [get-issue API](https://developer.atlassian.com/cloud/jira/platform/rest/v3/api-group-issues/#api-rest-api-3-issue-issueidorkey-get).
 
-Attempt state, generic/Slack exponential backoff, explicit retries, Jira external-record correlation, and restart
-recovery are durable. Changing the adapter, URL, authorization identity, Jira mapping or credentials, TLS policy,
+The Splunk SOAR adapter accepts an HTTPS SOAR origin, including an internal host and port, and uses a dedicated
+encrypted `ph-auth-token`. Operators map container label, type, initial status, sensitivity, tags, tenant ID, name
+prefix, and severity names. Its optional read-only test calls container options and never creates a container. An
+approved delivery posts exactly one container with `run_automation` set to `false` and no artifacts. SignalRoom has
+no route to update, assign, comment on, run an action or playbook against, or delete the container. Every payload
+uses a deterministic `source_data_identifier`; SOAR's documented duplicate response returns the existing container
+ID, making bounded retry and restart recovery safe after an ambiguous response. TLS verification defaults on and
+can use a private CA bundle or be explicitly disabled for a trusted self-signed internal endpoint. See Splunk's
+[container endpoint reference](https://help.splunk.com/en/splunk-soar/soar-on-premises/rest-api-reference/8.4.0/container-endpoints/rest-containers)
+and [REST authentication guidance](https://help.splunk.com/en/splunk-soar/soar-cloud/rest-api-reference/using-the-splunk-soar-rest-api/using-the-rest-api-reference-for-splunk-soar-cloud).
+
+Attempt state, generic/Slack/SOAR exponential backoff, explicit retries, Jira/SOAR external-record correlation, and restart
+recovery are durable. Changing the adapter, URL, authorization identity, adapter mapping or credentials, TLS policy,
 or private CA cancels stale queued work and requires a fresh preview. Disabling delivery also cancels queued work;
 saved destination and authorization secrets can be explicitly removed.
 
@@ -509,11 +520,12 @@ Major local control-plane decisions and every outbound delivery action are writt
 append-only SHA-256 hash chain. Audit metadata applies key-based secret redaction and the Discovery interface reports
 chain integrity. This is a tamper-evident local record, not an external immutable audit sink.
 
-Correlated Jira issues now support explicit read-only reconciliation with immutable local observations and drift
-history while retaining the create-only mutation boundary. The next assurance integration increment is a Splunk
-SOAR create-only adapter applying the same destination-specific authority, mapping, exact-payload preview, and
-durable correlation contract. Cross-model tournaments already compare promotion-ready local profiles before an
-explicitly approved routing change.
+Splunk SOAR now has a duplicate-safe, create-container-only adapter with exact-payload approval, automation disabled,
+no artifacts, durable correlation, self-signed/private-CA transport support, and a read-only container-options test.
+Correlated Jira issues retain explicit read-only reconciliation and immutable local drift history. The next
+production boundary is authenticated multi-user sessions with role-based access control and connection assignment,
+so approvals and external delivery authority can be assigned to named operators. Cross-model tournaments already
+compare promotion-ready local profiles before an explicitly approved routing change.
 
 ### Context
 

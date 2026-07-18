@@ -42,8 +42,9 @@ For an internal certificate authority, keep verification enabled and provide the
 
 Outbound assurance delivery is configured independently on the Discovery page and is disabled by default. HTTPS is
 required except for generic loopback development endpoints. Certificate verification defaults on; generic internal
-destinations can use a private CA bundle or an explicit verification override. Slack and Jira always require verified
-TLS. The destination URL, optional generic Authorization header, and dedicated Jira account email/API token are
+destinations can use a private CA bundle or an explicit verification override. Splunk SOAR also supports those
+internal-certificate controls; Slack and Jira always require verified TLS. The destination URL, optional generic
+Authorization header, dedicated Jira account email/API token, and dedicated SOAR auth token are
 encrypted in the same local vault used for other secrets and are never returned by the API. Saved values can be
 explicitly removed in the interface. Environment-managed values must instead be removed from the process environment
 followed by a SignalRoom restart.
@@ -52,6 +53,11 @@ Jira reconciliation uses the same dedicated credentials and requires permission 
 Refreshes are analyst-initiated and read only. Jira can return 404 both when an issue is unavailable and when the
 credentials cannot see it, so SignalRoom reports that result as **not found or not visible**.
 
+Splunk SOAR delivery requires permission to create a container with the configured label and tenant. SignalRoom
+creates no artifacts and explicitly disables container automation. The optional setup test requires permission to
+view container options; it performs only `GET /rest/container_options` and does not create a container. Operators
+who do not want to grant that read permission can skip the test without expanding the create-only application path.
+
 Environment-managed deployments can supply these values without saving them through the interface:
 
 ```text
@@ -59,6 +65,7 @@ SIGNALROOM_WEBHOOK_URL=https://automation.example/hooks/signalroom
 SIGNALROOM_WEBHOOK_AUTHORIZATION=Bearer …
 SIGNALROOM_JIRA_EMAIL=analyst@example.com
 SIGNALROOM_JIRA_API_TOKEN=…
+SIGNALROOM_SOAR_AUTH_TOKEN=…
 ```
 
 ## Windows
