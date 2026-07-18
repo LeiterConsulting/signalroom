@@ -1316,39 +1316,61 @@ async function closeAssurancePackage(packageId) {
 }
 
 function deliveryAdapterName(kind) {
-  return kind === 'slack-incoming-webhook' ? 'Slack Incoming Webhook' : 'Generic JSON webhook';
+  if (kind === 'slack-incoming-webhook') return 'Slack Incoming Webhook';
+  if (kind === 'jira-cloud') return 'Jira Cloud issue';
+  return 'Generic JSON webhook';
 }
 
 function updateDeliveryAdapter(destination = state.assurance?.delivery?.destination || {}) {
   const kind = $('#deliveryKind').value;
   const isSlack = kind === 'slack-incoming-webhook';
+  const isJira = kind === 'jira-cloud';
+  const requiresPublicTls = isSlack || isJira;
   const adapterChanged = Boolean(destination.kind && destination.kind !== kind);
-  $('#deliveryAuthorizationField').hidden = isSlack;
-  $('#deliveryClearAuthorizationField').hidden = isSlack;
-  $('#deliveryAuthorization').disabled = isSlack;
-  $('#deliveryClearAuthorization').disabled = isSlack;
-  $('#deliveryVerifyTls').disabled = isSlack;
-  $('#deliveryCaField').hidden = isSlack;
-  $('#deliveryCaBundle').disabled = isSlack;
-  if (isSlack) $('#deliveryVerifyTls').checked = true;
-  $('#deliveryTlsField small').textContent = isSlack
-    ? 'Required for the public Slack destination and cannot be disabled.'
-    : 'Recommended. A private CA path can be supplied for internal destinations.';
-  $('#deliveryUrlLabel').textContent = isSlack ? 'Slack Incoming Webhook URL' : 'HTTPS webhook URL';
-  $('#deliveryUrlHelp').textContent = isSlack
-    ? 'Use the complete encrypted hooks.slack.com or hooks.slack-gov.com /services/ URL. SignalRoom never returns the secret path.'
-    : 'HTTPS required; loopback HTTP is accepted only for local testing.';
-  $('#deliveryAdapterHelp').textContent = isSlack
-    ? `Slack receives plain-text notification blocks only over verified TLS. Its configured channel, sender, and icon cannot be overridden.${destination.authorization_configured ? ' A saved generic authorization value remains encrypted but is not sent.' : ''}`
-    : 'Generic webhooks receive the exact previewed JSON, a payload hash, an idempotency key, and the optional authorization header.';
+  $('#deliveryAuthorizationField').hidden = requiresPublicTls;
+  $('#deliveryClearAuthorizationField').hidden = requiresPublicTls;
+  $('#deliveryAuthorization').disabled = requiresPublicTls;
+  $('#deliveryClearAuthorization').disabled = requiresPublicTls;
+  $('#deliveryJiraFields').hidden = !isJira;
+  $$('#deliveryJiraFields input,#deliveryJiraFields button').forEach(node => { node.disabled = !isJira; });
+  $('#deliveryVerifyTls').disabled = requiresPublicTls;
+  $('#deliveryCaField').hidden = requiresPublicTls;
+  $('#deliveryCaBundle').disabled = requiresPublicTls;
+  $('#deliveryAttemptsField').hidden = isJira;
+  $('#deliveryBackoffField').hidden = isJira;
+  $('#deliveryAttempts').disabled = isJira;
+  $('#deliveryBackoff').disabled = isJira;
+  if (requiresPublicTls) $('#deliveryVerifyTls').checked = true;
+  $('#deliveryTlsField small').textContent = isJira
+    ? 'Required for Jira Cloud and cannot be disabled.'
+    : isSlack
+      ? 'Required for the public Slack destination and cannot be disabled.'
+      : 'Recommended. A private CA path can be supplied for internal destinations.';
+  $('#deliveryUrlLabel').textContent = isJira
+    ? 'Jira Cloud site URL'
+    : isSlack
+      ? 'Slack Incoming Webhook URL'
+      : 'HTTPS webhook URL';
+  $('#deliveryUrlHelp').textContent = isJira
+    ? 'Use only the encrypted site origin for your atlassian.net tenant, such as https://security.atlassian.net.'
+    : isSlack
+      ? 'Use the complete encrypted hooks.slack.com or hooks.slack-gov.com /services/ URL. SignalRoom never returns the secret path.'
+      : 'HTTPS required; loopback HTTP is accepted only for local testing.';
+  $('#deliveryAdapterHelp').textContent = isJira
+    ? 'Jira receives one redacted create-issue request after approval. SignalRoom records its issue key, but cannot update, transition, comment on, assign, attach to, or delete it. Unknown create outcomes stop for analyst review.'
+    : isSlack
+      ? `Slack receives plain-text notification blocks only over verified TLS. Its configured channel, sender, and icon cannot be overridden.${destination.authorization_configured ? ' A saved generic authorization value remains encrypted but is not sent.' : ''}`
+      : 'Generic webhooks receive the exact previewed JSON, a payload hash, an idempotency key, and the optional authorization header.';
   if (!$('#deliveryWebhookUrl').value) {
     $('#deliveryWebhookUrl').placeholder = adapterChanged
       ? `Enter a ${deliveryAdapterName(kind)} URL to change adapters`
-      : destination.configured
+      : destination.url_configured || destination.origin
         ? 'Encrypted destination configured · leave blank to keep'
-        : isSlack
-          ? 'https://hooks.slack.com/services/…'
-          : 'https://automation.example/hooks/signalroom';
+        : isJira
+          ? 'https://security.atlassian.net'
+          : isSlack
+            ? 'https://hooks.slack.com/services/…'
+            : 'https://automation.example/hooks/signalroom';
   }
 }
 
@@ -1365,12 +1387,28 @@ function hydrateDeliveryPolicy(value) {
   $('#deliveryBackoff').value = String(policy.retry_backoff_seconds);
   $('#deliveryVerifyTls').checked = Boolean(policy.verify_tls);
   $('#deliveryCaBundle').value = policy.ca_bundle || '';
+  $('#deliveryJiraProject').value = policy.jira_project_key || '';
+  $('#deliveryJiraIssueType').value = policy.jira_issue_type || 'Task';
+  $('#deliveryJiraPrefix').value = policy.jira_summary_prefix ?? '[SignalRoom]';
+  $('#deliveryJiraLabels').value = (policy.jira_labels || []).join(', ');
+  $('#deliveryJiraCriticalPriority').value = policy.jira_priority_map?.critical ?? 'Highest';
+  $('#deliveryJiraHighPriority').value = policy.jira_priority_map?.high ?? 'High';
+  $('#deliveryJiraMediumPriority').value = policy.jira_priority_map?.medium ?? 'Medium';
+  $('#deliveryJiraLowPriority').value = policy.jira_priority_map?.low ?? 'Low';
   $$('.delivery-categories input').forEach(input => { input.checked = (policy.signal_kinds || []).includes(input.value); });
   $('#deliveryWebhookUrl').value = '';
   $('#deliveryAuthorization').value = '';
+  $('#deliveryJiraEmail').value = '';
+  $('#deliveryJiraApiToken').value = '';
   $('#deliveryClearWebhookUrl').checked = false;
   $('#deliveryClearAuthorization').checked = false;
+  $('#deliveryClearJiraEmail').checked = false;
+  $('#deliveryClearJiraApiToken').checked = false;
   $('#deliveryAuthorization').placeholder = value.destination?.authorization_configured ? 'Encrypted authorization configured · leave blank to keep' : 'Optional · Bearer …';
+  $('#deliveryJiraEmail').placeholder = value.destination?.jira_email_configured ? 'Encrypted account email configured · leave blank to keep' : 'analyst@example.com';
+  $('#deliveryJiraApiToken').placeholder = value.destination?.jira_api_token_configured ? 'Encrypted API token configured · leave blank to keep' : 'Paste a Jira API token';
+  $('#deliveryTestResult').textContent = 'Save changes before testing. The test reads create metadata and does not create an issue.';
+  $('#deliveryTestResult').className = '';
   updateDeliveryAdapter(value.destination);
 }
 
@@ -1382,16 +1420,21 @@ function renderDelivery(value) {
   $('#deliveryStatus').className = `subtle-pill ${ready ? 'ok' : policy.enabled ? 'warn' : ''}`;
   $('#deliveryDestinationHint').textContent = destination.configured
     ? `${deliveryAdapterName(destination.kind)} · ${destination.origin} · ${destination.transport} · ${destination.delivery_semantics}`
-    : 'No outbound destination configured';
+    : destination.origin
+      ? `${deliveryAdapterName(destination.kind)} setup incomplete · ${destination.origin}`
+      : 'No outbound destination configured';
   const jobs = delivery.jobs || [];
   $('#deliveryJobs').innerHTML = jobs.length ? jobs.slice(0,12).map(job => {
     const action = job.status === 'failed'
-      ? `<button class="button ghost small" data-retry-delivery="${escapeHtml(job.id)}">Retry bounded batch</button>`
+      ? `<button class="button ghost small" data-retry-delivery="${escapeHtml(job.id)}">${job.destination_kind === 'jira-cloud' ? 'Review and retry create' : 'Retry bounded batch'}</button>`
       : ['queued','retrying'].includes(job.status)
         ? `<button class="button ghost small" data-cancel-delivery="${escapeHtml(job.id)}">Cancel</button>`
         : '';
     const timing = job.status === 'delivered' ? `Delivered ${assuranceTime(job.delivered_at)}` : job.next_attempt_at ? `Next attempt ${assuranceTime(job.next_attempt_at)}` : assuranceTime(job.updated_at);
-    return `<article class="delivery-job ${escapeHtml(job.status)}"><header><span>${escapeHtml(job.approval_mode.replaceAll('-', ' '))}</span><b>${escapeHtml(job.status)}</b></header><p>Package <code>${escapeHtml(job.package_id.slice(0,8))}</code> → ${escapeHtml(job.destination_label)}</p><div><span>${escapeHtml(deliveryAdapterName(job.destination_kind))}</span><span>${job.attempt_count}/${job.max_attempts} attempts</span><span>HTTP ${job.http_status || '—'}</span><span>Hash <code>${escapeHtml(job.payload_sha256.slice(0,12))}</code></span></div>${job.last_error ? `<small>${escapeHtml(job.last_error)}</small>` : ''}<footer><time>${escapeHtml(timing)}</time>${action}</footer></article>`;
+    const externalRecord = job.external_record
+      ? `<div class="delivery-external-record"><a href="${escapeHtml(job.external_record.url)}" target="_blank" rel="noopener noreferrer">Open correlated Jira issue ${escapeHtml(job.external_record.key)} ↗</a></div>`
+      : '';
+    return `<article class="delivery-job ${escapeHtml(job.status)}"><header><span>${escapeHtml(job.approval_mode.replaceAll('-', ' '))}</span><b>${escapeHtml(job.status)}</b></header><p>Package <code>${escapeHtml(job.package_id.slice(0,8))}</code> → ${escapeHtml(job.destination_label)}</p><div><span>${escapeHtml(deliveryAdapterName(job.destination_kind))}</span><span>${job.attempt_count}/${job.max_attempts} attempts</span><span>HTTP ${job.http_status || '—'}</span><span>Hash <code>${escapeHtml(job.payload_sha256.slice(0,12))}</code></span></div>${externalRecord}${job.last_error ? `<small>${escapeHtml(job.last_error)}</small>` : ''}<footer><time>${escapeHtml(timing)}</time>${action}</footer></article>`;
   }).join('') : '<div class="empty-inline compact-empty">No outbound package has been approved. Preview an eligible response package to start.</div>';
   const audit = value.audit || {}; const chain = audit.chain || {};
   $('#auditChainStatus').textContent = chain.valid ? `${chain.event_count || 0} events · chain valid` : `Integrity break at event ${chain.broken_sequence || 'unknown'}`;
@@ -1403,6 +1446,8 @@ async function saveDeliveryPolicy(event) {
   event.preventDefault();
   const signalKinds = $$('.delivery-categories input:checked').map(input => input.value);
   if (!signalKinds.length) { toast('Select at least one eligible signal category'); return; }
+  const isJira = $('#deliveryKind').value === 'jira-cloud';
+  const isPublicAdapter = isJira || $('#deliveryKind').value === 'slack-incoming-webhook';
   const payload = {
     enabled:$('#deliveryEnabled').checked,
     mode:$('#deliveryMode').value,
@@ -1412,13 +1457,27 @@ async function saveDeliveryPolicy(event) {
     redaction_level:$('#deliveryRedaction').value,
     destination_label:$('#deliveryLabel').value.trim() || 'Primary webhook',
     verify_tls:$('#deliveryVerifyTls').checked,
-    ca_bundle:$('#deliveryCaBundle').value.trim() || null,
+    ca_bundle:isPublicAdapter ? null : ($('#deliveryCaBundle').value.trim() || null),
     max_attempts:Number($('#deliveryAttempts').value),
     retry_backoff_seconds:Number($('#deliveryBackoff').value),
     webhook_url:$('#deliveryWebhookUrl').value.trim() || null,
     authorization_header:$('#deliveryAuthorization').value.trim() || null,
     clear_webhook_url:$('#deliveryClearWebhookUrl').checked,
-    clear_authorization_header:$('#deliveryClearAuthorization').checked
+    clear_authorization_header:$('#deliveryClearAuthorization').checked,
+    jira_project_key:$('#deliveryJiraProject').value.trim(),
+    jira_issue_type:$('#deliveryJiraIssueType').value.trim() || 'Task',
+    jira_summary_prefix:$('#deliveryJiraPrefix').value.trim(),
+    jira_labels:$('#deliveryJiraLabels').value.split(',').map(item => item.trim()).filter(Boolean),
+    jira_priority_map:{
+      critical:$('#deliveryJiraCriticalPriority').value.trim(),
+      high:$('#deliveryJiraHighPriority').value.trim(),
+      medium:$('#deliveryJiraMediumPriority').value.trim(),
+      low:$('#deliveryJiraLowPriority').value.trim()
+    },
+    jira_email:$('#deliveryJiraEmail').value.trim() || null,
+    jira_api_token:$('#deliveryJiraApiToken').value.trim() || null,
+    clear_jira_email:$('#deliveryClearJiraEmail').checked,
+    clear_jira_api_token:$('#deliveryClearJiraApiToken').checked
   };
   try {
     await api('/api/delivery/policy', {method:'PUT',body:JSON.stringify(payload)});
@@ -1426,11 +1485,39 @@ async function saveDeliveryPolicy(event) {
   } catch (error) { toast(error.message); }
 }
 
+async function testDeliveryDestination() {
+  const result = $('#deliveryTestResult');
+  if (state.deliveryPolicyDirty) {
+    result.className = 'error';
+    result.textContent = 'Save the current adapter settings before running the read-only test.';
+    return;
+  }
+  const button = $('#testDeliveryDestination');
+  button.disabled = true;
+  result.className = '';
+  result.textContent = 'Reading Jira create metadata… no issue will be created.';
+  try {
+    const value = await api('/api/delivery/test', {method:'POST'});
+    result.className = value.ok ? 'ok' : 'error';
+    result.textContent = value.ok
+      ? `Verified ${value.project_key} · ${value.issue_type}. Test authority: read create metadata only.`
+      : `${value.project_key} is reachable, but ${value.issue_type} is unavailable. Available: ${(value.available_issue_types || []).join(', ') || 'none returned'}.`;
+  } catch (error) {
+    result.className = 'error';
+    result.textContent = error.message;
+  } finally {
+    button.disabled = false;
+  }
+}
+
 async function previewAssuranceDelivery(packageId) {
   try {
     const preview = await api(`/api/assurance/packages/${encodeURIComponent(packageId)}/delivery/preview`, {method:'POST'});
     state.deliveryPreview = preview;
-    $('#deliveryPreviewContract').innerHTML = `<span><b>${escapeHtml(preview.destination.label)}</b>${escapeHtml(deliveryAdapterName(preview.destination.kind))} · ${escapeHtml(preview.destination.origin)}</span><span><b>${preview.payload_bytes} bytes</b>${escapeHtml(preview.redaction_level)} redaction</span><span><b>SHA-256</b><code>${escapeHtml(preview.payload_sha256)}</code></span><span><b>Authority</b>Delivery only · no SPL execution or validation approval</span><span><b>Delivery behavior</b>${escapeHtml(preview.destination.delivery_semantics)}</span>`;
+    const authority = preview.authority?.external_create
+      ? 'Create one external issue · no update, transition, comment, delete, SPL execution, or validation approval'
+      : 'Delivery only · no SPL execution or validation approval';
+    $('#deliveryPreviewContract').innerHTML = `<span><b>${escapeHtml(preview.destination.label)}</b>${escapeHtml(deliveryAdapterName(preview.destination.kind))} · ${escapeHtml(preview.destination.origin)}</span><span><b>${preview.payload_bytes} bytes</b>${escapeHtml(preview.redaction_level)} redaction</span><span><b>SHA-256</b><code>${escapeHtml(preview.payload_sha256)}</code></span><span><b>Authority</b>${escapeHtml(authority)}</span><span><b>Delivery behavior</b>${escapeHtml(preview.destination.delivery_semantics)}</span>`;
     $('#deliveryRedactions').innerHTML = preview.redactions.map(item => `<li>${escapeHtml(item)}</li>`).join('');
     $('#deliveryWarnings').innerHTML = (preview.warnings || []).map(item => `<li>${escapeHtml(item)}</li>`).join('');
     $('#deliveryPreviewPayload').textContent = JSON.stringify(preview.payload, null, 2);
@@ -2965,10 +3052,15 @@ $('#runConnectionDiagnostics').addEventListener('click', runConnectionDiagnostic
 $('#assuranceForm').addEventListener('submit', saveAssurancePolicy);
 $('#deliveryForm').addEventListener('submit', saveDeliveryPolicy);
 $('#approveDelivery').addEventListener('click', approveDeliveryPreview);
+$('#testDeliveryDestination').addEventListener('click', testDeliveryDestination);
 $('#runAssuranceNow').addEventListener('click', runAssuranceNow);
 $('#cancelAssuranceRun').addEventListener('click', cancelAssuranceRun);
 $('#assuranceDepth').addEventListener('change', updateAssuranceBudgetHelp);
-$('#deliveryKind').addEventListener('change', () => updateDeliveryAdapter());
+$('#deliveryKind').addEventListener('change', () => {
+  updateDeliveryAdapter();
+  $('#deliveryTestResult').className = '';
+  $('#deliveryTestResult').textContent = 'Save the current adapter settings before running the read-only test.';
+});
 $$('#assuranceForm input,#assuranceForm select').forEach(node => node.addEventListener('change', () => { state.assurancePolicyDirty = true; }));
 $$('#deliveryForm input,#deliveryForm select').forEach(node => node.addEventListener('change', () => { state.deliveryPolicyDirty = true; }));
 $('#scanSplunkModels').addEventListener('click', scanSplunkModels);

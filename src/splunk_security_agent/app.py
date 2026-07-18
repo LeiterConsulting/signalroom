@@ -943,6 +943,14 @@ async def update_delivery_policy(request: DeliveryPolicyUpdate) -> dict[str, Any
         raise HTTPException(400, str(exc)) from exc
 
 
+@app.post("/api/delivery/test")
+async def test_delivery_destination() -> dict[str, Any]:
+    try:
+        return await services.delivery.test_destination()
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
 @app.post("/api/assurance/packages/{package_id}/delivery/preview")
 async def preview_assurance_delivery(package_id: str) -> dict[str, Any]:
     try:

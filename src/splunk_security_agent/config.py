@@ -165,6 +165,8 @@ class ConfigStore:
             "huggingface_token": "HF_TOKEN",
             "delivery_webhook_url": "SIGNALROOM_WEBHOOK_URL",
             "delivery_authorization": "SIGNALROOM_WEBHOOK_AUTHORIZATION",
+            "delivery_jira_email": "SIGNALROOM_JIRA_EMAIL",
+            "delivery_jira_api_token": "SIGNALROOM_JIRA_API_TOKEN",
         }
         env_name = env_names.get(name, "")
         return bool(env_name and os.getenv(env_name, ""))
@@ -175,6 +177,8 @@ class ConfigStore:
             "huggingface_token": "HF_TOKEN",
             "delivery_webhook_url": "SIGNALROOM_WEBHOOK_URL",
             "delivery_authorization": "SIGNALROOM_WEBHOOK_AUTHORIZATION",
+            "delivery_jira_email": "SIGNALROOM_JIRA_EMAIL",
+            "delivery_jira_api_token": "SIGNALROOM_JIRA_API_TOKEN",
         }
         return os.getenv(env_names.get(name, ""), "") or self.vault.load().get(name, "")
 

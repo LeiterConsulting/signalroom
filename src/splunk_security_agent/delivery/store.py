@@ -46,6 +46,12 @@ class DeliveryStore:
                     signal_kinds TEXT NOT NULL,
                     redaction_level TEXT NOT NULL,
                     destination_label TEXT NOT NULL,
+                    jira_project_key TEXT NOT NULL DEFAULT '',
+                    jira_issue_type TEXT NOT NULL DEFAULT 'Task',
+                    jira_summary_prefix TEXT NOT NULL DEFAULT '[SignalRoom]',
+                    jira_labels TEXT NOT NULL DEFAULT '["signalroom","security-assurance"]',
+                    jira_priority_map TEXT NOT NULL DEFAULT
+                        '{"critical":"Highest","high":"High","medium":"Medium","low":"Low"}',
                     verify_tls INTEGER NOT NULL,
                     ca_bundle TEXT NOT NULL,
                     max_attempts INTEGER NOT NULL,
@@ -71,6 +77,10 @@ class DeliveryStore:
                     created_at TEXT NOT NULL,
                     approved_at TEXT NOT NULL,
                     delivered_at TEXT,
+                    external_record_id TEXT NOT NULL DEFAULT '',
+                    external_record_key TEXT NOT NULL DEFAULT '',
+                    external_record_url TEXT NOT NULL DEFAULT '',
+                    external_record_created_at TEXT,
                     updated_at TEXT NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS idx_delivery_jobs_state
@@ -93,21 +103,43 @@ class DeliveryStore:
                 """
             )
             policy_columns = {
-                str(row["name"]) for row in db.execute("PRAGMA table_info(delivery_policy)").fetchall()
+                str(row["name"])
+                for row in db.execute("PRAGMA table_info(delivery_policy)").fetchall()
             }
-            if "destination_kind" not in policy_columns:
-                db.execute(
-                    "ALTER TABLE delivery_policy ADD COLUMN destination_kind "
-                    "TEXT NOT NULL DEFAULT 'generic-webhook'"
-                )
+            policy_migrations = {
+                "destination_kind": "TEXT NOT NULL DEFAULT 'generic-webhook'",
+                "jira_project_key": "TEXT NOT NULL DEFAULT ''",
+                "jira_issue_type": "TEXT NOT NULL DEFAULT 'Task'",
+                "jira_summary_prefix": "TEXT NOT NULL DEFAULT '[SignalRoom]'",
+                "jira_labels": (
+                    """TEXT NOT NULL DEFAULT '["signalroom","security-assurance"]'"""
+                ),
+                "jira_priority_map": (
+                    "TEXT NOT NULL DEFAULT "
+                    """'{"critical":"Highest","high":"High","medium":"Medium","low":"Low"}'"""
+                ),
+            }
+            for column, definition in policy_migrations.items():
+                if column not in policy_columns:
+                    db.execute(
+                        f"ALTER TABLE delivery_policy ADD COLUMN {column} {definition}"
+                    )
             job_columns = {
-                str(row["name"]) for row in db.execute("PRAGMA table_info(delivery_jobs)").fetchall()
+                str(row["name"])
+                for row in db.execute("PRAGMA table_info(delivery_jobs)").fetchall()
             }
-            if "destination_kind" not in job_columns:
-                db.execute(
-                    "ALTER TABLE delivery_jobs ADD COLUMN destination_kind "
-                    "TEXT NOT NULL DEFAULT 'generic-webhook'"
-                )
+            job_migrations = {
+                "destination_kind": "TEXT NOT NULL DEFAULT 'generic-webhook'",
+                "external_record_id": "TEXT NOT NULL DEFAULT ''",
+                "external_record_key": "TEXT NOT NULL DEFAULT ''",
+                "external_record_url": "TEXT NOT NULL DEFAULT ''",
+                "external_record_created_at": "TEXT",
+            }
+            for column, definition in job_migrations.items():
+                if column not in job_columns:
+                    db.execute(
+                        f"ALTER TABLE delivery_jobs ADD COLUMN {column} {definition}"
+                    )
             db.execute(
                 """INSERT OR IGNORE INTO delivery_policy
                 (id,enabled,mode,destination_kind,minimum_severity,signal_kinds,redaction_level,
@@ -130,7 +162,9 @@ class DeliveryStore:
             db.execute(
                 """UPDATE delivery_policy SET enabled=?,mode=?,minimum_severity=?,
                 destination_kind=?,signal_kinds=?,redaction_level=?,destination_label=?,verify_tls=?,
-                ca_bundle=?,max_attempts=?,retry_backoff_seconds=?,updated_at=? WHERE id=1""",
+                ca_bundle=?,max_attempts=?,retry_backoff_seconds=?,jira_project_key=?,
+                jira_issue_type=?,jira_summary_prefix=?,jira_labels=?,jira_priority_map=?,
+                updated_at=? WHERE id=1""",
                 (
                     int(value.enabled),
                     value.mode,
@@ -143,6 +177,11 @@ class DeliveryStore:
                     value.ca_bundle or "",
                     value.max_attempts,
                     value.retry_backoff_seconds,
+                    value.jira_project_key,
+                    value.jira_issue_type,
+                    value.jira_summary_prefix,
+                    json.dumps(value.jira_labels),
+                    json.dumps(value.jira_priority_map, sort_keys=True),
                     now,
                 ),
             )
@@ -369,16 +408,61 @@ class DeliveryStore:
             )
         return self.get(job_id)
 
-    def recover_interrupted(self) -> int:
+    def record_external_record(
+        self,
+        job_id: str,
+        *,
+        record_id: str,
+        record_key: str,
+        record_url: str,
+    ) -> dict[str, Any] | None:
         now = _now()
         with self._lock, self.connect() as db:
             changed = db.execute(
-                """UPDATE delivery_jobs SET status='retrying',next_attempt_at=?,
-                last_error='Process restarted during delivery; retry uses the original approved payload.',
-                updated_at=? WHERE status='sending'""",
+                """UPDATE delivery_jobs SET external_record_id=?,external_record_key=?,
+                external_record_url=?,external_record_created_at=?,updated_at=?
+                WHERE id=? AND status='sending'""",
+                (
+                    record_id[:120],
+                    record_key[:120],
+                    record_url[:2000],
+                    now,
+                    now,
+                    job_id,
+                ),
+            ).rowcount
+        return self.get(job_id) if changed else None
+
+    def recover_interrupted(self) -> dict[str, int]:
+        now = _now()
+        with self._lock, self.connect() as db:
+            correlated = db.execute(
+                """UPDATE delivery_jobs SET status='delivered',next_attempt_at=NULL,
+                last_error='Recovered after Jira correlation was durably recorded.',
+                delivered_at=COALESCE(delivered_at,external_record_created_at,?),
+                updated_at=? WHERE status='sending' AND destination_kind='jira-cloud'
+                AND external_record_key<>''""",
                 (now, now),
             ).rowcount
-        return int(changed)
+            uncertain = db.execute(
+                """UPDATE delivery_jobs SET status='failed',next_attempt_at=NULL,
+                last_error='Process restarted during Jira issue creation; the outcome is
+                unknown. Inspect Jira for the SignalRoom correlation label before an
+                explicit retry.',updated_at=? WHERE status='sending'
+                AND destination_kind='jira-cloud' AND external_record_key=''""",
+                (now,),
+            ).rowcount
+            retrying = db.execute(
+                """UPDATE delivery_jobs SET status='retrying',next_attempt_at=?,
+                last_error='Process restarted during delivery; retry uses the original approved payload.',
+                updated_at=? WHERE status='sending' AND destination_kind<>'jira-cloud'""",
+                (now, now),
+            ).rowcount
+        return {
+            "correlated": int(correlated),
+            "uncertain": int(uncertain),
+            "retrying": int(retrying),
+        }
 
     def attempts(self, job_id: str) -> list[dict[str, Any]]:
         with self.connect() as db:
@@ -410,6 +494,11 @@ class DeliveryStore:
             "signal_kinds": json.loads(row["signal_kinds"]),
             "redaction_level": row["redaction_level"],
             "destination_label": row["destination_label"],
+            "jira_project_key": row["jira_project_key"],
+            "jira_issue_type": row["jira_issue_type"],
+            "jira_summary_prefix": row["jira_summary_prefix"],
+            "jira_labels": json.loads(row["jira_labels"]),
+            "jira_priority_map": json.loads(row["jira_priority_map"]),
             "verify_tls": bool(row["verify_tls"]),
             "ca_bundle": row["ca_bundle"] or None,
             "max_attempts": int(row["max_attempts"]),
@@ -424,6 +513,16 @@ class DeliveryStore:
 
     @staticmethod
     def _job(row: sqlite3.Row) -> dict[str, Any]:
+        external_record = (
+            {
+                "id": row["external_record_id"],
+                "key": row["external_record_key"],
+                "url": row["external_record_url"],
+                "created_at": row["external_record_created_at"],
+            }
+            if row["external_record_key"]
+            else None
+        )
         return {
             "id": row["id"],
             "package_id": row["package_id"],
@@ -443,5 +542,6 @@ class DeliveryStore:
             "created_at": row["created_at"],
             "approved_at": row["approved_at"],
             "delivered_at": row["delivered_at"],
+            "external_record": external_record,
             "updated_at": row["updated_at"],
         }

@@ -41,8 +41,14 @@ def test_discovery_presents_securebert_labels_as_validated_candidates() -> None:
 def test_delivery_exposes_adapter_semantics_before_approval() -> None:
     assert 'id="deliveryKind"' in INDEX_HTML
     assert 'value="slack-incoming-webhook"' in INDEX_HTML
+    assert 'value="jira-cloud"' in INDEX_HTML
     assert 'id="deliveryAdapterHelp"' in INDEX_HTML
+    assert 'id="deliveryJiraFields"' in INDEX_HTML
+    assert 'id="testDeliveryDestination"' in INDEX_HTML
+    assert "reads create metadata and does not create an issue" in INDEX_HTML
     assert 'id="deliveryWarnings"' in INDEX_HTML
     assert "Configure generic webhook policy" not in INDEX_HTML
     assert "Slack receives plain-text notification blocks only over verified TLS." in APP_JS
+    assert "cannot update, transition, comment on, assign, attach to, or delete it" in APP_JS
+    assert "Open correlated Jira issue" in APP_JS
     assert "no SPL execution or validation approval" in APP_JS

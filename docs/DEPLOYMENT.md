@@ -41,17 +41,20 @@ For an internal certificate authority, keep verification enabled and provide the
 ## Outbound response webhook
 
 Outbound assurance delivery is configured independently on the Discovery page and is disabled by default. HTTPS is
-required except for loopback development endpoints. Certificate verification defaults on; internal destinations can
-use a private CA bundle or an explicit verification override. The webhook URL and optional complete Authorization
-header are encrypted in the same local vault used for other secrets and are never returned by the API. Both saved
-values can be explicitly removed in the interface. Environment-managed values must instead be removed from the
-process environment followed by a SignalRoom restart.
+required except for generic loopback development endpoints. Certificate verification defaults on; generic internal
+destinations can use a private CA bundle or an explicit verification override. Slack and Jira always require verified
+TLS. The destination URL, optional generic Authorization header, and dedicated Jira account email/API token are
+encrypted in the same local vault used for other secrets and are never returned by the API. Saved values can be
+explicitly removed in the interface. Environment-managed values must instead be removed from the process environment
+followed by a SignalRoom restart.
 
 Environment-managed deployments can supply these values without saving them through the interface:
 
 ```text
 SIGNALROOM_WEBHOOK_URL=https://automation.example/hooks/signalroom
 SIGNALROOM_WEBHOOK_AUTHORIZATION=Bearer …
+SIGNALROOM_JIRA_EMAIL=analyst@example.com
+SIGNALROOM_JIRA_API_TOKEN=…
 ```
 
 ## Windows

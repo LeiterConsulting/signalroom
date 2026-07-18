@@ -323,7 +323,9 @@ class AssuranceRunRecord(BaseModel):
 
 DeliverySignalKind = Literal["finding", "coverage", "inventory", "mltk", "collection"]
 DeliverySeverity = Literal["low", "medium", "high", "critical"]
-DeliveryDestinationKind = Literal["generic-webhook", "slack-incoming-webhook"]
+DeliveryDestinationKind = Literal[
+    "generic-webhook", "slack-incoming-webhook", "jira-cloud"
+]
 
 
 class DeliveryPolicyUpdate(BaseModel):
@@ -346,6 +348,26 @@ class DeliveryPolicyUpdate(BaseModel):
     authorization_header: str | None = Field(default=None, max_length=4000)
     clear_webhook_url: bool = False
     clear_authorization_header: bool = False
+    jira_project_key: str = Field(default="", max_length=32)
+    jira_issue_type: str = Field(default="Task", min_length=1, max_length=120)
+    jira_summary_prefix: str = Field(default="[SignalRoom]", max_length=80)
+    jira_labels: list[str] = Field(
+        default_factory=lambda: ["signalroom", "security-assurance"],
+        max_length=12,
+    )
+    jira_priority_map: dict[DeliverySeverity, str] = Field(
+        default_factory=lambda: {
+            "critical": "Highest",
+            "high": "High",
+            "medium": "Medium",
+            "low": "Low",
+        },
+        max_length=4,
+    )
+    jira_email: str | None = Field(default=None, max_length=320)
+    jira_api_token: str | None = Field(default=None, max_length=4000)
+    clear_jira_email: bool = False
+    clear_jira_api_token: bool = False
 
 
 class DeliveryApproval(BaseModel):

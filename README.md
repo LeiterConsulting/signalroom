@@ -416,13 +416,14 @@ resolved. Repeated medium/low signals and first-seen high/critical signals creat
 Each package can pivot into Investigate, a case, or the validation queue. Continuous assurance never approves or
 executes proposed validation SPL automatically.
 
-Outbound response-package delivery is independently disabled by default. Operators can select a generic JSON webhook
-(with loopback HTTP permitted only for local testing) or a Slack Incoming Webhook. Strict redaction sends opaque
-package metadata and aggregate signal counts while withholding source-derived package and signal text. Standard
-redaction may additionally include bounded package text, signal titles, and subjects. Neither level includes raw
-events, SPL, validation identifiers, signal fingerprints, discovery run identifiers, Splunk credentials, or endpoint
-configuration. Manual mode binds approval to the exact payload SHA-256 and destination identity. Automatic mode must
-be separately enabled and applies severity/category policy before creating a locally deduplicated delivery job.
+Outbound response-package delivery is independently disabled by default. Operators can select a generic JSON
+webhook (with loopback HTTP permitted only for local testing), a Slack Incoming Webhook, or a Jira Cloud
+create-issue adapter. Strict redaction sends opaque package metadata and aggregate signal counts while withholding
+source-derived package and signal text. Standard redaction may additionally include bounded package text, signal
+titles, and subjects. Neither level includes raw events, SPL, validation identifiers, signal fingerprints, discovery
+run identifiers, Splunk credentials, or endpoint configuration. Manual mode binds approval to the exact payload
+SHA-256 and destination identity. Automatic mode must be separately enabled and applies severity/category policy
+before creating a locally deduplicated delivery job.
 
 The Slack adapter accepts only complete `hooks.slack.com` or `hooks.slack-gov.com` URLs, requires verified TLS, emits
 only `plain_text` Block Kit objects, and never sends the generic authorization header. Slack controls the destination
@@ -431,9 +432,20 @@ idempotency key, so an ambiguous retry can duplicate a notification. These limit
 approval modal. See Slack's
 [Incoming Webhooks documentation](https://docs.slack.dev/messaging/sending-messages-using-incoming-webhooks/).
 
-Attempt state, exponential backoff, explicit retry batches, and restart recovery are durable. Changing the adapter,
-URL, authorization identity, TLS policy, or private CA cancels stale queued work and requires a fresh preview.
-Disabling delivery also cancels queued work; saved destination and authorization secrets can be explicitly removed.
+The Jira adapter accepts only an HTTPS `*.atlassian.net` site origin and uses a dedicated encrypted account email
+and API token. Operators map project key, issue type, labels, summary prefix, and severity-to-priority names. Its
+read-only test inspects create metadata without creating an issue. An approved delivery may create one issue and
+records the returned ID, key, trusted browse URL, a correlation label, and an issue property. It has no authority
+to update, transition, comment on, assign, attach to, or delete issues. Because Jira's create endpoint does not
+provide a destination idempotency contract, a failed or interrupted create stops automatic retry; the analyst must
+inspect the correlation label before explicitly retrying. See Atlassian's
+[create-issue API](https://developer.atlassian.com/cloud/jira/platform/rest/v3/api-group-issues/#api-rest-api-3-issue-post)
+and [API-token authentication guidance](https://developer.atlassian.com/cloud/jira/platform/basic-auth-for-rest-apis/).
+
+Attempt state, generic/Slack exponential backoff, explicit retries, Jira external-record correlation, and restart
+recovery are durable. Changing the adapter, URL, authorization identity, Jira mapping or credentials, TLS policy,
+or private CA cancels stale queued work and requires a fresh preview. Disabling delivery also cancels queued work;
+saved destination and authorization secrets can be explicitly removed.
 
 Ollama model switching is serialized to avoid local accelerator contention. Generative passes use deterministic,
 token-bounded structured output, strict local validation, and one visible repair/fallback attempt when necessary.
@@ -487,9 +499,11 @@ Major local control-plane decisions and every outbound delivery action are writt
 append-only SHA-256 hash chain. Audit metadata applies key-based secret redaction and the Discovery interface reports
 chain integrity. This is a tamper-evident local record, not an external immutable audit sink.
 
-The next assurance integration increment is a destination-specific ticketing or SOAR adapter with an explicit
-authority contract, operator-controlled field mapping, and durable external-record correlation. Cross-model
-tournaments already compare promotion-ready local profiles before an explicitly approved routing change.
+The next assurance integration increment is read-only Jira reconciliation: explicitly refresh the correlated
+issue's existence and workflow status, preserve drift locally, and retain the create-only mutation boundary.
+After that proof, a Splunk SOAR adapter can apply the same destination-specific authority, mapping, preview, and
+correlation contract. Cross-model tournaments already compare promotion-ready local profiles before an explicitly
+approved routing change.
 
 ### Context
 

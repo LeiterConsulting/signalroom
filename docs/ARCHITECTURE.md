@@ -181,10 +181,11 @@ notable-event creation, suppression behavior, or response delivery.
 ## Outbound delivery is a separate authority
 
 `AssuranceDeliveryService` owns a separately opt-in adapter policy and restart-safe delivery worker. The durable
-adapter identity currently selects a generic JSON webhook or Slack Incoming Webhook. A deterministic redactor creates
-the exact adapter-native payload preview; manual approval binds its SHA-256 to the destination fingerprint. Automatic
-policy is a separate operator choice and still applies severity and signal-kind routing. Any adapter or transport
-identity change cancels stale queued work and requires a new preview.
+adapter identity selects a generic JSON webhook, Slack Incoming Webhook, or Jira Cloud issue creation. A deterministic
+redactor creates the exact adapter-native payload preview; manual approval binds its SHA-256 to the destination
+fingerprint. Automatic policy is a separate operator choice and still applies severity and signal-kind routing. Any
+adapter, transport, Jira credential, or Jira field-mapping identity change cancels stale queued work and requires a
+new preview.
 
 Generic requests carry an idempotency key and may use an encrypted authorization value. Slack requests use verified
 TLS, an allowlisted Incoming Webhook URL shape, and `plain_text` Block Kit objects; generic authorization and
@@ -192,6 +193,14 @@ idempotency headers are not sent to Slack. Both adapters refuse redirects and us
 Slack delivery is explicitly at-least-once because Incoming Webhooks do not document a destination idempotency key
 and an ambiguous retry can duplicate a post. Every adapter contract grants no Splunk execution or validation
 approval authority.
+
+Jira is restricted to a tenant `atlassian.net` origin over verified TLS. SignalRoom can read create metadata and
+post one exact create-issue request; it has no update, transition, comment, assignment, attachment, or delete path.
+The payload uses Atlassian Document Format, operator-controlled mappings, and a deterministic correlation label and
+issue property. A successful response is accepted only with HTTP 201 and a trustworthy numeric ID and issue key;
+the durable job then exposes a trusted browse URL constructed from the configured tenant. Ambiguous transport
+outcomes and interrupted creates without a persisted key fail closed for analyst inspection instead of automatic
+retry. A create whose key was persisted before interruption can be completed locally without another external call.
 
 `AuditStore` records delivery and major control-plane decisions in an append-only local SHA-256 hash chain. Secrets
 are redacted before persistence. The UI verifies the chain, but the local database is not a substitute for a remote
@@ -209,4 +218,5 @@ SignalRoom is an MCP client of a Splunk MCP server and an MCP server to agent ho
 4. Search cost estimation, per-instance concurrency limits, and Splunk workload controls
 5. Broader operator-authored evaluation suites beyond the durable golden, tournament, and feedback history
 6. Audit events sent to a dedicated Splunk index
-7. Destination-specific ticketing and SOAR adapters with explicit authority contracts
+7. Read-only reconciliation of correlated Jira issue existence and workflow status
+8. Splunk SOAR create-only adapter with an explicit authority and field-mapping contract
