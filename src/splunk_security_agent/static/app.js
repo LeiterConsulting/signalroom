@@ -1357,7 +1357,7 @@ function updateDeliveryAdapter(destination = state.assurance?.delivery?.destinat
       ? 'Use the complete encrypted hooks.slack.com or hooks.slack-gov.com /services/ URL. SignalRoom never returns the secret path.'
       : 'HTTPS required; loopback HTTP is accepted only for local testing.';
   $('#deliveryAdapterHelp').textContent = isJira
-    ? 'Jira receives one redacted create-issue request after approval. SignalRoom records its issue key, but cannot update, transition, comment on, assign, attach to, or delete it. Unknown create outcomes stop for analyst review.'
+    ? 'Jira receives one redacted create-issue request after approval. SignalRoom can explicitly refresh a correlated issue’s minimal workflow fields, but cannot update, transition, comment on, assign, attach to, or delete it. Unknown create outcomes stop for analyst review.'
     : isSlack
       ? `Slack receives plain-text notification blocks only over verified TLS. Its configured channel, sender, and icon cannot be overridden.${destination.authorization_configured ? ' A saved generic authorization value remains encrypted but is not sent.' : ''}`
       : 'Generic webhooks receive the exact previewed JSON, a payload hash, an idempotency key, and the optional authorization header.';
@@ -1412,6 +1412,53 @@ function hydrateDeliveryPolicy(value) {
   updateDeliveryAdapter(value.destination);
 }
 
+function reconciliationValue(value) {
+  if (value === null || value === undefined || value === '') return 'None';
+  if (typeof value === 'boolean') return value ? 'Present' : 'Missing';
+  if (typeof value === 'object') return value.name || value.key || value.id || 'Changed';
+  return String(value);
+}
+
+function reconciliationFieldLabel(field) {
+  return ({
+    availability:'Visibility',
+    issue_key:'Issue key',
+    project_key:'Project',
+    issue_type:'Issue type',
+    status:'Workflow status',
+    priority:'Priority',
+    resolution:'Resolution',
+    correlation_label_present:'Correlation label'
+  })[field] || String(field || 'Field').replaceAll('_',' ');
+}
+
+function renderJiraReconciliation(job) {
+  const history = job.reconciliations || [];
+  const latest = job.latest_reconciliation;
+  if (!latest) return '<section class="delivery-reconciliation empty"><p>No Jira observation yet. Refresh explicitly to establish a local workflow baseline.</p><small>Explicit read only · correlated issue fields only · no polling or issue mutation</small></section>';
+  const snapshot = latest.snapshot || {};
+  const changes = latest.drift?.changes || [];
+  const outcomeLabel = ({
+    observed:'Observed',
+    'not-found-or-not-visible':'Not found or not visible',
+    'access-denied':'Access denied',
+    'identity-mismatch':'Identity mismatch',
+    error:'Read failed'
+  })[latest.outcome] || latest.outcome;
+  const observed = latest.outcome === 'observed'
+    ? `<dl><div><dt>Status</dt><dd>${escapeHtml(snapshot.status?.name || 'Unknown')}</dd></div><div><dt>Priority</dt><dd>${escapeHtml(snapshot.priority?.name || 'None')}</dd></div><div><dt>Resolution</dt><dd>${escapeHtml(snapshot.resolution?.name || 'Unresolved')}</dd></div><div><dt>Project</dt><dd>${escapeHtml(snapshot.project_key || 'Unknown')}</dd></div><div><dt>Issue type</dt><dd>${escapeHtml(snapshot.issue_type?.name || 'Unknown')}</dd></div><div><dt>Correlation</dt><dd>${snapshot.correlation_label_present === false ? 'Label missing' : snapshot.correlation_label_present === true ? 'Label present' : 'Not established'}</dd></div></dl>${snapshot.jira_updated_at ? `<p class="delivery-jira-updated">Jira updated ${escapeHtml(assuranceTime(snapshot.jira_updated_at))}</p>` : ''}${snapshot.browse_url ? `<a href="${escapeHtml(snapshot.browse_url)}" target="_blank" rel="noopener noreferrer">Open observed issue ${escapeHtml(snapshot.issue_key)} ↗</a>` : ''}`
+    : `<p class="delivery-reconciliation-error">${escapeHtml(latest.error || 'The correlated issue could not be observed.')}</p>`;
+  const drift = changes.length
+    ? `<div class="delivery-drift"><b>${changes.length} material change${changes.length === 1 ? '' : 's'}</b><ul>${changes.map(change => `<li><span>${escapeHtml(reconciliationFieldLabel(change.field))}</span><span>${escapeHtml(reconciliationValue(change.from))} → ${escapeHtml(reconciliationValue(change.to))}</span></li>`).join('')}</ul></div>`
+    : latest.outcome === 'observed'
+      ? `<p class="delivery-no-drift">${latest.drift?.baseline === 'established' ? 'Local baseline established.' : 'No material drift from the last observed baseline.'}</p>`
+      : '';
+  const historyMarkup = history.length > 1
+    ? `<details><summary>Observation history (${history.length})</summary><ol>${history.map(item => `<li><span>${escapeHtml(({'not-found-or-not-visible':'Not found or not visible','access-denied':'Access denied','identity-mismatch':'Identity mismatch',observed:'Observed',error:'Read failed'})[item.outcome] || item.outcome)}</span><time>${escapeHtml(assuranceTime(item.observed_at))}</time><code>${escapeHtml(item.snapshot_sha256.slice(0,12))}</code></li>`).join('')}</ol></details>`
+    : '';
+  return `<section class="delivery-reconciliation ${escapeHtml(latest.outcome)}"><header><b>${escapeHtml(outcomeLabel)}</b><time>${escapeHtml(assuranceTime(latest.observed_at))}</time></header>${observed}${drift}<small>Explicit read only · minimal correlated issue fields · digest <code>${escapeHtml(latest.snapshot_sha256.slice(0,12))}</code> · no issue mutation</small>${historyMarkup}</section>`;
+}
+
 function renderDelivery(value) {
   const delivery = value.delivery || {}; const policy = delivery.policy || {}; const destination = delivery.destination || {};
   hydrateDeliveryPolicy(delivery);
@@ -1425,16 +1472,21 @@ function renderDelivery(value) {
       : 'No outbound destination configured';
   const jobs = delivery.jobs || [];
   $('#deliveryJobs').innerHTML = jobs.length ? jobs.slice(0,12).map(job => {
-    const action = job.status === 'failed'
+    const primaryAction = job.status === 'failed'
       ? `<button class="button ghost small" data-retry-delivery="${escapeHtml(job.id)}">${job.destination_kind === 'jira-cloud' ? 'Review and retry create' : 'Retry bounded batch'}</button>`
       : ['queued','retrying'].includes(job.status)
         ? `<button class="button ghost small" data-cancel-delivery="${escapeHtml(job.id)}">Cancel</button>`
         : '';
+    const reconcileAction = job.destination_kind === 'jira-cloud' && job.status === 'delivered' && job.external_record
+      ? `<button class="button ghost small" data-reconcile-delivery="${escapeHtml(job.id)}">Refresh Jira status</button>`
+      : '';
+    const action = `${primaryAction}${reconcileAction}`;
     const timing = job.status === 'delivered' ? `Delivered ${assuranceTime(job.delivered_at)}` : job.next_attempt_at ? `Next attempt ${assuranceTime(job.next_attempt_at)}` : assuranceTime(job.updated_at);
     const externalRecord = job.external_record
       ? `<div class="delivery-external-record"><a href="${escapeHtml(job.external_record.url)}" target="_blank" rel="noopener noreferrer">Open correlated Jira issue ${escapeHtml(job.external_record.key)} ↗</a></div>`
       : '';
-    return `<article class="delivery-job ${escapeHtml(job.status)}"><header><span>${escapeHtml(job.approval_mode.replaceAll('-', ' '))}</span><b>${escapeHtml(job.status)}</b></header><p>Package <code>${escapeHtml(job.package_id.slice(0,8))}</code> → ${escapeHtml(job.destination_label)}</p><div><span>${escapeHtml(deliveryAdapterName(job.destination_kind))}</span><span>${job.attempt_count}/${job.max_attempts} attempts</span><span>HTTP ${job.http_status || '—'}</span><span>Hash <code>${escapeHtml(job.payload_sha256.slice(0,12))}</code></span></div>${externalRecord}${job.last_error ? `<small>${escapeHtml(job.last_error)}</small>` : ''}<footer><time>${escapeHtml(timing)}</time>${action}</footer></article>`;
+    const reconciliation = job.destination_kind === 'jira-cloud' && job.external_record ? renderJiraReconciliation(job) : '';
+    return `<article class="delivery-job ${escapeHtml(job.status)}"><header><span>${escapeHtml(job.approval_mode.replaceAll('-', ' '))}</span><b>${escapeHtml(job.status)}</b></header><p>Package <code>${escapeHtml(job.package_id.slice(0,8))}</code> → ${escapeHtml(job.destination_label)}</p><div><span>${escapeHtml(deliveryAdapterName(job.destination_kind))}</span><span>${job.attempt_count}/${job.max_attempts} attempts</span><span>HTTP ${job.http_status || '—'}</span><span>Hash <code>${escapeHtml(job.payload_sha256.slice(0,12))}</code></span></div>${externalRecord}${reconciliation}${job.last_error ? `<small>${escapeHtml(job.last_error)}</small>` : ''}<footer><time>${escapeHtml(timing)}</time><div>${action}</div></footer></article>`;
   }).join('') : '<div class="empty-inline compact-empty">No outbound package has been approved. Preview an eligible response package to start.</div>';
   const audit = value.audit || {}; const chain = audit.chain || {};
   $('#auditChainStatus').textContent = chain.valid ? `${chain.event_count || 0} events · chain valid` : `Integrity break at event ${chain.broken_sequence || 'unknown'}`;
@@ -1544,6 +1596,30 @@ async function retryDelivery(jobId) {
 async function cancelDelivery(jobId) {
   try { await api(`/api/delivery/jobs/${encodeURIComponent(jobId)}/cancel`, {method:'POST'}); await loadAssurance(); toast('Outbound delivery cancelled'); }
   catch (error) { toast(error.message); }
+}
+
+async function reconcileDelivery(button) {
+  const jobId = button.dataset.reconcileDelivery;
+  const original = button.textContent;
+  button.disabled = true;
+  button.textContent = 'Reading Jira…';
+  try {
+    const result = await api(`/api/delivery/jobs/${encodeURIComponent(jobId)}/reconcile`, {method:'POST'});
+    await loadAssurance();
+    if (result.outcome === 'observed') {
+      const count = result.drift?.changes?.length || 0;
+      toast(count ? `Jira observation saved · ${count} material change${count === 1 ? '' : 's'}` : 'Jira observation saved · no material drift');
+    } else if (result.outcome === 'not-found-or-not-visible') {
+      toast('Jira returned 404 · the issue may be missing or no longer visible');
+    } else {
+      toast(result.error || `Jira observation saved · ${result.outcome}`);
+    }
+  } catch (error) {
+    toast(error.message);
+  } finally {
+    button.disabled = false;
+    button.textContent = original;
+  }
 }
 
 function hydrateAssurancePolicy(policy) {
@@ -2831,6 +2907,8 @@ document.addEventListener('click', async event => {
   if (closeAssurance) { await closeAssurancePackage(closeAssurance.dataset.closeAssurancePackage); return; }
   const previewDelivery = event.target.closest('[data-preview-assurance-delivery]');
   if (previewDelivery) { await previewAssuranceDelivery(previewDelivery.dataset.previewAssuranceDelivery); return; }
+  const reconcileOutbound = event.target.closest('[data-reconcile-delivery]');
+  if (reconcileOutbound) { await reconcileDelivery(reconcileOutbound); return; }
   const retryOutbound = event.target.closest('[data-retry-delivery]');
   if (retryOutbound) { await retryDelivery(retryOutbound.dataset.retryDelivery); return; }
   const cancelOutbound = event.target.closest('[data-cancel-delivery]');

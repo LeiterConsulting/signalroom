@@ -48,6 +48,10 @@ encrypted in the same local vault used for other secrets and are never returned 
 explicitly removed in the interface. Environment-managed values must instead be removed from the process environment
 followed by a SignalRoom restart.
 
+Jira reconciliation uses the same dedicated credentials and requires permission to browse each correlated issue.
+Refreshes are analyst-initiated and read only. Jira can return 404 both when an issue is unavailable and when the
+credentials cannot see it, so SignalRoom reports that result as **not found or not visible**.
+
 Environment-managed deployments can supply these values without saving them through the interface:
 
 ```text

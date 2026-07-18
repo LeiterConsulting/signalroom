@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 from datetime import UTC, datetime
@@ -100,6 +101,20 @@ class DeliveryStore:
                 );
                 CREATE INDEX IF NOT EXISTS idx_delivery_attempts_job
                     ON delivery_attempts(job_id, id DESC);
+                CREATE TABLE IF NOT EXISTS delivery_reconciliations (
+                    id TEXT PRIMARY KEY,
+                    job_id TEXT NOT NULL,
+                    outcome TEXT NOT NULL,
+                    http_status INTEGER,
+                    snapshot TEXT NOT NULL,
+                    snapshot_sha256 TEXT NOT NULL,
+                    drift TEXT NOT NULL,
+                    error TEXT NOT NULL,
+                    observed_at TEXT NOT NULL,
+                    FOREIGN KEY(job_id) REFERENCES delivery_jobs(id) ON DELETE CASCADE
+                );
+                CREATE INDEX IF NOT EXISTS idx_delivery_reconciliations_job
+                    ON delivery_reconciliations(job_id, observed_at DESC);
                 """
             )
             policy_columns = {
@@ -484,6 +499,65 @@ class DeliveryStore:
             for row in rows
         ]
 
+    def record_reconciliation(
+        self,
+        job_id: str,
+        *,
+        outcome: str,
+        http_status: int | None,
+        snapshot: dict[str, Any],
+        drift: dict[str, Any],
+        error: str,
+    ) -> dict[str, Any] | None:
+        if self.get(job_id) is None:
+            return None
+        reconciliation_id = str(uuid4())
+        observed_at = _now()
+        canonical_snapshot = json.dumps(
+            snapshot, sort_keys=True, separators=(",", ":"), default=str
+        )
+        snapshot_sha256 = hashlib.sha256(canonical_snapshot.encode()).hexdigest()
+        canonical_drift = json.dumps(
+            drift, sort_keys=True, separators=(",", ":"), default=str
+        )
+        with self._lock, self.connect() as db:
+            db.execute(
+                """INSERT INTO delivery_reconciliations
+                (id,job_id,outcome,http_status,snapshot,snapshot_sha256,drift,error,observed_at)
+                VALUES (?,?,?,?,?,?,?,?,?)""",
+                (
+                    reconciliation_id,
+                    job_id,
+                    outcome[:80],
+                    http_status,
+                    canonical_snapshot,
+                    snapshot_sha256,
+                    canonical_drift,
+                    error[:1000],
+                    observed_at,
+                ),
+            )
+        return self.reconciliation(reconciliation_id)
+
+    def reconciliation(self, reconciliation_id: str) -> dict[str, Any] | None:
+        with self.connect() as db:
+            row = db.execute(
+                "SELECT * FROM delivery_reconciliations WHERE id=?",
+                (reconciliation_id,),
+            ).fetchone()
+        return self._reconciliation(row) if row else None
+
+    def reconciliations(
+        self, job_id: str, limit: int = 20
+    ) -> list[dict[str, Any]]:
+        with self.connect() as db:
+            rows = db.execute(
+                """SELECT * FROM delivery_reconciliations WHERE job_id=?
+                ORDER BY observed_at DESC, id DESC LIMIT ?""",
+                (job_id, min(max(limit, 1), 100)),
+            ).fetchall()
+        return [self._reconciliation(row) for row in rows]
+
     @staticmethod
     def _policy(row: sqlite3.Row) -> dict[str, Any]:
         return {
@@ -509,7 +583,25 @@ class DeliveryStore:
     def _job_with_attempts(self, row: sqlite3.Row) -> dict[str, Any]:
         value = self._job(row)
         value["attempts"] = self.attempts(value["id"])
+        value["reconciliations"] = self.reconciliations(value["id"])
+        value["latest_reconciliation"] = (
+            value["reconciliations"][0] if value["reconciliations"] else None
+        )
         return value
+
+    @staticmethod
+    def _reconciliation(row: sqlite3.Row) -> dict[str, Any]:
+        return {
+            "id": row["id"],
+            "job_id": row["job_id"],
+            "outcome": row["outcome"],
+            "http_status": row["http_status"],
+            "snapshot": json.loads(row["snapshot"]),
+            "snapshot_sha256": row["snapshot_sha256"],
+            "drift": json.loads(row["drift"]),
+            "error": row["error"],
+            "observed_at": row["observed_at"],
+        }
 
     @staticmethod
     def _job(row: sqlite3.Row) -> dict[str, Any]:

@@ -51,4 +51,8 @@ def test_delivery_exposes_adapter_semantics_before_approval() -> None:
     assert "Slack receives plain-text notification blocks only over verified TLS." in APP_JS
     assert "cannot update, transition, comment on, assign, attach to, or delete it" in APP_JS
     assert "Open correlated Jira issue" in APP_JS
+    assert "Refresh Jira status" in APP_JS
+    assert "Explicit read only · minimal correlated issue fields" in APP_JS
+    assert "Not found or not visible" in APP_JS
+    assert "no issue mutation" in APP_JS
     assert "no SPL execution or validation approval" in APP_JS

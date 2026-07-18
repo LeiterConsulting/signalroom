@@ -10,7 +10,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote, urlparse
+from urllib.parse import quote, urlencode, urlparse
 
 import httpx
 
@@ -29,6 +29,15 @@ JIRA_PROJECT_PATTERN = re.compile(r"^[A-Z][A-Z0-9_]{1,31}$")
 JIRA_LABEL_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$")
 JIRA_ISSUE_KEY_PATTERN = re.compile(r"^[A-Z][A-Z0-9_]{1,31}-[1-9][0-9]*$")
 DELIVERY_SEVERITIES = {"critical", "high", "medium", "low"}
+JIRA_RECONCILIATION_FIELDS = (
+    "status",
+    "priority",
+    "resolution",
+    "updated",
+    "project",
+    "issuetype",
+    "labels",
+)
 
 
 class AssuranceDeliveryService:
@@ -138,6 +147,9 @@ class AssuranceDeliveryService:
                     )
                 ),
                 "external_authority": "create-issue-only" if is_jira else "notification-only",
+                "external_read_authority": (
+                    "explicit-correlated-issue-only" if is_jira else "none"
+                ),
                 "splunk_authority": "none",
             },
         }
@@ -232,6 +244,139 @@ class AssuranceDeliveryService:
             },
         )
         return result
+
+    async def reconcile(self, job_id: str) -> dict[str, Any]:
+        job = self.store.get(job_id)
+        if job is None:
+            raise KeyError(job_id)
+        if job["destination_kind"] != JIRA_DESTINATION:
+            raise ValueError("Only a correlated Jira delivery can be reconciled")
+        if job["status"] != "delivered" or not job.get("external_record"):
+            raise ValueError(
+                "Jira reconciliation requires a delivered job with a durable issue correlation"
+            )
+        record = job["external_record"]
+        if (
+            not str(record.get("id") or "").isdigit()
+            or not JIRA_ISSUE_KEY_PATTERN.fullmatch(str(record.get("key") or ""))
+        ):
+            raise ValueError("The stored Jira issue correlation is not trustworthy")
+        policy = self.store.policy()
+        if policy["destination_kind"] != JIRA_DESTINATION:
+            raise ValueError(
+                "Restore the correlated Jira destination before refreshing this issue"
+            )
+        site_url = self.config.secret("delivery_webhook_url")
+        if not site_url:
+            raise ValueError("The correlated Jira destination is not configured")
+        self._validate_destination_url(JIRA_DESTINATION, site_url)
+        self._validate_jira_policy(
+            policy,
+            email=self.config.secret("delivery_jira_email"),
+            api_token=self.config.secret("delivery_jira_api_token"),
+            require_credentials=True,
+        )
+        if self._destination_fingerprint() != job["destination_fingerprint"]:
+            raise ValueError(
+                "The Jira destination or credentials changed after issue creation; "
+                "SignalRoom will not read through a different destination identity"
+            )
+
+        query = urlencode(
+            {
+                "fields": ",".join(JIRA_RECONCILIATION_FIELDS),
+                "updateHistory": "false",
+                "failFast": "true",
+            }
+        )
+        endpoint = (
+            f"{site_url.rstrip('/')}/rest/api/3/issue/"
+            f"{quote(str(record['id']), safe='')}?{query}"
+        )
+        headers = {
+            "Accept": "application/json",
+            "Authorization": self._jira_authorization(),
+            "User-Agent": "SignalRoom/0.1 outbound-assurance",
+        }
+        status: int | None = None
+        outcome = "error"
+        snapshot: dict[str, Any] = {}
+        error = ""
+        try:
+            async with self.client_factory(
+                timeout=httpx.Timeout(15),
+                verify=True,
+                follow_redirects=False,
+                trust_env=False,
+            ) as client:
+                response = await client.get(endpoint, headers=headers)
+            status = int(response.status_code)
+            if status == 200:
+                snapshot, error = self._jira_reconciliation_snapshot(
+                    response, job, site_url
+                )
+                outcome = "observed" if snapshot else "identity-mismatch"
+            elif status == 404:
+                outcome = "not-found-or-not-visible"
+                error = (
+                    "Jira returned 404. The issue may be missing, or these credentials "
+                    "may no longer be permitted to see it."
+                )
+            elif status in {401, 403}:
+                outcome = "access-denied"
+                error = (
+                    f"Jira returned HTTP {status}; SignalRoom could not read the "
+                    "correlated issue with the configured credentials."
+                )
+            else:
+                error = f"Jira reconciliation returned HTTP {status}"
+        except (httpx.HTTPError, OSError, ValueError) as exc:
+            error = f"Jira reconciliation failed ({type(exc).__name__})"
+
+        current = self.store.get(job_id)
+        assert current is not None
+        drift = self._jira_reconciliation_drift(
+            outcome, snapshot, current.get("reconciliations", [])
+        )
+        reconciliation = self.store.record_reconciliation(
+            job_id,
+            outcome=outcome,
+            http_status=status,
+            snapshot=snapshot,
+            drift=drift,
+            error=error,
+        )
+        assert reconciliation is not None
+        drift_count = len(drift.get("changes", []))
+        audit_outcome = (
+            "ok"
+            if outcome == "observed" and not drift_count
+            else "blocked"
+            if outcome == "identity-mismatch"
+            else "error"
+            if outcome == "error"
+            else "warning"
+        )
+        self.audit.record(
+            "delivery.external.reconciled",
+            "reconcile",
+            target_type="delivery-job",
+            target_id=job_id,
+            outcome=audit_outcome,
+            summary=self._jira_reconciliation_summary(
+                outcome, snapshot, drift_count, error
+            ),
+            metadata={
+                "destination_kind": JIRA_DESTINATION,
+                "external_record_id": record["id"],
+                "external_record_key": record["key"],
+                "http_status": status,
+                "reconciliation_outcome": outcome,
+                "snapshot_sha256": reconciliation["snapshot_sha256"],
+                "drift_count": drift_count,
+            },
+        )
+        return reconciliation
 
     def update_policy(self, value: DeliveryPolicyUpdate) -> dict[str, Any]:
         previous_policy = self.store.policy()
@@ -1275,6 +1420,206 @@ class AssuranceDeliveryService:
             },
             "",
         )
+
+    @classmethod
+    def _jira_reconciliation_snapshot(
+        cls, response: Any, job: dict[str, Any], site_url: str
+    ) -> tuple[dict[str, Any], str]:
+        try:
+            value = response.json()
+        except (TypeError, ValueError):
+            return {}, "Jira returned HTTP 200 without a valid issue object"
+        if not isinstance(value, dict):
+            return {}, "Jira returned HTTP 200 without an issue object"
+        expected_id = str(job["external_record"]["id"])
+        issue_id = str(value.get("id") or "")
+        issue_key = str(value.get("key") or "")
+        if issue_id != expected_id:
+            return {}, "Jira returned an issue ID that did not match the durable correlation"
+        if not JIRA_ISSUE_KEY_PATTERN.fullmatch(issue_key):
+            return {}, "Jira returned an invalid issue key for the correlated issue"
+        fields = value.get("fields")
+        if not isinstance(fields, dict):
+            return {}, "Jira returned the correlated issue without a fields object"
+
+        project = fields.get("project")
+        issue_type = cls._jira_named_reference(fields.get("issuetype"))
+        status = cls._jira_named_reference(fields.get("status"))
+        if (
+            not isinstance(project, dict)
+            or not JIRA_PROJECT_PATTERN.fullmatch(str(project.get("key") or ""))
+            or not issue_type
+            or not status
+        ):
+            return (
+                {},
+                "Jira returned incomplete project, issue-type, or workflow identity",
+            )
+        status_category = (
+            fields["status"].get("statusCategory")
+            if isinstance(fields.get("status"), dict)
+            else None
+        )
+        if isinstance(status_category, dict):
+            status["category_key"] = cls._one_line(
+                status_category.get("key") or "", 120
+            )
+            status["category_name"] = cls._one_line(
+                status_category.get("name") or "", 120
+            )
+        else:
+            status["category_key"] = ""
+            status["category_name"] = ""
+
+        labels = fields.get("labels")
+        returned_labels = (
+            {
+                str(label)
+                for label in labels[:200]
+                if isinstance(label, str) and JIRA_LABEL_PATTERN.fullmatch(label)
+            }
+            if isinstance(labels, list)
+            else set()
+        )
+        payload = job.get("payload")
+        payload_fields = payload.get("fields") if isinstance(payload, dict) else None
+        candidate_payload_labels = (
+            payload_fields.get("labels", [])
+            if isinstance(payload_fields, dict)
+            else []
+        )
+        payload_labels = (
+            candidate_payload_labels
+            if isinstance(candidate_payload_labels, list)
+            else []
+        )
+        correlation_label = next(
+            (
+                str(label)
+                for label in payload_labels
+                if isinstance(label, str)
+                and label.startswith("signalroom-")
+                and JIRA_LABEL_PATTERN.fullmatch(label)
+            ),
+            "",
+        )
+        return (
+            {
+                "issue_id": issue_id,
+                "issue_key": issue_key,
+                "browse_url": (
+                    f"{site_url.rstrip('/')}/browse/{quote(issue_key, safe='')}"
+                ),
+                "project_key": str(project["key"]),
+                "issue_type": issue_type,
+                "status": status,
+                "priority": cls._jira_named_reference(fields.get("priority")),
+                "resolution": cls._jira_named_reference(fields.get("resolution")),
+                "jira_updated_at": cls._one_line(fields.get("updated") or "", 120),
+                "correlation_label_expected": bool(correlation_label),
+                "correlation_label_present": (
+                    correlation_label in returned_labels if correlation_label else None
+                ),
+                "authority": "read-only-observation",
+            },
+            "",
+        )
+
+    @classmethod
+    def _jira_named_reference(cls, value: Any) -> dict[str, str] | None:
+        if not isinstance(value, dict):
+            return None
+        reference_id = cls._one_line(value.get("id") or "", 120)
+        name = cls._one_line(value.get("name") or "", 120)
+        if not reference_id and not name:
+            return None
+        return {"id": reference_id, "name": name}
+
+    @staticmethod
+    def _jira_reconciliation_drift(
+        outcome: str,
+        snapshot: dict[str, Any],
+        history: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        latest = history[0] if history else None
+        previous_observed = next(
+            (item for item in history if item.get("outcome") == "observed"),
+            None,
+        )
+        changes: list[dict[str, Any]] = []
+        if outcome == "observed":
+            if latest and latest.get("outcome") != "observed":
+                changes.append(
+                    {
+                        "field": "availability",
+                        "from": latest.get("outcome"),
+                        "to": "observed",
+                        "severity": "workflow",
+                    }
+                )
+            if previous_observed:
+                previous = previous_observed.get("snapshot") or {}
+                severities = {
+                    "issue_key": "identity",
+                    "project_key": "identity",
+                    "issue_type": "identity",
+                    "status": "workflow",
+                    "priority": "triage",
+                    "resolution": "workflow",
+                    "correlation_label_present": "critical",
+                }
+                for field, severity in severities.items():
+                    if previous.get(field) != snapshot.get(field):
+                        changes.append(
+                            {
+                                "field": field,
+                                "from": previous.get(field),
+                                "to": snapshot.get(field),
+                                "severity": severity,
+                            }
+                        )
+        elif latest and latest.get("outcome") != outcome:
+            changes.append(
+                {
+                    "field": "availability",
+                    "from": latest.get("outcome"),
+                    "to": outcome,
+                    "severity": "visibility",
+                }
+            )
+        return {
+            "changed": bool(changes),
+            "baseline": "compared" if previous_observed else "established",
+            "previous_outcome": latest.get("outcome") if latest else None,
+            "previous_observed_sha256": (
+                previous_observed.get("snapshot_sha256")
+                if previous_observed
+                else None
+            ),
+            "changes": changes,
+        }
+
+    @staticmethod
+    def _jira_reconciliation_summary(
+        outcome: str,
+        snapshot: dict[str, Any],
+        drift_count: int,
+        error: str,
+    ) -> str:
+        if outcome == "observed":
+            issue_key = snapshot.get("issue_key") or "correlated issue"
+            if drift_count:
+                return (
+                    f"Observed Jira issue {issue_key} with {drift_count} material "
+                    "local drift change(s)."
+                )
+            return f"Observed Jira issue {issue_key}; no material local drift was detected."
+        if outcome == "not-found-or-not-visible":
+            return (
+                "Jira did not expose the correlated issue; absence and permission loss "
+                "cannot be distinguished from this response."
+            )
+        return error or f"Jira reconciliation ended with outcome {outcome}."
 
     def _destination_fingerprint(self) -> str:
         url = self.config.secret("delivery_webhook_url")

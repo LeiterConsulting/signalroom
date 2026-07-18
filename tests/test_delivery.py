@@ -240,6 +240,14 @@ def test_delivery_store_migrates_legacy_destination_columns(tmp_path):
         "external_record_url",
         "external_record_created_at",
     } <= job_columns
+    with store.connect() as db:
+        reconciliation_tables = {
+            row["name"]
+            for row in db.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
+    assert "delivery_reconciliations" in reconciliation_tables
 
 
 def test_slack_adapter_restricts_destination_and_builds_plain_text_preview(tmp_path):
@@ -434,6 +442,17 @@ class FakeJiraResponse:
             "key": "SEC-42",
             "self": "https://evil.example/rest/api/3/issue/10042",
         }
+
+
+class FakeJiraIssueResponse:
+    def __init__(self, status_code: int, value: dict[str, Any] | None = None):
+        self.status_code = status_code
+        self.value = value
+
+    def json(self) -> dict[str, Any]:
+        if self.value is None:
+            raise ValueError("No JSON response")
+        return self.value
 
 
 class FakeDeliveryClient:
@@ -661,6 +680,256 @@ async def test_jira_worker_creates_once_and_persists_trusted_external_correlatio
     recovered_job = store.get(job["id"])
     assert recovered_job is not None and recovered_job["status"] == "delivered"
     assert recovered_job["external_record"]["key"] == "SEC-42"
+
+
+async def delivered_jira_for_reconciliation(
+    tmp_path,
+    responses: list[FakeJiraIssueResponse],
+    calls: list[dict[str, Any]],
+) -> tuple[
+    AssuranceDeliveryService,
+    DeliveryStore,
+    AuditStore,
+    dict[str, Any],
+    dict[str, Any],
+]:
+    assurance = AssuranceStore(tmp_path / "assurance.db")
+    package = package_fixture(assurance)
+    config = ConfigStore(tmp_path / "config")
+    audit = AuditStore(tmp_path / "audit.db")
+    store = DeliveryStore(tmp_path / "delivery.db")
+
+    class ReconciliationClient(FakeDeliveryClient):
+        async def post(
+            self, url: str, *, content: bytes, headers: dict[str, str]
+        ) -> FakeJiraResponse:
+            self.calls.append(
+                {
+                    "method": "POST",
+                    "url": url,
+                    "content": content,
+                    "headers": headers,
+                    "client": self.kwargs,
+                }
+            )
+            return FakeJiraResponse()
+
+        async def get(
+            self, url: str, *, headers: dict[str, str]
+        ) -> FakeJiraIssueResponse:
+            self.calls.append(
+                {
+                    "method": "GET",
+                    "url": url,
+                    "headers": headers,
+                    "client": self.kwargs,
+                }
+            )
+            return responses.pop(0)
+
+    service = AssuranceDeliveryService(
+        store,
+        assurance,
+        config,
+        audit,
+        client_factory=lambda **kwargs: ReconciliationClient(calls, **kwargs),
+    )
+    service.update_policy(jira_policy())
+    preview = service.preview(package["id"])
+    job = service.approve(package["id"], preview["payload_sha256"])
+    await service._deliver(job)
+    return service, store, audit, store.get(job["id"]), preview
+
+
+def jira_issue_observation(
+    correlation_label: str,
+    *,
+    issue_id: str = "10042",
+    issue_key: str = "SEC-42",
+    project_key: str = "SEC",
+    status_id: str = "3",
+    status_name: str = "In Progress",
+    status_category: str = "indeterminate",
+    priority_name: str = "High",
+    resolution: dict[str, str] | None = None,
+    include_correlation: bool = True,
+) -> dict[str, Any]:
+    return {
+        "id": issue_id,
+        "key": issue_key,
+        "self": "https://untrusted.example/rest/api/3/issue/10042",
+        "fields": {
+            "summary": "This field was not requested and must not be retained",
+            "project": {"id": "10000", "key": project_key},
+            "issuetype": {"id": "10001", "name": "Task"},
+            "status": {
+                "id": status_id,
+                "name": status_name,
+                "statusCategory": {
+                    "key": status_category,
+                    "name": status_name,
+                },
+            },
+            "priority": {"id": "2", "name": priority_name},
+            "resolution": resolution,
+            "updated": "2026-07-18T12:30:00.000-0400",
+            "labels": [correlation_label] if include_correlation else [],
+            "description": "Sensitive content must not be retained",
+            "comment": {"comments": [{"body": "Sensitive comment"}]},
+        },
+    }
+
+
+@pytest.mark.asyncio
+async def test_jira_reconciliation_reads_minimal_fields_and_preserves_material_drift(
+    tmp_path,
+):
+    calls: list[dict[str, Any]] = []
+    responses: list[FakeJiraIssueResponse] = []
+    service, store, audit, job, preview = await delivered_jira_for_reconciliation(
+        tmp_path, responses, calls
+    )
+    assert job is not None
+    correlation_label = next(
+        label
+        for label in preview["payload"]["fields"]["labels"]
+        if label.startswith("signalroom-")
+    )
+    responses.extend(
+        [
+            FakeJiraIssueResponse(
+                200, jira_issue_observation(correlation_label)
+            ),
+            FakeJiraIssueResponse(
+                200,
+                jira_issue_observation(
+                    correlation_label,
+                    issue_key="OPS-42",
+                    project_key="OPS",
+                    status_id="6",
+                    status_name="Done",
+                    status_category="done",
+                    priority_name="Medium",
+                    resolution={"id": "1", "name": "Fixed"},
+                    include_correlation=False,
+                ),
+            ),
+        ]
+    )
+
+    baseline = await service.reconcile(job["id"])
+    changed = await service.reconcile(job["id"])
+
+    get_calls = [call for call in calls if call["method"] == "GET"]
+    assert len(get_calls) == 2
+    assert get_calls[0]["url"].startswith(
+        "https://security-team.atlassian.net/rest/api/3/issue/10042?"
+    )
+    assert "fields=status%2Cpriority%2Cresolution%2Cupdated%2Cproject%2Cissuetype%2Clabels" in (
+        get_calls[0]["url"]
+    )
+    assert "summary" not in get_calls[0]["url"]
+    assert "description" not in get_calls[0]["url"]
+    assert "comments" not in get_calls[0]["url"]
+    assert get_calls[0]["client"]["verify"] is True
+    assert get_calls[0]["client"]["follow_redirects"] is False
+    assert get_calls[0]["client"]["trust_env"] is False
+    assert baseline["outcome"] == "observed"
+    assert baseline["drift"]["baseline"] == "established"
+    assert baseline["drift"]["changed"] is False
+    assert baseline["snapshot"]["browse_url"] == (
+        "https://security-team.atlassian.net/browse/SEC-42"
+    )
+    serialized = json.dumps(baseline["snapshot"])
+    assert "Sensitive" not in serialized
+    assert "summary" not in serialized
+    assert "description" not in serialized
+    assert "comment" not in serialized
+    assert "untrusted.example" not in serialized
+    assert changed["snapshot"]["browse_url"] == (
+        "https://security-team.atlassian.net/browse/OPS-42"
+    )
+    assert changed["snapshot"]["correlation_label_present"] is False
+    assert changed["drift"]["changed"] is True
+    changed_fields = {
+        item["field"] for item in changed["drift"]["changes"]
+    }
+    assert {
+        "issue_key",
+        "project_key",
+        "status",
+        "priority",
+        "resolution",
+        "correlation_label_present",
+    } <= changed_fields
+    current = store.get(job["id"])
+    assert current is not None
+    assert len(current["reconciliations"]) == 2
+    assert current["latest_reconciliation"]["id"] == changed["id"]
+    assert current["reconciliations"][1]["snapshot_sha256"] == (
+        baseline["snapshot_sha256"]
+    )
+    reconciled_events = [
+        event
+        for event in audit.events()
+        if event["event_type"] == "delivery.external.reconciled"
+    ]
+    assert len(reconciled_events) == 2
+    assert reconciled_events[0]["metadata"]["snapshot_sha256"]
+    assert max(event["metadata"]["drift_count"] for event in reconciled_events) >= 6
+
+
+@pytest.mark.asyncio
+async def test_jira_reconciliation_preserves_ambiguous_visibility_and_fails_closed(
+    tmp_path,
+):
+    calls: list[dict[str, Any]] = []
+    responses: list[FakeJiraIssueResponse] = []
+    service, store, _, job, preview = await delivered_jira_for_reconciliation(
+        tmp_path, responses, calls
+    )
+    assert job is not None
+    correlation_label = next(
+        label
+        for label in preview["payload"]["fields"]["labels"]
+        if label.startswith("signalroom-")
+    )
+    responses.extend(
+        [
+            FakeJiraIssueResponse(
+                200, jira_issue_observation(correlation_label)
+            ),
+            FakeJiraIssueResponse(404),
+            FakeJiraIssueResponse(
+                200,
+                jira_issue_observation(
+                    correlation_label, issue_id="99999"
+                ),
+            ),
+        ]
+    )
+    await service.reconcile(job["id"])
+
+    hidden = await service.reconcile(job["id"])
+    assert hidden["outcome"] == "not-found-or-not-visible"
+    assert "missing" in hidden["error"]
+    assert "permitted" in hidden["error"]
+    assert hidden["snapshot"] == {}
+    assert hidden["drift"]["changes"][0]["field"] == "availability"
+
+    mismatched = await service.reconcile(job["id"])
+    assert mismatched["outcome"] == "identity-mismatch"
+    assert mismatched["snapshot"] == {}
+    assert "did not match" in mismatched["error"]
+    assert len(store.get(job["id"])["reconciliations"]) == 3
+
+    service.update_policy(
+        jira_policy(webhook_url="https://other-team.atlassian.net")
+    )
+    get_count = len([call for call in calls if call["method"] == "GET"])
+    with pytest.raises(ValueError, match="destination or credentials changed"):
+        await service.reconcile(job["id"])
+    assert len([call for call in calls if call["method"] == "GET"]) == get_count
 
 
 @pytest.mark.asyncio

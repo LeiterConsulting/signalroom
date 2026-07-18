@@ -202,6 +202,16 @@ the durable job then exposes a trusted browse URL constructed from the configure
 outcomes and interrupted creates without a persisted key fail closed for analyst inspection instead of automatic
 retry. A create whose key was persisted before interruption can be completed locally without another external call.
 
+An analyst can explicitly reconcile a delivered Jira job through the immutable numeric issue ID. The adapter uses
+one verified-TLS GET for a fixed minimal field allowlist: project, issue type, status, priority, resolution, updated
+timestamp, and labels. Descriptions, comments, attachments, people, and arbitrary fields are not requested or
+retained. `delivery_reconciliations` stores each bounded snapshot, its SHA-256, the read outcome, and deterministic
+drift from the preceding successful observation. Issue-key/project movement, workflow, priority, resolution, and
+correlation-label changes remain visible without modifying the original create correlation. HTTP 404 is persisted
+as `not-found-or-not-visible`, not as deletion, because Jira visibility permissions can produce the same response.
+Reads are explicit rather than scheduled, require the unchanged destination fingerprint, and add no external
+mutation authority.
+
 `AuditStore` records delivery and major control-plane decisions in an append-only local SHA-256 hash chain. Secrets
 are redacted before persistence. The UI verifies the chain, but the local database is not a substitute for a remote
 immutable audit sink on a fully compromised host.
@@ -218,5 +228,4 @@ SignalRoom is an MCP client of a Splunk MCP server and an MCP server to agent ho
 4. Search cost estimation, per-instance concurrency limits, and Splunk workload controls
 5. Broader operator-authored evaluation suites beyond the durable golden, tournament, and feedback history
 6. Audit events sent to a dedicated Splunk index
-7. Read-only reconciliation of correlated Jira issue existence and workflow status
-8. Splunk SOAR create-only adapter with an explicit authority and field-mapping contract
+7. Splunk SOAR create-only adapter with an explicit authority and field-mapping contract

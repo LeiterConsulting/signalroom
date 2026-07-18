@@ -993,6 +993,16 @@ async def cancel_assurance_delivery(job_id: str) -> dict[str, Any]:
         raise HTTPException(409, str(exc)) from exc
 
 
+@app.post("/api/delivery/jobs/{job_id}/reconcile")
+async def reconcile_assurance_delivery(job_id: str) -> dict[str, Any]:
+    try:
+        return await services.delivery.reconcile(job_id)
+    except KeyError as exc:
+        raise HTTPException(404, "Delivery job not found") from exc
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
 @app.get("/api/audit")
 async def audit_overview(limit: int = 100) -> dict[str, Any]:
     return services.audit.overview(min(max(limit, 1), 500))

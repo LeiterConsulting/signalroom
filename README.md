@@ -442,6 +442,16 @@ inspect the correlation label before explicitly retrying. See Atlassian's
 [create-issue API](https://developer.atlassian.com/cloud/jira/platform/rest/v3/api-group-issues/#api-rest-api-3-issue-post)
 and [API-token authentication guidance](https://developer.atlassian.com/cloud/jira/platform/basic-auth-for-rest-apis/).
 
+For a successfully correlated issue, an analyst can explicitly refresh a minimal read-only observation by immutable
+numeric Jira issue ID. SignalRoom requests only project, issue type, workflow status, priority, resolution, Jira's
+updated timestamp, and labels needed to verify its correlation marker. It does not request descriptions, comments,
+attachments, people, or other issue content. Each result is preserved as a digest-bound local snapshot and compared
+with the previous successful observation for identity, workflow, triage, resolution, and correlation-label drift.
+A Jira 404 is reported as **not found or not visible** because Jira may use that response when the credentials lack
+permission to browse the issue; SignalRoom does not claim the issue was deleted. Reconciliation is never polled and
+does not add issue update authority. See Atlassian's
+[get-issue API](https://developer.atlassian.com/cloud/jira/platform/rest/v3/api-group-issues/#api-rest-api-3-issue-issueidorkey-get).
+
 Attempt state, generic/Slack exponential backoff, explicit retries, Jira external-record correlation, and restart
 recovery are durable. Changing the adapter, URL, authorization identity, Jira mapping or credentials, TLS policy,
 or private CA cancels stale queued work and requires a fresh preview. Disabling delivery also cancels queued work;
@@ -499,11 +509,11 @@ Major local control-plane decisions and every outbound delivery action are writt
 append-only SHA-256 hash chain. Audit metadata applies key-based secret redaction and the Discovery interface reports
 chain integrity. This is a tamper-evident local record, not an external immutable audit sink.
 
-The next assurance integration increment is read-only Jira reconciliation: explicitly refresh the correlated
-issue's existence and workflow status, preserve drift locally, and retain the create-only mutation boundary.
-After that proof, a Splunk SOAR adapter can apply the same destination-specific authority, mapping, preview, and
-correlation contract. Cross-model tournaments already compare promotion-ready local profiles before an explicitly
-approved routing change.
+Correlated Jira issues now support explicit read-only reconciliation with immutable local observations and drift
+history while retaining the create-only mutation boundary. The next assurance integration increment is a Splunk
+SOAR create-only adapter applying the same destination-specific authority, mapping, exact-payload preview, and
+durable correlation contract. Cross-model tournaments already compare promotion-ready local profiles before an
+explicitly approved routing change.
 
 ### Context
 
