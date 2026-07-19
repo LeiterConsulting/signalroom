@@ -20,6 +20,7 @@ CONNECTION_IDS = {"primary"}
 UNSAFE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 ADMIN_MUTATION_PREFIXES = (
     "/api/auth/users",
+    "/api/auth/oidc/",
     "/api/model-setup/pull",
     "/api/model-setup/activate",
     "/api/model-trust",
@@ -203,6 +204,41 @@ class AuthService:
         )
         return session
 
+    def federated_session(self, user: dict[str, Any]) -> dict[str, Any]:
+        if not self.store.policy()["enabled"]:
+            raise ValueError("Named access is disabled")
+        if user.get("auth_source") != "oidc" or not user.get("active"):
+            raise PermissionError("The enterprise identity is not active")
+        return self._new_session(user)
+
+    def recover_local_password(
+        self, username: str, password: str
+    ) -> dict[str, Any]:
+        username = self._username(username)
+        self._validate_password(password)
+        user = self.store.get_user_by_username(username)
+        if not user or user.get("auth_source") != "local" or not user.get("active"):
+            raise ValueError("An active local account with that username was not found")
+        salt, password_hash = self._password_hash(password)
+        recovered = self.store.recover_local_password(
+            user["id"],
+            password_salt=salt,
+            password_hash=password_hash,
+        )
+        if not recovered:
+            raise ValueError("The local account could not be recovered")
+        self.audit.record(
+            "auth.local.password.recovered",
+            "recover",
+            target_type="auth-user",
+            target_id=user["id"],
+            outcome="warning",
+            summary="A host-authorized recovery replaced a local account password.",
+            metadata={"username": username, "sessions_revoked": True},
+            actor="host-recovery",
+        )
+        return self._public_user(recovered)
+
     def logout(self, token: str, user: dict[str, Any] | None) -> None:
         if token:
             self.store.revoke_session(self._digest(token))
@@ -288,6 +324,18 @@ class AuthService:
         )
         if losing_admin and self.store.active_admin_count() <= 1:
             raise ValueError("SignalRoom must retain at least one active admin")
+        if (
+            losing_admin
+            and current.get("auth_source") == "local"
+            and self.store.active_local_admin_count() <= 1
+        ):
+            raise ValueError("SignalRoom must retain one active local break-glass admin")
+        if current.get("auth_source") == "oidc" and any(
+            item is not None for item in (value.role, value.password, value.connection_ids)
+        ):
+            raise ValueError(
+                "OIDC role and connection access are managed by enterprise group policy"
+            )
         password_salt: str | None = None
         password_hash: str | None = None
         if value.password is not None:
@@ -403,6 +451,7 @@ class AuthService:
         accepted = bool(
             user
             and user["active"]
+            and user.get("auth_source") == "local"
             and self._password_matches(
                 password, user["password_salt"], user["password_hash"]
             )
@@ -510,6 +559,8 @@ class AuthService:
                 "created_at",
                 "updated_at",
                 "last_login_at",
+                "auth_source",
+                "external_issuer",
             )
             if key in value
         }

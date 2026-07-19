@@ -73,11 +73,76 @@ class AuthStore:
                 );
                 CREATE INDEX IF NOT EXISTS idx_auth_attempts_identity
                     ON auth_login_attempts(username, source, created_at);
+                CREATE TABLE IF NOT EXISTS auth_oidc_policy (
+                    id INTEGER PRIMARY KEY CHECK (id=1),
+                    enabled INTEGER NOT NULL,
+                    provider_label TEXT NOT NULL,
+                    issuer_url TEXT NOT NULL,
+                    client_id TEXT NOT NULL,
+                    redirect_uri TEXT NOT NULL,
+                    username_claim TEXT NOT NULL,
+                    display_name_claim TEXT NOT NULL,
+                    groups_claim TEXT NOT NULL,
+                    tenant_claim TEXT NOT NULL,
+                    allowed_tenant_values TEXT NOT NULL,
+                    allowed_groups TEXT NOT NULL,
+                    analyst_groups TEXT NOT NULL,
+                    admin_groups TEXT NOT NULL,
+                    default_role TEXT NOT NULL,
+                    grant_primary_connection INTEGER NOT NULL,
+                    required_acr_values TEXT NOT NULL,
+                    required_amr_values TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS auth_oidc_transactions (
+                    state_sha256 TEXT PRIMARY KEY,
+                    nonce_sha256 TEXT NOT NULL,
+                    code_verifier TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    expires_at TEXT NOT NULL,
+                    consumed_at TEXT
+                );
+                CREATE INDEX IF NOT EXISTS idx_auth_oidc_transactions_expiry
+                    ON auth_oidc_transactions(expires_at, consumed_at);
                 """
+            )
+            columns = {
+                row["name"]
+                for row in db.execute("PRAGMA table_info(auth_users)").fetchall()
+            }
+            if "auth_source" not in columns:
+                db.execute(
+                    "ALTER TABLE auth_users ADD COLUMN auth_source TEXT NOT NULL DEFAULT 'local'"
+                )
+            if "external_issuer" not in columns:
+                db.execute("ALTER TABLE auth_users ADD COLUMN external_issuer TEXT")
+            if "external_subject" not in columns:
+                db.execute("ALTER TABLE auth_users ADD COLUMN external_subject TEXT")
+            if "external_claims" not in columns:
+                db.execute(
+                    "ALTER TABLE auth_users ADD COLUMN external_claims TEXT NOT NULL DEFAULT '{}'"
+                )
+            db.execute(
+                """CREATE UNIQUE INDEX IF NOT EXISTS idx_auth_users_external_identity
+                ON auth_users(external_issuer, external_subject)
+                WHERE external_issuer IS NOT NULL AND external_subject IS NOT NULL"""
             )
             db.execute(
                 """INSERT OR IGNORE INTO auth_policy
                 (id,enabled,session_hours,updated_at) VALUES (1,0,12,?)""",
+                (now,),
+            )
+            db.execute(
+                """INSERT OR IGNORE INTO auth_oidc_policy
+                (id,enabled,provider_label,issuer_url,client_id,redirect_uri,
+                username_claim,display_name_claim,groups_claim,tenant_claim,
+                allowed_tenant_values,allowed_groups,analyst_groups,admin_groups,
+                default_role,grant_primary_connection,required_acr_values,
+                required_amr_values,updated_at)
+                VALUES (1,0,'Enterprise identity','','','',
+                'preferred_username','name','groups','',
+                '[]','[]','[]','[]','viewer',0,'[]','["mfa"]',?)""",
                 (now,),
             )
 
@@ -102,6 +167,10 @@ class AuthStore:
                     "UPDATE auth_sessions SET revoked_at=? WHERE revoked_at IS NULL",
                     (_now(),),
                 )
+                db.execute(
+                    "UPDATE auth_oidc_policy SET enabled=0,updated_at=? WHERE id=1",
+                    (_now(),),
+                )
         return self.policy()
 
     def user_count(self) -> int:
@@ -114,6 +183,14 @@ class AuthStore:
             row = db.execute(
                 """SELECT COUNT(*) AS count FROM auth_users
                 WHERE active=1 AND role='admin'"""
+            ).fetchone()
+        return int(row["count"])
+
+    def active_local_admin_count(self) -> int:
+        with self.connect() as db:
+            row = db.execute(
+                """SELECT COUNT(*) AS count FROM auth_users
+                WHERE active=1 AND role='admin' AND auth_source='local'"""
             ).fetchone()
         return int(row["count"])
 
@@ -165,6 +242,76 @@ class AuthStore:
             ).fetchone()
         return self._user(row, include_password=True) if row else None
 
+    def get_user_by_external_identity(
+        self, issuer: str, subject: str
+    ) -> dict[str, Any] | None:
+        with self.connect() as db:
+            row = db.execute(
+                """SELECT * FROM auth_users
+                WHERE external_issuer=? AND external_subject=?""",
+                (issuer, subject),
+            ).fetchone()
+        return self._user(row, include_password=True) if row else None
+
+    def upsert_external_user(
+        self,
+        *,
+        issuer: str,
+        subject: str,
+        username: str,
+        display_name: str,
+        role: str,
+        connection_ids: list[str],
+        claims: dict[str, Any],
+    ) -> dict[str, Any]:
+        now = _now()
+        with self._lock, self.connect() as db:
+            current = db.execute(
+                """SELECT id,active FROM auth_users
+                WHERE external_issuer=? AND external_subject=?""",
+                (issuer, subject),
+            ).fetchone()
+            if current:
+                db.execute(
+                    """UPDATE auth_users SET display_name=?,role=?,connection_ids=?,
+                    external_claims=?,updated_at=? WHERE id=?""",
+                    (
+                        display_name,
+                        role,
+                        json.dumps(connection_ids),
+                        json.dumps(claims, sort_keys=True),
+                        now,
+                        current["id"],
+                    ),
+                )
+                user_id = current["id"]
+            else:
+                user_id = str(uuid4())
+                db.execute(
+                    """INSERT INTO auth_users
+                    (id,username,display_name,role,password_salt,password_hash,active,
+                    connection_ids,created_at,updated_at,last_login_at,auth_source,
+                    external_issuer,external_subject,external_claims)
+                    VALUES (?,?,?,?,?,?,1,?,?,?,NULL,'oidc',?,?,?)""",
+                    (
+                        user_id,
+                        username,
+                        display_name,
+                        role,
+                        "",
+                        "",
+                        json.dumps(connection_ids),
+                        now,
+                        now,
+                        issuer,
+                        subject,
+                        json.dumps(claims, sort_keys=True),
+                    ),
+                )
+        user = self.get_user(user_id)
+        assert user is not None
+        return user
+
     def users(self) -> list[dict[str, Any]]:
         with self.connect() as db:
             rows = db.execute(
@@ -204,6 +351,17 @@ class AuthStore:
                 if int(admins["count"]) <= 1:
                     raise ValueError(
                         "SignalRoom must retain at least one active admin"
+                    )
+                source = db.execute(
+                    "SELECT auth_source FROM auth_users WHERE id=?", (user_id,)
+                ).fetchone()
+                if (
+                    source
+                    and source["auth_source"] == "local"
+                    and self.active_local_admin_count() <= 1
+                ):
+                    raise ValueError(
+                        "SignalRoom must retain one active local break-glass admin"
                     )
             if password_salt and password_hash:
                 changed = db.execute(
@@ -286,7 +444,7 @@ class AuthStore:
         with self.connect() as db:
             row = db.execute(
                 """SELECT s.*,u.username,u.display_name,u.role,u.active,
-                u.connection_ids FROM auth_sessions s
+                u.connection_ids,u.auth_source,u.external_issuer FROM auth_sessions s
                 JOIN auth_users u ON u.id=s.user_id
                 WHERE s.token_sha256=? AND s.revoked_at IS NULL
                 AND s.expires_at>? AND u.active=1""",
@@ -305,6 +463,8 @@ class AuthStore:
                 "role": row["role"],
                 "active": bool(row["active"]),
                 "connection_ids": json.loads(row["connection_ids"]),
+                "auth_source": row["auth_source"],
+                "external_issuer": row["external_issuer"],
             },
         }
 
@@ -327,6 +487,163 @@ class AuthStore:
                     (_now(), user_id),
                 ).rowcount
             )
+
+    def revoke_external_sessions(self) -> int:
+        with self._lock, self.connect() as db:
+            return int(
+                db.execute(
+                    """UPDATE auth_sessions SET revoked_at=?
+                    WHERE revoked_at IS NULL AND user_id IN
+                    (SELECT id FROM auth_users WHERE auth_source='oidc')""",
+                    (_now(),),
+                ).rowcount
+            )
+
+    def recover_local_password(
+        self, user_id: str, *, password_salt: str, password_hash: str
+    ) -> dict[str, Any] | None:
+        now = _now()
+        with self._lock, self.connect() as db:
+            current = db.execute(
+                "SELECT auth_source,active FROM auth_users WHERE id=?", (user_id,)
+            ).fetchone()
+            if not current or current["auth_source"] != "local" or not current["active"]:
+                return None
+            db.execute(
+                """UPDATE auth_users SET password_salt=?,password_hash=?,updated_at=?
+                WHERE id=?""",
+                (password_salt, password_hash, now, user_id),
+            )
+            db.execute(
+                """UPDATE auth_sessions SET revoked_at=?
+                WHERE user_id=? AND revoked_at IS NULL""",
+                (now, user_id),
+            )
+        return self.get_user(user_id)
+
+    def oidc_policy(self) -> dict[str, Any]:
+        with self.connect() as db:
+            row = db.execute("SELECT * FROM auth_oidc_policy WHERE id=1").fetchone()
+        assert row is not None
+        return {
+            "enabled": bool(row["enabled"]),
+            "provider_label": row["provider_label"],
+            "issuer_url": row["issuer_url"],
+            "client_id": row["client_id"],
+            "redirect_uri": row["redirect_uri"],
+            "username_claim": row["username_claim"],
+            "display_name_claim": row["display_name_claim"],
+            "groups_claim": row["groups_claim"],
+            "tenant_claim": row["tenant_claim"],
+            "allowed_tenant_values": json.loads(row["allowed_tenant_values"]),
+            "allowed_groups": json.loads(row["allowed_groups"]),
+            "analyst_groups": json.loads(row["analyst_groups"]),
+            "admin_groups": json.loads(row["admin_groups"]),
+            "default_role": row["default_role"],
+            "grant_primary_connection": bool(row["grant_primary_connection"]),
+            "required_acr_values": json.loads(row["required_acr_values"]),
+            "required_amr_values": json.loads(row["required_amr_values"]),
+            "updated_at": row["updated_at"],
+        }
+
+    def update_oidc_policy(self, value: dict[str, Any]) -> dict[str, Any]:
+        fields = (
+            "enabled",
+            "provider_label",
+            "issuer_url",
+            "client_id",
+            "redirect_uri",
+            "username_claim",
+            "display_name_claim",
+            "groups_claim",
+            "tenant_claim",
+            "allowed_tenant_values",
+            "allowed_groups",
+            "analyst_groups",
+            "admin_groups",
+            "default_role",
+            "grant_primary_connection",
+            "required_acr_values",
+            "required_amr_values",
+        )
+        lists = {
+            "allowed_tenant_values",
+            "allowed_groups",
+            "analyst_groups",
+            "admin_groups",
+            "required_acr_values",
+            "required_amr_values",
+        }
+        stored = [
+            json.dumps(value[name]) if name in lists else int(value[name])
+            if name in {"enabled", "grant_primary_connection"}
+            else value[name]
+            for name in fields
+        ]
+        with self._lock, self.connect() as db:
+            db.execute(
+                f"""UPDATE auth_oidc_policy SET
+                {','.join(f'{name}=?' for name in fields)},updated_at=? WHERE id=1""",
+                (*stored, _now()),
+            )
+        return self.oidc_policy()
+
+    def create_oidc_transaction(
+        self,
+        *,
+        state_sha256: str,
+        nonce_sha256: str,
+        code_verifier: str,
+        source: str,
+    ) -> None:
+        now = datetime.now(UTC)
+        with self._lock, self.connect() as db:
+            per_source = db.execute(
+                """SELECT COUNT(*) AS count FROM auth_oidc_transactions
+                WHERE source=? AND consumed_at IS NULL AND expires_at>?""",
+                (source, now.isoformat()),
+            ).fetchone()
+            global_pending = db.execute(
+                """SELECT COUNT(*) AS count FROM auth_oidc_transactions
+                WHERE consumed_at IS NULL AND expires_at>?""",
+                (now.isoformat(),),
+            ).fetchone()
+            if int(per_source["count"]) >= 30 or int(global_pending["count"]) >= 1000:
+                raise RuntimeError("Too many enterprise sign-in transactions are pending")
+            db.execute(
+                """INSERT INTO auth_oidc_transactions
+                (state_sha256,nonce_sha256,code_verifier,source,created_at,
+                expires_at,consumed_at) VALUES (?,?,?,?,?,?,NULL)""",
+                (
+                    state_sha256,
+                    nonce_sha256,
+                    code_verifier,
+                    source,
+                    now.isoformat(),
+                    (now + timedelta(minutes=10)).isoformat(),
+                ),
+            )
+            db.execute(
+                "DELETE FROM auth_oidc_transactions WHERE expires_at<? OR consumed_at IS NOT NULL",
+                ((now - timedelta(hours=1)).isoformat(),),
+            )
+
+    def consume_oidc_transaction(self, state_sha256: str) -> dict[str, Any] | None:
+        now = _now()
+        with self._lock, self.connect() as db:
+            row = db.execute(
+                """SELECT * FROM auth_oidc_transactions
+                WHERE state_sha256=? AND consumed_at IS NULL AND expires_at>?""",
+                (state_sha256, now),
+            ).fetchone()
+            if not row:
+                return None
+            changed = db.execute(
+                """UPDATE auth_oidc_transactions SET consumed_at=?
+                WHERE state_sha256=? AND consumed_at IS NULL""",
+                (now, state_sha256),
+            ).rowcount
+        return dict(row) if changed else None
 
     def login_blocked(self, username: str, source: str) -> bool:
         since = (datetime.now(UTC) - timedelta(minutes=15)).isoformat()
@@ -371,6 +688,9 @@ class AuthStore:
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
             "last_login_at": row["last_login_at"],
+            "auth_source": row["auth_source"],
+            "external_issuer": row["external_issuer"],
+            "external_subject": row["external_subject"],
         }
         if include_password:
             value["password_salt"] = row["password_salt"]

@@ -69,6 +69,9 @@ def test_delivery_exposes_adapter_semantics_before_approval() -> None:
 def test_optional_rbac_is_visible_and_keyboard_operable() -> None:
     assert 'id="accessCard"' in INDEX_HTML
     assert 'id="loginModal"' in INDEX_HTML
+    assert 'id="enterpriseLogin"' in INDEX_HTML
+    assert 'id="oidcEnabled"' in INDEX_HTML
+    assert 'id="oidcRequiredAmr"' in INDEX_HTML
     assert 'id="loginForm"' in INDEX_HTML
     assert 'id="accessControlSection"' in INDEX_HTML
     assert "Access control · optional" in INDEX_HTML

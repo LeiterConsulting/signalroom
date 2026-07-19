@@ -13,6 +13,7 @@ dependencies = [
   "cryptography>=42.0",
   "fastapi>=0.115",
   "httpx>=0.27",
+  "PyJWT[crypto]>=2.10,<3",
   "pydantic>=2.8",
   "python-multipart>=0.0.9",
   "uvicorn[standard]>=0.30",
@@ -36,6 +37,7 @@ splunk-security-agent = "splunk_security_agent.main:run"
 signalroom-models = "splunk_security_agent.model_setup:run"
 signalroom-eval = "splunk_security_agent.evaluation:run"
 signalroom-verify-detection = "splunk_security_agent.detections.gitops_verifier:run"
+signalroom-access = "splunk_security_agent.auth.recovery:run"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/splunk_security_agent"]

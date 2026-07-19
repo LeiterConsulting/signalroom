@@ -5,6 +5,7 @@ import sys
 import types
 from typing import Any
 
+import httpx
 import pytest
 
 from splunk_security_agent.config import ConfigStore
@@ -86,6 +87,28 @@ async def test_readiness_reports_each_ollama_profile(monkeypatch, tmp_path):
         "securebert-ner",
         "securebert-rerank",
     }
+
+
+@pytest.mark.asyncio
+async def test_readiness_reports_offline_ollama_profiles_without_crashing(
+    monkeypatch, tmp_path
+):
+    class OfflineClient(FakeClient):
+        async def get(self, url: str, **kwargs: Any) -> FakeResponse:
+            raise httpx.ConnectError(f"Offline: {url}")
+
+    monkeypatch.setattr(
+        "splunk_security_agent.model_setup.httpx.AsyncClient", OfflineClient
+    )
+    result = await ModelSetupService(ConfigStore(tmp_path)).readiness()
+
+    assert result["ollama"]["ok"] is False
+    assert result["ollama"]["models"] == []
+    assert result["ollama"]["loaded_models"] == []
+    assert all(
+        not profile["installed"] and not profile["loaded"]
+        for profile in result["ollama"]["profiles"]
+    )
 
 
 def test_huggingface_repo_extracts_explicit_ollama_hub_source():

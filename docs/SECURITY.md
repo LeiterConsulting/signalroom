@@ -12,6 +12,11 @@ The local prototype defaults to localhost, opt-in demo mode, local specialist ex
 - Passwords use salted scrypt hashes. Opaque session and CSRF values are stored only as SHA-256 digests; browser sessions use strict same-site cookies, an HttpOnly session cookie, and a separate header-bound CSRF cookie.
 - Failed login attempts are throttled per normalized username and source. Role, connection, active-state, and password changes revoke affected sessions; disabling RBAC revokes all sessions and requires the current admin password.
 - Request-scoped audit events inherit the authenticated username. Authentication enablement, disablement, login, logout, user changes, and authorization denials are explicitly audited.
+- Optional single-issuer OIDC uses authorization code with S256 PKCE, 256-bit state/nonce values, a ten-minute one-use transaction, exact configured callback/issuer/audience checks, and provider JWKS signature validation. Symmetric and unsigned ID tokens are rejected.
+- OIDC identity binding uses only the exact `(issuer, sub)` pair. Tenant and group admission are exact claim comparisons; group mappings derive the local role and Primary Splunk remains a separate grant.
+- Enterprise sign-in must require at least one configured provider MFA assurance signal through accepted `acr` or required `amr` values. SignalRoom validates the signed claim evidence; the provider remains responsible for performing MFA.
+- OIDC policy changes revoke every external session. External credentials, roles, and connection grants are provider-policy managed; a local administrator can still deactivate the resulting SignalRoom identity.
+- SignalRoom refuses to remove or demote the last active local break-glass administrator. Host-only password recovery accepts active local identities only, revokes their sessions, and appends a warning audit event; no web recovery endpoint exists.
 - Known modifying/high-risk SPL commands are blocked in the chat execution path.
 - Every normal SignalRoom Splunk MCP caller shares one per-instance admission controller. MCP-call and query concurrency limits always apply; risk, per-query relative-cost, and UTC-day budget thresholds default to non-blocking audit mode and become fail-closed only after explicit admin promotion to enforce mode.
 - Workload decisions retain operation metadata and a query fingerprint, never raw SPL. SignalRoom cost units are deterministic comparisons rather than claims about scan bytes, execution time, or Splunk scheduler cost.
@@ -52,7 +57,10 @@ The local prototype defaults to localhost, opt-in demo mode, local specialist ex
 
 - The local Fernet key is adjacent to encrypted secrets. This protects against accidental disclosure, not a fully compromised host. Use an OS keychain or secret manager in production.
 - Local single-user mode intentionally performs no authentication and grants local-admin authority to every caller. Do not bind that mode externally.
-- Local RBAC is not tenant isolation, OIDC/SSO, MFA, account self-service, or a recovery system. Protect `data/auth.db`, retain at least one active admin, and use a controlled HTTPS reverse proxy and external identity boundary for production exposure.
+- OIDC tenant and group claims are identity-admission boundaries, not row-, artifact-, case-, connection-, or process-level tenant isolation. Use separate SignalRoom deployments where hard data-plane tenancy is required.
+- Provider MFA evidence is only as trustworthy as the issuer's claim policy. Confirm the exact `acr`/`amr` behavior for the registered client and test denial paths before production use.
+- Host recovery treats authorized access to `data/auth.db` and `data/audit.db` as the recovery authority. Protect the data directory and execute recovery only through a controlled operating-system administration process.
+- SignalRoom logout revokes the local session but does not initiate provider-wide OIDC logout. A still-active provider SSO session may authenticate again. Provider-side group removal is evaluated on the next enterprise login; use local deactivation for immediate SignalRoom session revocation.
 - The app does not terminate HTTPS itself. Session cookies receive the `Secure` attribute only when the request scheme is HTTPS; configure and validate trusted proxy behavior in the deployment environment.
 - SPL command blocking is a guardrail, not a parser or authorization boundary. Enforce read-only roles in Splunk.
 - SignalRoom workload estimation is static and cannot know real index volume, bucket locality, acceleration state, concurrent non-SignalRoom searches, or Splunk scheduler decisions. Keep authoritative quotas and workload pools in Splunk.

@@ -88,9 +88,26 @@ HttpOnly same-site cookie, and require a separate same-site CSRF token for chang
 throttled. Disabling RBAC requires the current administrator password, revokes every session, and preserves users
 so named access can be re-enabled later.
 
-Local mode is not an authentication boundary: keep SignalRoom bound to localhost until RBAC is enabled. RBAC does
-not add transport TLS, tenant isolation, or an external identity provider; use an HTTPS reverse proxy and a
-deployment-specific threat model before network exposure.
+Local mode is not an authentication boundary: keep SignalRoom bound to localhost until RBAC is enabled. SignalRoom
+does not terminate TLS; use a controlled HTTPS reverse proxy and a deployment-specific threat model before network
+exposure.
+
+After named access is active, an administrator can opt in to one enterprise OpenID Connect issuer. SignalRoom uses
+the authorization-code flow with S256 PKCE, one-time state and nonce values, exact issuer/audience/callback checks,
+provider signing keys, and asymmetric ID-token algorithms only. Admission can require an exact tenant and group.
+Provider groups map to viewer, analyst, or admin, while Primary Splunk assignment remains a separate policy.
+Configured `amr` and/or `acr` values must prove that the identity provider applied the required MFA assurance.
+
+OIDC identities bind only to `(issuer, sub)` and are never linked by matching email or username. Policy changes
+revoke all external sessions. At least one active local administrator is retained as a break-glass identity. If
+that local password is lost, an authorized host administrator can replace it without opening a web recovery route:
+
+```powershell
+signalroom-access reset-password --username security-admin --confirm-local-host-access
+```
+
+The recovery command prompts twice, accepts local accounts only, revokes that user's sessions, and appends an audit
+event. OIDC tenant claims are an identity-admission boundary, not multi-tenant data isolation.
 
 ## Connect Splunk
 
@@ -598,8 +615,10 @@ digest bindings through operator-signed local attestations. A shared Splunk admi
 Investigate, Discovery, Validation, Assurance, and MLTK traffic with live queue state, relative cost preflight,
 per-instance concurrency, and audit-first risk and UTC-day budget policy. Operator-authored evaluation suites now
 extend the durable golden and tournament authorities. Verified audit events can now be exported to a dedicated
-Splunk index under an explicit HEC delivery policy. The next production increment is external identity:
-OIDC/MFA, recovery, and tenant boundaries beyond local RBAC.
+Splunk index under an explicit HEC delivery policy. Optional single-issuer OIDC now adds PKCE, provider MFA
+evidence, exact tenant/group admission, immutable-subject binding, and host-only local-account recovery. The next
+production increment is deployment-specific audit retention, dashboards, alerts, destination-side deduplication,
+and deeper tenant/data-boundary design.
 
 ### Operator-authored evaluation suites
 

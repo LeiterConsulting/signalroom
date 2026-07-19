@@ -106,6 +106,28 @@ class AuthUserUpdate(BaseModel):
     connection_ids: list[str] | None = Field(default=None, max_length=16)
 
 
+class AuthOIDCPolicyUpdate(BaseModel):
+    enabled: bool = False
+    provider_label: str = Field(default="Enterprise identity", min_length=1, max_length=120)
+    issuer_url: str = Field(default="", max_length=2000)
+    client_id: str = Field(default="", max_length=1000)
+    redirect_uri: str = Field(default="", max_length=2000)
+    client_secret: str | None = Field(default=None, max_length=4000)
+    clear_client_secret: bool = False
+    username_claim: str = Field(default="preferred_username", min_length=1, max_length=120)
+    display_name_claim: str = Field(default="name", min_length=1, max_length=120)
+    groups_claim: str = Field(default="groups", min_length=1, max_length=120)
+    tenant_claim: str = Field(default="", max_length=120)
+    allowed_tenant_values: list[str] = Field(default_factory=list, max_length=50)
+    allowed_groups: list[str] = Field(default_factory=list, max_length=100)
+    analyst_groups: list[str] = Field(default_factory=list, max_length=100)
+    admin_groups: list[str] = Field(default_factory=list, max_length=100)
+    default_role: Literal["viewer", "analyst"] = "viewer"
+    grant_primary_connection: bool = False
+    required_acr_values: list[str] = Field(default_factory=list, max_length=50)
+    required_amr_values: list[str] = Field(default_factory=lambda: ["mfa"], max_length=50)
+
+
 class ConnectionTestRequest(BaseModel):
     kind: Literal["splunk", "model"]
     profile_id: str | None = None

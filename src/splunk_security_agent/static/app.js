@@ -209,16 +209,20 @@ function hideLogin() {
 function renderAuthUsers() {
   const users = state.authUsers || [];
   $('#rbacUserCount').textContent = `${users.length} user${users.length === 1 ? '' : 's'}`;
-  $('#rbacUsers').innerHTML = users.length ? users.map(user => `
+  $('#rbacUsers').innerHTML = users.length ? users.map(user => {
+    const external = user.auth_source === 'oidc';
+    const source = external ? 'enterprise OIDC' : 'local account';
+    return `
     <article class="access-user" data-auth-user="${escapeHtml(user.id)}">
-      <header><div><b>${escapeHtml(user.display_name)}</b><small>@${escapeHtml(user.username)}${user.last_login_at ? ` · last sign-in ${escapeHtml(new Date(user.last_login_at).toLocaleString())}` : ' · never signed in'}</small></div><span class="${user.active ? '' : 'inactive'}">${user.active ? escapeHtml(user.role) : 'inactive'}</span></header>
+      <header><div><b>${escapeHtml(user.display_name)}</b><small>@${escapeHtml(user.username)} · ${source}${user.last_login_at ? ` · last sign-in ${escapeHtml(new Date(user.last_login_at).toLocaleString())}` : ' · never signed in'}</small></div><span class="${user.active ? (external ? 'external' : '') : 'inactive'}">${user.active ? `${escapeHtml(user.role)}${external ? ' · OIDC' : ''}` : 'inactive'}</span></header>
       <div class="access-user-controls">
-        <label><span>Role</span><select data-auth-role><option value="viewer" ${user.role === 'viewer' ? 'selected' : ''}>Viewer · read only</option><option value="analyst" ${user.role === 'analyst' ? 'selected' : ''}>Analyst · investigate</option><option value="admin" ${user.role === 'admin' ? 'selected' : ''}>Admin · platform control</option></select></label>
-        <label><span>Replace password · optional</span><input data-auth-password type="password" autocomplete="new-password" minlength="12" maxlength="1024" placeholder="Leave unchanged"></label>
-        <div class="access-user-checks"><label><input data-auth-active type="checkbox" ${user.active ? 'checked' : ''}> Active account</label><label><input data-auth-primary type="checkbox" ${(user.connection_ids || []).includes('primary') ? 'checked' : ''}> Primary Splunk assigned</label></div>
+        <label><span>Role${external ? ' · group managed' : ''}</span><select data-auth-role ${external ? 'disabled' : ''}><option value="viewer" ${user.role === 'viewer' ? 'selected' : ''}>Viewer · read only</option><option value="analyst" ${user.role === 'analyst' ? 'selected' : ''}>Analyst · investigate</option><option value="admin" ${user.role === 'admin' ? 'selected' : ''}>Admin · platform control</option></select></label>
+        <label><span>${external ? 'Credential authority' : 'Replace password · optional'}</span><input data-auth-password type="password" autocomplete="new-password" minlength="12" maxlength="1024" placeholder="${external ? 'Managed by identity provider' : 'Leave unchanged'}" ${external ? 'disabled' : ''}></label>
+        <div class="access-user-checks"><label><input data-auth-active type="checkbox" ${user.active ? 'checked' : ''}> Active account</label><label><input data-auth-primary type="checkbox" ${(user.connection_ids || []).includes('primary') ? 'checked' : ''} ${external ? 'disabled' : ''}> Primary Splunk assigned${external ? ' by OIDC policy' : ''}</label></div>
         <button class="button ghost small" type="button" data-save-auth-user>Save access</button>
       </div>
-    </article>`).join('') : '<div class="empty-inline compact-empty">No named users exist.</div>';
+    </article>`;
+  }).join('') : '<div class="empty-inline compact-empty">No named users exist.</div>';
 }
 
 async function loadAuthUsers() {
@@ -304,6 +308,8 @@ function renderAuth() {
     ? `${principal?.role || 'locked'} · ${auth.permissions?.can_use_primary_connection ? 'Primary Splunk' : 'no Splunk assignment'}`
     : 'POC mode · RBAC off';
   $('#logoutButton').hidden = !auth.enabled || !auth.authenticated;
+  $('#enterpriseLogin').hidden = !auth.oidc?.enabled;
+  $('#enterpriseLoginLabel').textContent = auth.oidc?.provider_label || 'enterprise identity';
   $('#rbacLocalSetup').hidden = auth.enabled;
   $('#rbacEnabledNotice').hidden = !auth.enabled;
   $('#rbacAdminControls').hidden = !auth.enabled || !auth.permissions?.can_administer;
@@ -311,6 +317,7 @@ function renderAuth() {
   $('#rbacPrincipalSummary').textContent = principal
     ? `${principal.display_name} is signed in as ${principal.role}`
     : 'Named access is enforced';
+  $('#accessDisable').hidden = principal?.auth_source === 'oidc';
   const reenable = Boolean(auth.reenable_required);
   $('#rbacBootstrapDisplayName').closest('label').hidden = reenable;
   $('#rbacBootstrapHelp').textContent = reenable
@@ -318,8 +325,9 @@ function renderAuth() {
     : 'Enabling RBAC creates the first named administrator and signs this browser in without interrupting setup.';
   $('#enableRbac').textContent = reenable ? 'Re-enable named access' : 'Enable named access';
   $('#accessControlSummary').textContent = auth.enabled
-    ? 'Named users, roles, local sessions, CSRF protection, and per-user Splunk connection assignment are active.'
+    ? `Named users, roles, protected sessions, and per-user Splunk connection assignment are active.${auth.oidc?.enabled ? ` Enterprise sign-in is available through ${auth.oidc.provider_label}.` : ''}`
     : 'SignalRoom is in local single-user mode. This keeps POC and guided-demo setup frictionless; keep the service bound to localhost until named access is enabled.';
+  renderOidcPolicy();
   applyAccessPermissions();
   if (auth.enabled && !auth.authenticated) showLogin(); else hideLogin();
 }
@@ -412,16 +420,100 @@ async function createAuthUser() {
 
 async function saveAuthUser(button) {
   const card = button.closest('[data-auth-user]');
+  const user = (state.authUsers || []).find(item => item.id === card.dataset.authUser);
   const password = card.querySelector('[data-auth-password]').value;
+  const body = user?.auth_source === 'oidc' ? {
+    active:card.querySelector('[data-auth-active]').checked
+  } : {
+    role:card.querySelector('[data-auth-role]').value,
+    active:card.querySelector('[data-auth-active]').checked,
+    connection_ids:card.querySelector('[data-auth-primary]').checked ? ['primary'] : [],
+    password:password || null
+  };
   try {
-    await api(`/api/auth/users/${encodeURIComponent(card.dataset.authUser)}`, { method:'PATCH', body:JSON.stringify({
-      role:card.querySelector('[data-auth-role]').value,
-      active:card.querySelector('[data-auth-active]').checked,
-      connection_ids:card.querySelector('[data-auth-primary]').checked ? ['primary'] : [],
-      password:password || null
-    })});
+    await api(`/api/auth/users/${encodeURIComponent(card.dataset.authUser)}`, { method:'PATCH', body:JSON.stringify(body)});
     await loadAuthUsers(); toast('User access updated');
   } catch (error) { toast(error.message); }
+}
+
+function listField(selector) {
+  return $(selector).value.split(',').map(value => value.trim()).filter(Boolean);
+}
+
+function renderOidcPolicy() {
+  const oidc = state.auth?.oidc || {};
+  const policy = oidc.policy;
+  $('#oidcStatusBadge').textContent = oidc.enabled ? 'Enabled' : 'Disabled';
+  $('#oidcStatusBadge').className = `subtle-pill${oidc.enabled ? ' ok' : ''}`;
+  if (!policy) return;
+  $('#oidcEnabled').checked = Boolean(policy.enabled);
+  $('#oidcProviderLabel').value = policy.provider_label || 'Enterprise identity';
+  $('#oidcIssuer').value = policy.issuer_url || '';
+  $('#oidcClientId').value = policy.client_id || '';
+  $('#oidcRedirectUri').value = policy.redirect_uri || '';
+  $('#oidcUsernameClaim').value = policy.username_claim || 'preferred_username';
+  $('#oidcDisplayNameClaim').value = policy.display_name_claim || 'name';
+  $('#oidcGroupsClaim').value = policy.groups_claim || 'groups';
+  $('#oidcTenantClaim').value = policy.tenant_claim || '';
+  $('#oidcAllowedTenants').value = (policy.allowed_tenant_values || []).join(', ');
+  $('#oidcAllowedGroups').value = (policy.allowed_groups || []).join(', ');
+  $('#oidcAnalystGroups').value = (policy.analyst_groups || []).join(', ');
+  $('#oidcAdminGroups').value = (policy.admin_groups || []).join(', ');
+  $('#oidcDefaultRole').value = policy.default_role || 'viewer';
+  $('#oidcRequiredAcr').value = (policy.required_acr_values || []).join(', ');
+  $('#oidcRequiredAmr').value = (policy.required_amr_values || []).join(', ');
+  $('#oidcGrantPrimary').checked = Boolean(policy.grant_primary_connection);
+  $('#oidcClientSecret').value = '';
+  $('#oidcClearClientSecret').checked = false;
+  $('#oidcSecretHelp').textContent = policy.client_secret_environment_managed
+    ? 'Managed by SIGNALROOM_OIDC_CLIENT_SECRET; change it in the service environment.'
+    : policy.client_secret_configured
+      ? 'Encrypted client secret configured · leave blank to keep it.'
+      : 'No client secret is configured.';
+}
+
+async function saveOidcPolicy() {
+  const output = $('#oidcPolicyResult');
+  output.textContent = 'Validating and saving enterprise policy…';
+  const payload = {
+    enabled:$('#oidcEnabled').checked,
+    provider_label:$('#oidcProviderLabel').value.trim() || 'Enterprise identity',
+    issuer_url:$('#oidcIssuer').value.trim(),
+    client_id:$('#oidcClientId').value.trim(),
+    redirect_uri:$('#oidcRedirectUri').value.trim(),
+    client_secret:$('#oidcClientSecret').value || null,
+    clear_client_secret:$('#oidcClearClientSecret').checked,
+    username_claim:$('#oidcUsernameClaim').value.trim() || 'preferred_username',
+    display_name_claim:$('#oidcDisplayNameClaim').value.trim() || 'name',
+    groups_claim:$('#oidcGroupsClaim').value.trim() || 'groups',
+    tenant_claim:$('#oidcTenantClaim').value.trim(),
+    allowed_tenant_values:listField('#oidcAllowedTenants'),
+    allowed_groups:listField('#oidcAllowedGroups'),
+    analyst_groups:listField('#oidcAnalystGroups'),
+    admin_groups:listField('#oidcAdminGroups'),
+    default_role:$('#oidcDefaultRole').value,
+    grant_primary_connection:$('#oidcGrantPrimary').checked,
+    required_acr_values:listField('#oidcRequiredAcr'),
+    required_amr_values:listField('#oidcRequiredAmr')
+  };
+  try {
+    const result = await api('/api/auth/oidc/policy', { method:'PUT', body:JSON.stringify(payload) });
+    state.auth.oidc = result;
+    renderOidcPolicy();
+    output.textContent = result.enabled
+      ? 'Enterprise sign-in enabled. Run the saved-provider test before signing out.'
+      : 'Enterprise sign-in is disabled; local named access is unchanged.';
+    toast('Enterprise identity policy saved');
+  } catch (error) { output.textContent = error.message; }
+}
+
+async function testOidcProvider() {
+  const output = $('#oidcPolicyResult');
+  output.textContent = 'Reading provider discovery and signing keys…';
+  try {
+    const result = await api('/api/auth/oidc/test', { method:'POST', body:'{}' });
+    output.textContent = `Verified ${result.issuer} · ${result.signing_keys} signing key${result.signing_keys === 1 ? '' : 's'} · S256 PKCE · ${result.signing_algorithms.join(', ')}`;
+  } catch (error) { output.textContent = error.message; }
 }
 
 function renderPromptTree(path = state.promptPath) {
@@ -4049,6 +4141,8 @@ $('#logoutButton').addEventListener('click', signOut);
 $('#enableRbac').addEventListener('click', enableRbac);
 $('#disableRbac').addEventListener('click', disableRbac);
 $('#createAuthUser').addEventListener('click', createAuthUser);
+$('#saveOidcPolicy').addEventListener('click', saveOidcPolicy);
+$('#testOidcProvider').addEventListener('click', testOidcProvider);
 $('#chatInput').addEventListener('input', resizeComposer);
 $('#chatInput').addEventListener('keydown', event => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); $('#chatForm').requestSubmit(); } });
 $('#newConversation').addEventListener('click', resetConversation);
@@ -4205,6 +4299,16 @@ async function loadWorkspace() {
 async function initialize() {
   try {
     await loadAuthStatus();
+    const authQuery = new URLSearchParams(location.search);
+    const authError = authQuery.get('auth_error');
+    if (authError) {
+      $('#loginResult').textContent = authError === 'provider-denied'
+        ? 'The identity provider did not complete sign-in. No SignalRoom session was created.'
+        : 'Enterprise sign-in could not be verified or admitted. Ask an administrator to review the OIDC audit event and claim policy.';
+    }
+    if (authQuery.has('auth') || authError) {
+      history.replaceState(null, '', `${location.pathname}${location.hash || '#investigate'}`);
+    }
     if (state.auth.enabled && !state.auth.authenticated) return;
     await loadWorkspace();
   } catch (error) { toast(error.message); }

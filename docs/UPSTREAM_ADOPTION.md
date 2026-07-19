@@ -13,4 +13,6 @@ The upstream Splunk Discovery Tool was reviewed as a source of proven patterns. 
 | Optional capabilities | Explicit task-bound model profiles |
 | Unified workspace | Focused Investigate, Discovery, Context, and Models surfaces |
 
-Deferred upstream capabilities include OIDC/MFA and external identity recovery beyond the implemented optional local RBAC, external token administration, durable workers, PDF/DOCX ingestion, Chroma, browser regression infrastructure, and the broader capability-pack installer. Those belong in later production increments rather than the initial kernel.
+Single-issuer OIDC/MFA-claim admission and host-only local recovery now extend optional local RBAC. Deferred
+capabilities include SCIM-style identity lifecycle, hard multi-tenant data boundaries, external token
+administration, PDF/DOCX ingestion, Chroma, and the broader capability-pack installer.

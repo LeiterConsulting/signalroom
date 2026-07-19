@@ -353,6 +353,8 @@ class ModelSetupService:
             "profiles": [],
             "download_url": OLLAMA_DOWNLOAD_URL,
         }
+        installed: list[str] = []
+        loaded: list[str] = []
         try:
             async with httpx.AsyncClient(timeout=5) as client:
                 tags_response, version_response = await asyncio.gather(
@@ -379,7 +381,6 @@ class ModelSetupService:
             )
         except (httpx.HTTPError, ValueError) as exc:
             ollama["error"] = str(exc)
-            installed = []
         ollama["profiles"] = [
             {
                 "id": profile.id,

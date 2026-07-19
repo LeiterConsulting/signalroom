@@ -341,7 +341,25 @@ unless the administrator explicitly requests verified-chain backfill.
 
 SignalRoom is an MCP client of a Splunk MCP server and an MCP server to agent hosts. That lets another agent call the controlled, domain-specific workflows without receiving raw Splunk credentials.
 
+## External identity remains authentication evidence
+
+`OIDCService` supports one opt-in issuer only after local RBAC is active. Browser login uses authorization code plus
+S256 PKCE. Durable, ten-minute, one-use transactions bind a random state, nonce digest, verifier, and initiating
+source. The callback consumes the transaction before token exchange, validates the browser state cookie, then
+verifies the ID token against exact issuer and audience, provider JWKS, an asymmetric algorithm allowlist, expiry,
+issued-at time, nonce, and authorized party when multiple audiences are present.
+
+Exact tenant and group claims form the admission contract. Signed `acr` and/or `amr` values form the provider MFA
+evidence contract. The immutable `(issuer, sub)` pair is the only external identity key; display names and local
+handles are attributes and never linking keys. Provider groups deterministically derive SignalRoom role and the
+policy independently decides Primary Splunk assignment. Policy changes revoke all external sessions.
+
+The provider authenticates; SignalRoom continues to authorize every API request and own its audit record. This is
+not data-plane tenant isolation. One active local administrator must remain for recovery. The `signalroom-access`
+host command can replace an active local password and revoke its sessions through direct data-directory authority;
+there is deliberately no remote recovery route.
+
 ## Next production increments
 
-1. OIDC/MFA integration, account recovery, and tenant boundaries beyond local RBAC
-2. Deployment-specific audit retention, dashboards, alerts, and destination-side deduplication policy
+1. Deployment-specific audit retention, dashboards, alerts, and destination-side deduplication policy
+2. Multi-instance tenancy, per-connection authorization, and identity lifecycle provisioning/deprovisioning

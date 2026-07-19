@@ -170,6 +170,7 @@ class ConfigStore:
             "delivery_soar_auth_token": "SIGNALROOM_SOAR_AUTH_TOKEN",
             "audit_hec_url": "SIGNALROOM_AUDIT_HEC_URL",
             "audit_hec_token": "SIGNALROOM_AUDIT_HEC_TOKEN",
+            "oidc_client_secret": "SIGNALROOM_OIDC_CLIENT_SECRET",
         }
         env_name = env_names.get(name, "")
         return bool(env_name and os.getenv(env_name, ""))
@@ -185,6 +186,7 @@ class ConfigStore:
             "delivery_soar_auth_token": "SIGNALROOM_SOAR_AUTH_TOKEN",
             "audit_hec_url": "SIGNALROOM_AUDIT_HEC_URL",
             "audit_hec_token": "SIGNALROOM_AUDIT_HEC_TOKEN",
+            "oidc_client_secret": "SIGNALROOM_OIDC_CLIENT_SECRET",
         }
         return os.getenv(env_names.get(name, ""), "") or self.vault.load().get(name, "")
 

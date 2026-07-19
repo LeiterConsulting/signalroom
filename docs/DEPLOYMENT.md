@@ -56,8 +56,44 @@ requires that administrator's password, revokes all sessions, and returns to loc
 Re-enabling requires an existing administrator credential. Identity state is stored in `data/auth.db` and is
 preserved by normal uninstall; `-PurgeData` / `--purge-data` removes it with the rest of the data directory.
 
-Local mode gives every caller administrator authority. It must remain loopback-bound. Local RBAC supplies named
-authorization but not TLS, MFA, SSO, tenant isolation, or password recovery.
+Local mode gives every caller administrator authority. It must remain loopback-bound. SignalRoom does not terminate
+TLS; keep named access behind a controlled HTTPS reverse proxy.
+
+### Optional enterprise OIDC
+
+After local RBAC is active, a SignalRoom administrator can configure one provider under **Setup → Access control →
+Enterprise identity**:
+
+1. Register the exact callback URI shown in Setup: `/api/auth/oidc/callback` on the externally visible HTTPS origin.
+2. Provide the provider's exact issuer URL, client ID, and confidential-client secret.
+3. Configure the provider claim names and, where applicable, exact allowed tenant values and admitted groups.
+4. Map analyst and administrator groups. Choose separately whether admitted identities receive Primary Splunk.
+5. Keep at least one required `amr` method (normally `mfa`) or configure accepted provider-specific `acr` values.
+6. Save the policy and run **Test saved provider** before signing out.
+
+The test reads discovery metadata and signing keys; it does not authenticate a user. The browser flow uses
+authorization code plus S256 PKCE and validates issuer, audience, nonce, expiry, signature, tenant, groups, and MFA
+evidence before issuing a local SignalRoom session. Identity linkage uses only `(issuer, sub)`.
+
+The client secret is encrypted in the local vault. An environment-managed deployment can instead set:
+
+```text
+SIGNALROOM_OIDC_CLIENT_SECRET=…
+```
+
+SignalRoom always retains an active local break-glass administrator. If its password is unavailable, stop or
+otherwise control access to the service, open a terminal as the SignalRoom host identity, and run:
+
+```powershell
+signalroom-access reset-password --username security-admin --confirm-local-host-access
+```
+
+Use `--data-dir` when `SIGNALROOM_DATA_DIR` is not available in the recovery shell. The command changes only an
+active local identity, revokes its sessions, and records `auth.local.password.recovered`. It cannot change an OIDC
+identity. Direct data-directory access is the recovery authority, so restrict that directory accordingly.
+
+OIDC tenant/group admission does not partition artifacts, cases, or a shared Splunk connection into independent
+tenants. Deploy separate instances where hard data-plane tenancy is required.
 
 ## Splunk TLS certificates
 

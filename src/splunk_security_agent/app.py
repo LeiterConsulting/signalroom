@@ -10,14 +10,15 @@ from pathlib import Path
 from typing import Annotated, Any
 
 from fastapi import FastAPI, File, HTTPException, Request, Response, UploadFile
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from .agents import SecurityAgent
 from .assurance import AssuranceResponseService, AssuranceService, AssuranceStore
 from .audit import AuditStore, bind_audit_actor, reset_audit_actor
 from .audit_export import AuditExportStore, SplunkAuditExportService
-from .auth import AuthService, AuthStore
+from .auth import AuthService, AuthStore, OIDCError, OIDCService
+from .auth.oidc import OIDC_STATE_COOKIE
 from .auth.service import CSRF_COOKIE, SESSION_COOKIE
 from .benchmarks import (
     EvaluationSuiteService,
@@ -55,6 +56,7 @@ from .schemas import (
     AuthBootstrapRequest,
     AuthDisableRequest,
     AuthLoginRequest,
+    AuthOIDCPolicyUpdate,
     AuthUserCreate,
     AuthUserUpdate,
     CaseCreate,
@@ -192,6 +194,7 @@ class Services:
         )
         self.auth_store = AuthStore(DATA / "auth.db")
         self.auth = AuthService(self.auth_store, self.audit)
+        self.oidc = OIDCService(self.auth_store, self.auth, self.config, self.audit)
         self.discovery_job_store = DiscoveryJobStore(DATA / "discovery_jobs.db")
         self.assurance_store = AssuranceStore(DATA / "assurance.db")
         self.delivery_store = DeliveryStore(DATA / "delivery.db")
@@ -388,6 +391,8 @@ AUTH_PUBLIC_PATHS = {
     "/api/auth/status",
     "/api/auth/bootstrap",
     "/api/auth/login",
+    "/api/auth/oidc/start",
+    "/api/auth/oidc/callback",
 }
 
 
@@ -505,7 +510,14 @@ async def health() -> dict[str, Any]:
 @app.get("/api/auth/status")
 async def auth_status(request: Request) -> dict[str, Any]:
     token = request.cookies.get(SESSION_COOKIE, "")
-    return services.auth.status(token)
+    result = services.auth.status(token)
+    result["oidc"] = services.oidc.public_status(
+        include_policy=bool(
+            result.get("authenticated")
+            and (result.get("principal") or {}).get("role") == "admin"
+        )
+    )
+    return result
 
 
 @app.post("/api/auth/bootstrap")
@@ -542,7 +554,84 @@ async def auth_login(value: AuthLoginRequest, request: Request, response: Respon
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     _set_auth_cookies(response, request, session)
     response.headers["Cache-Control"] = "no-store"
-    return services.auth.status(session["token"])
+    result = services.auth.status(session["token"])
+    result["oidc"] = services.oidc.public_status(
+        include_policy=session["user"]["role"] == "admin"
+    )
+    return result
+
+
+@app.get("/api/auth/oidc/start")
+async def auth_oidc_start(request: Request) -> RedirectResponse:
+    try:
+        result = await services.oidc.begin(
+            source=request.client.host if request.client else "unknown"
+        )
+    except (OIDCError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    response = RedirectResponse(result["authorization_url"], status_code=303)
+    response.set_cookie(
+        OIDC_STATE_COOKIE,
+        result["state"],
+        max_age=600,
+        httponly=True,
+        secure=request.url.scheme == "https",
+        samesite="lax",
+        path="/api/auth/oidc/callback",
+    )
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@app.get("/api/auth/oidc/callback")
+async def auth_oidc_callback(
+    request: Request,
+    code: str = "",
+    state: str = "",
+    error: str = "",
+) -> RedirectResponse:
+    if error:
+        services.audit.record(
+            "auth.oidc.provider.denied",
+            "login",
+            target_type="oidc-policy",
+            target_id=services.auth_store.oidc_policy()["issuer_url"] or "disabled",
+            outcome="denied",
+            summary="The identity provider did not complete enterprise sign-in.",
+            metadata={"provider_error": error[:120]},
+            actor="anonymous",
+        )
+        response = RedirectResponse("/?auth_error=provider-denied", status_code=303)
+    else:
+        try:
+            session = await services.oidc.complete(
+                code=code,
+                state=state,
+                state_cookie=request.cookies.get(OIDC_STATE_COOKIE, ""),
+                source=request.client.host if request.client else "unknown",
+            )
+        except (OIDCError, ValueError, PermissionError) as exc:
+            services.audit.record(
+                "auth.oidc.session.denied",
+                "login",
+                target_type="oidc-policy",
+                target_id=services.auth_store.oidc_policy()["issuer_url"] or "disabled",
+                outcome="denied",
+                summary="Enterprise sign-in failed verification or admission.",
+                metadata={"reason": str(exc)[:500]},
+                actor="anonymous",
+            )
+            response = RedirectResponse("/?auth_error=verification-failed", status_code=303)
+        else:
+            response = RedirectResponse("/?auth=enterprise#investigate", status_code=303)
+            _set_auth_cookies(response, request, session)
+    response.delete_cookie(
+        OIDC_STATE_COOKIE,
+        path="/api/auth/oidc/callback",
+        samesite="lax",
+    )
+    response.headers["Cache-Control"] = "no-store"
+    return response
 
 
 @app.post("/api/auth/logout")
@@ -571,6 +660,24 @@ async def auth_disable(value: AuthDisableRequest, request: Request, response: Re
 @app.get("/api/auth/users")
 async def auth_users() -> list[dict[str, Any]]:
     return services.auth.users()
+
+
+@app.put("/api/auth/oidc/policy")
+async def auth_oidc_policy(
+    value: AuthOIDCPolicyUpdate, request: Request
+) -> dict[str, Any]:
+    try:
+        return await services.oidc.update_policy(value, actor=request.state.principal)
+    except (OIDCError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/auth/oidc/test")
+async def auth_oidc_test() -> dict[str, Any]:
+    try:
+        return await services.oidc.probe()
+    except (OIDCError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.post("/api/auth/users", status_code=201)
