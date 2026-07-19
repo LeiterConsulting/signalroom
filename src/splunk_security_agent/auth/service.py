@@ -23,6 +23,7 @@ ADMIN_MUTATION_PREFIXES = (
     "/api/model-setup/pull",
     "/api/model-setup/activate",
     "/api/model-trust",
+    "/api/benchmarks/suites",
     "/api/detection-repository/",
     "/api/workload/",
 )

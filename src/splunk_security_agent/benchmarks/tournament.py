@@ -11,6 +11,7 @@ from ..progress import ProgressCallback, report_progress
 from .scenarios import GOLDEN_SCENARIOS, suite_version
 from .service import GoldenBenchmarkService
 from .store import GoldenBenchmarkStore
+from .suites import BUILTIN_SUITE_ID
 from .tournament_store import ModelTournamentStore
 
 PROMOTION_TARGETS = {
@@ -67,11 +68,25 @@ class ModelTournamentService:
             },
         }
 
+    def _resolve_suite(self, suite_id: str) -> dict[str, Any]:
+        resolver = getattr(self.benchmarks, "resolve_suite", None)
+        if callable(resolver):
+            return resolver(suite_id)
+        if suite_id != BUILTIN_SUITE_ID:
+            raise KeyError(f"Unknown evaluation suite: {suite_id}")
+        return {
+            "id": BUILTIN_SUITE_ID,
+            "name": "SignalRoom core safety gate",
+            "version": suite_version(),
+            "scenarios": GOLDEN_SCENARIOS,
+        }
+
     async def run(
         self,
         profile_ids: list[str],
         target: str,
         progress: ProgressCallback | None = None,
+        suite_id: str = BUILTIN_SUITE_ID,
     ) -> dict[str, Any]:
         if target not in PROMOTION_TARGETS:
             raise ValueError(f"Unsupported model assignment target: {target}")
@@ -95,11 +110,14 @@ class ModelTournamentService:
                 "Tournament candidates must be enabled local Ollama chat profiles: "
                 + ", ".join(invalid)
             )
+        suite = self._resolve_suite(suite_id)
+        scenarios = list(suite["scenarios"])
         tournament = self.store.create(
             target=target,
             profile_ids=unique_ids,
             assignment_before=getattr(settings, target),
-            suite_version=suite_version(),
+            suite_id=suite_id,
+            suite_version=str(suite["version"]),
             prompt_version=self.benchmarks._prompt_version(),
         )
         try:
@@ -114,7 +132,8 @@ class ModelTournamentService:
                 progress=2,
                 metrics={
                     "profiles": len(unique_ids),
-                    "scenarios_per_profile": len(GOLDEN_SCENARIOS),
+                    "scenarios_per_profile": len(scenarios),
+                    "suite": suite["name"],
                     "external_splunk_calls": 0,
                 },
             )
@@ -163,7 +182,10 @@ class ModelTournamentService:
                         )
 
                 result = await self.benchmarks.run(
-                    profile_id, candidate_progress, raise_errors=False
+                    profile_id,
+                    candidate_progress,
+                    raise_errors=False,
+                    suite_id=suite_id,
                 )
                 candidate_runs.append(result)
                 await report_progress(
@@ -291,8 +313,10 @@ class ModelTournamentService:
             raise ValueError("Only the exact tournament winner can be promoted")
         if self._promotion_for_tournament(tournament_id):
             raise ValueError("This tournament has already produced a routing promotion")
-        if tournament["suite_version"] != suite_version():
-            raise ValueError("The golden scenario suite changed; run a new tournament")
+        if tournament["suite_version"] != self._resolve_suite(
+            tournament["suite_id"]
+        )["version"]:
+            raise ValueError("The evaluated scenario suite changed; run a new tournament")
         if tournament["prompt_version"] != self.benchmarks._prompt_version():
             raise ValueError("The agent prompt contract changed; run a new tournament")
 
@@ -324,7 +348,9 @@ class ModelTournamentService:
                 "tournament promotion",
             )
         before_sha = self._settings_sha(settings)
-        previous_baseline = self.benchmark_store.baseline()
+        previous_baseline = self.benchmark_store.baseline(
+            suite_id=tournament["suite_id"]
+        )
         setattr(settings, target, profile_id)
         self.config.save(settings)
         accepted = self.benchmark_store.accept_baseline(candidate_run["id"])
@@ -380,7 +406,11 @@ class ModelTournamentService:
             raise ValueError(
                 "The routed assignment changed after promotion; automatic rollback is unsafe"
             )
-        current_baseline = self.benchmark_store.baseline()
+        tournament = self.store.get(promotion["tournament_id"])
+        if tournament is None:
+            raise ValueError("The promotion's evaluation suite history is unavailable")
+        suite_id = tournament["suite_id"]
+        current_baseline = self.benchmark_store.baseline(suite_id=suite_id)
         if (
             current_baseline is None
             or current_baseline["id"] != promotion["promoted_run_id"]
@@ -408,11 +438,15 @@ class ModelTournamentService:
         setattr(settings, target, previous.id)
         self.config.save(settings)
         previous_baseline_id = promotion["previous_baseline_run_id"] or None
-        restored = self.benchmark_store.set_baseline(previous_baseline_id)
+        restored = self.benchmark_store.set_baseline(
+            previous_baseline_id, suite_id=suite_id
+        )
         if previous_baseline_id and restored is None:
             setattr(settings, target, promotion["profile_id"])
             self.config.save(settings)
-            self.benchmark_store.set_baseline(promotion["promoted_run_id"])
+            self.benchmark_store.set_baseline(
+                promotion["promoted_run_id"], suite_id=suite_id
+            )
             raise ValueError("The previous benchmark baseline is no longer restorable")
         rolled_back = self.store.mark_rolled_back(promotion_id)
         return {
@@ -465,6 +499,11 @@ class ModelTournamentService:
         rows = []
         completed_durations = []
         for run in runs:
+            task_values: dict[str, list[float]] = {}
+            for result in run.get("results", []):
+                task_values.setdefault(str(result["task_type"]), []).append(
+                    float(result["score"])
+                )
             durations = [
                 int(result.get("duration_ms", 0))
                 for result in run.get("results", [])
@@ -488,8 +527,8 @@ class ModelTournamentService:
                     "critical_failures": run["critical_failures"],
                     "average_duration_ms": average_duration,
                     "task_scores": {
-                        item["task_type"]: item["score"]
-                        for item in run.get("results", [])
+                        task: round(mean(scores), 1)
+                        for task, scores in task_values.items()
                     },
                     "feedback_total": int(feedback.get("total", 0)),
                     "feedback_positive_rate": feedback.get("positive_rate"),
@@ -570,7 +609,13 @@ class ModelTournamentService:
         )
         for index, row in enumerate(rows, start=1):
             row["rank"] = index
-        tasks = sorted({scenario["task_type"] for scenario in GOLDEN_SCENARIOS})
+        tasks = sorted(
+            {
+                str(result["task_type"])
+                for run in runs
+                for result in run.get("results", [])
+            }
+        )
         for task in tasks:
             task_rows = [row for row in rows if task in row["task_scores"]]
             if not task_rows:
@@ -591,20 +636,25 @@ class ModelTournamentService:
         runs: list[dict[str, Any]],
         ranking: list[dict[str, Any]],
     ) -> list[dict[str, Any]]:
-        finalists = [
-            row
-            for row in ranking
-            if row["status"] == "complete" and len(row["task_scores"]) == len(GOLDEN_SCENARIOS)
-        ][:2]
+        finalists = [row for row in ranking if row["status"] == "complete"][:2]
         if len(finalists) < 2:
             return []
         run_by_profile = {run["profile_id"]: run for run in runs}
+        first_id, second_id = finalists[0]["profile_id"], finalists[1]["profile_id"]
+        first_results = run_by_profile[first_id].get("results", [])
+        first_scenarios = {item["scenario_id"] for item in first_results}
+        second_scenarios = {
+            item["scenario_id"]
+            for item in run_by_profile[second_id].get("results", [])
+        }
+        if not first_scenarios or first_scenarios != second_scenarios:
+            return []
         pairs = []
-        for scenario in GOLDEN_SCENARIOS:
-            first_id, second_id = finalists[0]["profile_id"], finalists[1]["profile_id"]
+        for scenario in first_results:
+            scenario_id = str(scenario["scenario_id"])
             flip = int(
                 hashlib.sha256(
-                    f"{tournament_id}:{scenario['id']}".encode()
+                    f"{tournament_id}:{scenario_id}".encode()
                 ).hexdigest(),
                 16,
             ) % 2
@@ -612,20 +662,20 @@ class ModelTournamentService:
             a_result = next(
                 item
                 for item in run_by_profile[a_id]["results"]
-                if item["scenario_id"] == scenario["id"]
+                if item["scenario_id"] == scenario_id
             )
             b_result = next(
                 item
                 for item in run_by_profile[b_id]["results"]
-                if item["scenario_id"] == scenario["id"]
+                if item["scenario_id"] == scenario_id
             )
             pair_id = hashlib.sha256(
-                f"{tournament_id}:{scenario['id']}:blind".encode()
+                f"{tournament_id}:{scenario_id}:blind".encode()
             ).hexdigest()[:20]
             pairs.append(
                 {
                     "id": pair_id,
-                    "scenario_id": scenario["id"],
+                    "scenario_id": scenario_id,
                     "title": scenario["title"],
                     "task_type": scenario["task_type"],
                     "a_profile_id": a_id,
@@ -680,6 +730,7 @@ class ModelTournamentService:
             "model": winner["model"],
             "run_id": winner["run_id"],
             "target": tournament["target"],
+            "suite_id": tournament["suite_id"],
             "assignment_before": tournament["assignment_before"],
             "change_required": change_required,
             "score": winner["score"],
@@ -713,6 +764,7 @@ class ModelTournamentService:
     ) -> str:
         payload = {
             "target": tournament["target"],
+            "suite_id": tournament["suite_id"],
             "assignment_before": tournament["assignment_before"],
             "suite_version": tournament["suite_version"],
             "prompt_version": tournament["prompt_version"],

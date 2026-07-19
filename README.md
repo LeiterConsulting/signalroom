@@ -579,8 +579,31 @@ RBAC gives those actions named role and connection boundaries. Durable manual di
 cancellation, restart recovery, and retained results. Model evaluation and promotion now carry exact revision and
 digest bindings through operator-signed local attestations. A shared Splunk admission controller now protects
 Investigate, Discovery, Validation, Assurance, and MLTK traffic with live queue state, relative cost preflight,
-per-instance concurrency, and audit-first risk and UTC-day budget policy. The next roadmap increment is broader
-operator-authored evaluation suites built on the durable golden and tournament authorities.
+per-instance concurrency, and audit-first risk and UTC-day budget policy. Operator-authored evaluation suites now
+extend the durable golden and tournament authorities. The next roadmap increment is exporting audit events to a
+dedicated Splunk index under an explicit delivery policy.
+
+### Operator-authored evaluation suites
+
+Models now exposes a local evaluation authority for security-team standards that the generic golden gate cannot
+know. An administrator can author up to 15 organization scenarios with a synthetic evidence fixture, an analyst
+request, an exact expected tool set, forbidden tools, required evidence and conclusion groups, prohibited claims,
+and an expected blocked/not-blocked result. The five built-in controls are always prepended, so a custom suite adds
+rigor but cannot redefine or remove SignalRoom safety controls.
+
+Suite drafts use optimistic revision checks and an exact SHA-256 fingerprint. Publication requires an explicit
+synthetic-data attestation and creates an immutable retained version; later edits create a new draft and version.
+Published suites can be archived without deleting their benchmark, review, or promotion history. Only unpublished
+drafts can be deleted.
+
+A published suite can drive either a single-profile golden run or a multi-profile tournament. Runs and accepted
+baselines are suite-scoped, and tournaments bind the suite ID and composite version into their blind review and
+promotion fingerprint. Promotion fails closed if the published suite, prompt, route assignment, or evaluated model
+artifact changed. Rollback restores the baseline for that exact suite.
+
+All organization fixtures execute in the same temporary evidence database and instrumented demo-tool boundary as
+the core gate. Configured Splunk, Hugging Face hosted inference, production evidence, and persistent RAG context are
+not contacted. This is a deterministic local regression authority, not a live Splunk integration test.
 
 ### Splunk workload protection
 

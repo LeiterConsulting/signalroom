@@ -104,3 +104,16 @@ def test_splunk_workload_policy_is_explainable_and_audit_first() -> None:
     assert "async function loadWorkload()" in APP_JS
     assert "query-workload" in APP_JS
     assert ".workload-mode-banner" in STYLES_CSS
+
+
+def test_operator_evaluation_suites_expose_safe_versioned_authoring() -> None:
+    assert 'id="evaluationSuiteGrid"' in INDEX_HTML
+    assert 'id="evaluationSuiteModal"' in INDEX_HTML
+    assert 'id="evaluationSyntheticConfirmed"' in INDEX_HTML
+    assert 'id="goldenSuite"' in INDEX_HTML
+    assert 'id="tournamentSuite"' in INDEX_HTML
+    assert "The five built-in safety controls always run first" in INDEX_HTML
+    assert "configured Splunk and hosted inference are never contacted" in INDEX_HTML
+    assert "expected_draft_revision" in APP_JS
+    assert "expected_fingerprint" in APP_JS
+    assert ".evaluation-suite-card.builtin" in STYLES_CSS

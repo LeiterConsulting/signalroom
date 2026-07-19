@@ -78,6 +78,18 @@ artifact and atomically changes the configured route and accepted regression bas
 binding and exact tournament fingerprint both match.
 Rollback fails closed if either value has changed since promotion.
 
+`EvaluationSuiteService` adds organization-specific controls without creating a second execution engine. Drafts
+live in a separate SQLite authority with optimistic revisions and canonical SHA-256 fingerprints. Publication
+requires a synthetic-data attestation and copies the exact name, description, and scenario contracts into an
+immutable version. Resolution always prepends `GOLDEN_SCENARIOS`; custom IDs cannot collide with a built-in
+control. A composite version binds the built-in suite version to the published custom fingerprint.
+
+Golden runs, accepted baselines, tournaments, blind comparisons, promotion fingerprints, and rollback now retain
+the suite ID in addition to that composite version. Baselines are scoped per suite. Custom fixtures are loaded only
+into the benchmark's temporary evidence database and execute through `InstrumentedDemoSplunk`, so suite authoring
+does not grant live Splunk access or hosted inference authority. Archived suites retain all published versions and
+results but cannot start a new run.
+
 ### Deterministic routes precede agentic behavior
 
 High-confidence asks use deterministic read-only MCP plans capped by `max_agent_steps`. Discovery,
@@ -311,6 +323,5 @@ SignalRoom is an MCP client of a Splunk MCP server and an MCP server to agent ho
 
 ## Next production increments
 
-1. Broader operator-authored evaluation suites beyond the durable golden, tournament, and feedback history
-2. Audit events sent to a dedicated Splunk index
-3. OIDC/MFA integration, account recovery, and tenant boundaries beyond local RBAC
+1. Audit events sent to a dedicated Splunk index
+2. OIDC/MFA integration, account recovery, and tenant boundaries beyond local RBAC

@@ -22,6 +22,7 @@ class ModelTournamentStore:
                 CREATE TABLE IF NOT EXISTS model_tournaments (
                     id TEXT PRIMARY KEY,
                     target TEXT NOT NULL,
+                    suite_id TEXT NOT NULL DEFAULT 'builtin-core',
                     status TEXT NOT NULL,
                     profile_ids TEXT NOT NULL,
                     assignment_before TEXT NOT NULL,
@@ -74,6 +75,15 @@ class ModelTournamentStore:
                         f"ALTER TABLE model_promotions ADD COLUMN {name} "
                         "TEXT NOT NULL DEFAULT ''"
                     )
+            tournament_columns = {
+                str(row["name"])
+                for row in db.execute("PRAGMA table_info(model_tournaments)").fetchall()
+            }
+            if "suite_id" not in tournament_columns:
+                db.execute(
+                    "ALTER TABLE model_tournaments ADD COLUMN "
+                    "suite_id TEXT NOT NULL DEFAULT 'builtin-core'"
+                )
             now = datetime.now(UTC).isoformat()
             db.execute(
                 """UPDATE model_tournaments
@@ -97,6 +107,7 @@ class ModelTournamentStore:
         target: str,
         profile_ids: list[str],
         assignment_before: str,
+        suite_id: str,
         suite_version: str,
         prompt_version: str,
     ) -> dict[str, Any]:
@@ -105,13 +116,14 @@ class ModelTournamentStore:
         with self._lock, self.connect() as db:
             db.execute(
                 """INSERT INTO model_tournaments
-                (id,target,status,profile_ids,assignment_before,suite_version,prompt_version,
+                (id,target,suite_id,status,profile_ids,assignment_before,suite_version,prompt_version,
                 candidate_run_ids,ranking,review_pairs,recommendation,fingerprint,error,
                 created_at,started_at,completed_at,updated_at)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     tournament_id,
                     target,
+                    suite_id,
                     "running",
                     json.dumps(profile_ids),
                     assignment_before,
@@ -295,6 +307,7 @@ class ModelTournamentStore:
         return {
             "id": row["id"],
             "target": row["target"],
+            "suite_id": row["suite_id"],
             "status": row["status"],
             "profile_ids": json.loads(row["profile_ids"]),
             "assignment_before": row["assignment_before"],

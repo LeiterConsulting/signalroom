@@ -18,7 +18,8 @@ class GoldenBenchmarkStore:
             db.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS benchmark_runs (
-                    id TEXT PRIMARY KEY, suite_version TEXT NOT NULL, profile_id TEXT NOT NULL,
+                    id TEXT PRIMARY KEY, suite_id TEXT NOT NULL DEFAULT 'builtin-core',
+                    suite_version TEXT NOT NULL, profile_id TEXT NOT NULL,
                     model TEXT NOT NULL, prompt_version TEXT NOT NULL, status TEXT NOT NULL,
                     score REAL NOT NULL, pass_rate REAL NOT NULL, critical_failures INTEGER NOT NULL,
                     gate TEXT NOT NULL, feedback TEXT NOT NULL, comparison TEXT NOT NULL,
@@ -50,6 +51,11 @@ class GoldenBenchmarkStore:
                     "ALTER TABLE benchmark_runs ADD COLUMN "
                     "artifact_binding TEXT NOT NULL DEFAULT '{}'"
                 )
+            if "suite_id" not in columns:
+                db.execute(
+                    "ALTER TABLE benchmark_runs ADD COLUMN "
+                    "suite_id TEXT NOT NULL DEFAULT 'builtin-core'"
+                )
             now = datetime.now(UTC).isoformat()
             db.execute(
                 """UPDATE benchmark_runs SET status='error',
@@ -71,18 +77,20 @@ class GoldenBenchmarkStore:
         model: str,
         prompt_version: str,
         artifact_binding: dict[str, Any] | None = None,
+        suite_id: str = "builtin-core",
     ) -> dict[str, Any]:
         run_id = str(uuid4())
         now = datetime.now(UTC).isoformat()
         with self._lock, self.connect() as db:
             db.execute(
                 """INSERT INTO benchmark_runs
-                (id,suite_version,profile_id,model,prompt_version,status,score,pass_rate,
+                (id,suite_id,suite_version,profile_id,model,prompt_version,status,score,pass_rate,
                 critical_failures,gate,feedback,comparison,is_baseline,error,created_at,
                 started_at,completed_at,artifact_binding)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     run_id,
+                    suite_id,
                     suite_version,
                     profile_id,
                     model,
@@ -178,25 +186,43 @@ class GoldenBenchmarkStore:
     def accept_baseline(self, run_id: str) -> dict[str, Any] | None:
         return self.set_baseline(run_id)
 
-    def set_baseline(self, run_id: str | None) -> dict[str, Any] | None:
+    def set_baseline(
+        self, run_id: str | None, *, suite_id: str = ""
+    ) -> dict[str, Any] | None:
         if run_id is None:
             with self._lock, self.connect() as db:
-                db.execute("UPDATE benchmark_runs SET is_baseline=0 WHERE is_baseline=1")
+                if suite_id:
+                    db.execute(
+                        """UPDATE benchmark_runs SET is_baseline=0
+                        WHERE is_baseline=1 AND suite_id=?""",
+                        (suite_id,),
+                    )
+                else:
+                    db.execute("UPDATE benchmark_runs SET is_baseline=0 WHERE is_baseline=1")
             return None
         current = self.get(run_id)
         if current is None or current["status"] != "complete" or not current["gate"].get("ready"):
             return None
+        if suite_id and current["suite_id"] != suite_id:
+            return None
         with self._lock, self.connect() as db:
-            db.execute("UPDATE benchmark_runs SET is_baseline=0 WHERE is_baseline=1")
+            db.execute(
+                """UPDATE benchmark_runs SET is_baseline=0
+                WHERE is_baseline=1 AND suite_id=?""",
+                (current["suite_id"],),
+            )
             db.execute("UPDATE benchmark_runs SET is_baseline=1 WHERE id=?", (run_id,))
         return self.get(run_id)
 
-    def baseline(self, exclude_run_id: str = "") -> dict[str, Any] | None:
+    def baseline(
+        self, exclude_run_id: str = "", *, suite_id: str = "builtin-core"
+    ) -> dict[str, Any] | None:
         with self.connect() as db:
             row = db.execute(
-                """SELECT id FROM benchmark_runs WHERE is_baseline=1 AND id<>?
+                """SELECT id FROM benchmark_runs
+                WHERE is_baseline=1 AND suite_id=? AND id<>?
                 ORDER BY completed_at DESC LIMIT 1""",
-                (exclude_run_id,),
+                (suite_id, exclude_run_id),
             ).fetchone()
         return self.get(str(row["id"])) if row else None
 
@@ -212,11 +238,18 @@ class GoldenBenchmarkStore:
             ).fetchall()
         return self._run(row, results)
 
-    def list(self, limit: int = 20) -> list[dict[str, Any]]:
+    def list(self, limit: int = 20, *, suite_id: str = "") -> list[dict[str, Any]]:
         with self.connect() as db:
-            rows = db.execute(
-                "SELECT * FROM benchmark_runs ORDER BY created_at DESC LIMIT ?", (limit,)
-            ).fetchall()
+            if suite_id:
+                rows = db.execute(
+                    """SELECT * FROM benchmark_runs WHERE suite_id=?
+                    ORDER BY created_at DESC LIMIT ?""",
+                    (suite_id, limit),
+                ).fetchall()
+            else:
+                rows = db.execute(
+                    "SELECT * FROM benchmark_runs ORDER BY created_at DESC LIMIT ?", (limit,)
+                ).fetchall()
             run_ids = [str(row["id"]) for row in rows]
             result_rows = (
                 db.execute(
@@ -235,6 +268,7 @@ class GoldenBenchmarkStore:
     def _run(row: sqlite3.Row, results: list[sqlite3.Row]) -> dict[str, Any]:
         return {
             "id": row["id"],
+            "suite_id": row["suite_id"],
             "suite_version": row["suite_version"],
             "profile_id": row["profile_id"],
             "model": row["model"],

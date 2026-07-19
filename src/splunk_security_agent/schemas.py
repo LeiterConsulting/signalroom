@@ -263,6 +263,59 @@ class AnalystFeedbackCreate(BaseModel):
 
 class GoldenBenchmarkRunCreate(BaseModel):
     profile_id: str = Field(min_length=1, max_length=160)
+    suite_id: str = Field(default="builtin-core", min_length=1, max_length=160)
+
+
+EvaluationToolName = Literal[
+    "get_info",
+    "get_indexes",
+    "get_metadata",
+    "get_knowledge_objects",
+    "run_query",
+]
+
+
+class EvaluationScenario(BaseModel):
+    id: str = Field(
+        min_length=3,
+        max_length=80,
+        pattern=r"^[a-z0-9][a-z0-9-]*[a-z0-9]$",
+    )
+    title: str = Field(min_length=3, max_length=240)
+    task_type: str = Field(min_length=1, max_length=80)
+    mode: Literal["general", "discovery", "detection", "hunt", "triage", "spl", "brief"]
+    message: str = Field(min_length=3, max_length=4000)
+    fixture_title: str = Field(min_length=3, max_length=240)
+    fixture_content: str = Field(min_length=3, max_length=20000)
+    expected_tools: list[EvaluationToolName] = Field(default_factory=list, max_length=5)
+    forbidden_tools: list[EvaluationToolName] = Field(default_factory=list, max_length=5)
+    evidence_groups: list[list[str]] = Field(min_length=1, max_length=12)
+    conclusion_groups: list[list[str]] = Field(min_length=1, max_length=12)
+    forbidden_claims: list[str] = Field(default_factory=list, max_length=20)
+    expected_blocked: bool = False
+
+
+class EvaluationSuiteCreate(BaseModel):
+    name: str = Field(min_length=3, max_length=160)
+    description: str = Field(default="", max_length=4000)
+    scenarios: list[EvaluationScenario] = Field(default_factory=list, max_length=15)
+
+
+class EvaluationSuiteUpdate(BaseModel):
+    expected_draft_revision: int = Field(ge=1)
+    name: str = Field(min_length=3, max_length=160)
+    description: str = Field(default="", max_length=4000)
+    scenarios: list[EvaluationScenario] = Field(default_factory=list, max_length=15)
+
+
+class EvaluationSuitePublishRequest(BaseModel):
+    expected_draft_revision: int = Field(ge=1)
+    expected_fingerprint: str = Field(min_length=64, max_length=64)
+    synthetic_data_confirmed: bool
+
+
+class EvaluationSuiteArchiveRequest(BaseModel):
+    archived: bool = True
 
 
 ModelAssignmentTarget = Literal["default_chat_model", "security_reasoning_model"]
@@ -271,6 +324,7 @@ ModelAssignmentTarget = Literal["default_chat_model", "security_reasoning_model"
 class ModelTournamentRunCreate(BaseModel):
     profile_ids: list[str] = Field(min_length=2, max_length=8)
     target: ModelAssignmentTarget = "security_reasoning_model"
+    suite_id: str = Field(default="builtin-core", min_length=1, max_length=160)
 
 
 class ModelTournamentReviewRequest(BaseModel):

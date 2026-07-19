@@ -34,6 +34,7 @@ class FakeGoldenBenchmarks:
         progress: Any = None,
         *,
         raise_errors: bool = True,
+        suite_id: str = "builtin-core",
     ) -> dict[str, Any]:
         del raise_errors
         profile = next(item for item in self.config.load().models if item.id == profile_id)
@@ -47,6 +48,7 @@ class FakeGoldenBenchmarks:
                 "status": "approved",
                 "trusted": True,
             },
+            suite_id,
         )
         score = self.SCORES[profile_id]
         for index, scenario in enumerate(GOLDEN_SCENARIOS):

@@ -6,7 +6,7 @@
   <meta name="description" content="Local-first Splunk security agent with model routing, discovery, and evidence-backed chat.">
   <title>SignalRoom · Splunk Security Agent</title>
   <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 64 64%22><rect width=%2264%22 height=%2264%22 rx=%2214%22 fill=%22%2314251d%22/><path d=%22M17 40l10-10 8 8 13-15%22 fill=%22none%22 stroke=%22%233ed387%22 stroke-width=%226%22 stroke-linecap=%22round%22 stroke-linejoin=%22round%22/></svg>">
-  <link rel="stylesheet" href="/static/styles.css">
+  <link rel="stylesheet" href="/static/styles.css?v=20260719-evaluation-suites">
 </head>
 <body>
   <div class="app-shell">
@@ -332,12 +332,18 @@
         </section>
         <div class="routing-map"><span>Operator question</span><b aria-hidden="true">→</b><span>Task router</span><b aria-hidden="true">→</b><div><em>General agent</em><em>Security reasoning</em><em>Cyber retrieval</em><em>Evidence reranking</em><em>Entity extraction</em></div></div>
         <div class="model-grid" id="modelGrid"></div>
+        <section class="evaluation-suites" aria-labelledby="evaluationSuitesTitle">
+          <header><div><span>ORGANIZATION EVALUATION SUITES</span><h3 id="evaluationSuitesTitle">Test the analyst outcomes your environment requires</h3><p>Add synthetic fixtures and explicit tool, evidence, conclusion, and safety expectations to the immutable SignalRoom core gate. Published versions are exact and durable; configured Splunk and hosted inference are never contacted.</p></div><button class="button primary" id="newEvaluationSuite" type="button">New evaluation suite</button></header>
+          <div class="evaluation-suite-grid" id="evaluationSuiteGrid"><div class="empty-inline compact-empty">Loading local evaluation authority…</div></div>
+          <details class="evaluation-suite-contract"><summary>Authoring and execution boundaries</summary><ul><li>The five built-in safety controls always run first and cannot be replaced.</li><li>Fixtures must be synthetic and free of credentials or live investigation data.</li><li>Drafts are editable with revision checks; every published version is immutable.</li><li>Only local Ollama inference, an isolated evidence store, and instrumented demo tools are used.</li></ul></details>
+        </section>
         <section class="model-tournament" aria-labelledby="modelTournamentTitle">
           <header><div><span>LOCAL MODEL TOURNAMENT</span><h3 id="modelTournamentTitle">Prove a routing change before promoting it</h3><p>Run selected Ollama profiles through identical synthetic investigations, compare the two finalists without model labels, and bind the reviewed winner to an exact promotion fingerprint. Configured Splunk and Hugging Face are never contacted.</p></div><span id="tournamentStatus" class="subtle-pill">No tournament yet</span></header>
           <div class="tournament-controls">
             <label><span>Routing assignment</span><select id="tournamentTarget"><option value="security_reasoning_model">Security reasoning route</option><option value="default_chat_model">General investigation route</option></select><small id="tournamentCurrentAssignment">Loading current assignment…</small></label>
+            <label><span>Evaluation suite</span><select id="tournamentSuite"></select><small>Published organization suites add their controls to the core gate.</small></label>
             <fieldset><legend>Local candidates</legend><div id="tournamentProfiles" class="tournament-profiles"></div></fieldset>
-            <div><button class="button primary" id="runModelTournament" type="button">Run tournament</button><small>Five scenarios per profile · sequential local inference · explicit promotion only</small></div>
+            <div><button class="button primary" id="runModelTournament" type="button">Run tournament</button><small>Selected suite per profile · sequential local inference · explicit promotion only</small></div>
           </div>
           <article class="operation-card tournament-operation" id="tournamentProgress" aria-live="polite" hidden>
             <header><div><span class="operation-kicker">LOCAL CANDIDATE COMPARISON</span><h3 class="operation-label">Preparing model tournament</h3></div><span class="operation-elapsed">0s</span></header>
@@ -346,12 +352,12 @@
             <div class="operation-metrics"></div><ol class="operation-steps"></ol>
           </article>
           <div id="tournamentLatest" class="tournament-latest"><div class="empty-inline compact-empty">Choose at least two local profiles to create a reviewable comparison.</div></div>
-          <details class="tournament-contract"><summary>Promotion and rollback authority</summary><ul><li>Every candidate receives the same versioned evidence and tool fixtures.</li><li>The two highest-ranked complete runs receive five blind response comparisons.</li><li>Promotion requires the reviewed winner, unchanged model revision, unchanged route, current suite and prompt versions, and the exact fingerprint.</li><li>Rollback is allowed only while the promoted route and accepted baseline remain unchanged.</li></ul></details>
+          <details class="tournament-contract"><summary>Promotion and rollback authority</summary><ul><li>Every candidate receives the same versioned evidence and tool fixtures.</li><li>The two highest-ranked complete runs receive one blind comparison for every evaluated scenario.</li><li>Promotion requires the reviewed winner, unchanged model revision, unchanged route, current suite and prompt versions, and the exact fingerprint.</li><li>Rollback is allowed only while the promoted route and accepted suite baseline remain unchanged.</li></ul></details>
           <section class="tournament-history"><div class="validation-section-heading"><div><span>DURABLE TOURNAMENT HISTORY</span><h4>Reviewed comparisons and routing decisions</h4></div></div><div id="tournamentRunHistory"></div></section>
         </section>
         <section class="golden-benchmarks" aria-labelledby="goldenBenchmarksTitle">
           <header><div><span>LOCAL GOLDEN INVESTIGATIONS</span><h3 id="goldenBenchmarksTitle">Promotion gate for models and prompts</h3><p>Run versioned synthetic investigations through the real agent, local model, evidence retrieval, and instrumented tool planner. Configured Splunk is never contacted.</p></div><span id="goldenSuiteVersion" class="subtle-pill">Loading suite</span></header>
-          <div class="golden-controls"><label><span>Candidate profile</span><select id="goldenProfile"></select></label><div><button class="button primary" id="runGoldenBenchmark" type="button">Run five-scenario gate</button><small>Sequential local inference · 640-token comparison ceiling · zero external Splunk calls</small></div></div>
+          <div class="golden-controls"><label><span>Candidate profile</span><select id="goldenProfile"></select></label><label><span>Evaluation suite</span><select id="goldenSuite"></select></label><div><button class="button primary" id="runGoldenBenchmark" type="button">Run five-scenario gate</button><small>Sequential local inference · 640-token comparison ceiling · zero external Splunk calls</small></div></div>
           <article class="operation-card golden-operation" id="goldenProgress" aria-live="polite" hidden>
             <header><div><span class="operation-kicker">ISOLATED BENCHMARK RUN</span><h3 class="operation-label">Preparing golden investigations</h3></div><span class="operation-elapsed">0s</span></header>
             <p class="operation-detail">Checking the selected local model.</p>
@@ -522,6 +528,30 @@
     </section>
   </div>
 
+  <div class="modal-backdrop" id="evaluationSuiteModal" hidden>
+    <section class="modal evaluation-suite-modal" role="dialog" aria-modal="true" aria-labelledby="evaluationSuiteModalTitle">
+      <header><div><p class="eyebrow">LOCAL EVALUATION AUTHORITY</p><h2 id="evaluationSuiteModalTitle">Edit organization suite</h2></div><button class="icon-button close-evaluation-suite" type="button" aria-label="Close">×</button></header>
+      <form id="evaluationSuiteForm">
+        <div class="evaluation-suite-body">
+          <section class="evaluation-suite-metadata">
+            <div class="form-grid">
+              <label><span>Suite name</span><input id="evaluationSuiteName" required minlength="3" maxlength="160"></label>
+              <label><span>Draft revision</span><input id="evaluationSuiteRevision" readonly></label>
+              <label class="full"><span>Purpose and analyst standard</span><textarea id="evaluationSuiteDescription" rows="3" maxlength="4000"></textarea></label>
+            </div>
+            <div class="evaluation-fingerprint"><span>Exact draft fingerprint</span><code id="evaluationSuiteFingerprint"></code></div>
+          </section>
+          <div class="evaluation-authoring">
+            <aside><header><div><b>Organization scenarios</b><small>Maximum 15 · core five remain required</small></div><button class="button ghost small" id="addEvaluationScenario" type="button">Add scenario</button></header><div id="evaluationScenarioList"></div></aside>
+            <section class="evaluation-scenario-editor" id="evaluationScenarioEditor"></section>
+          </div>
+          <label class="switch-line evaluation-attestation"><span><b>Synthetic fixture attestation</b><small>I confirm these fixtures contain no credentials, live investigation data, or sensitive production records.</small></span><input id="evaluationSyntheticConfirmed" type="checkbox"><span class="switch-control" aria-hidden="true"></span></label>
+        </div>
+        <footer><div class="evaluation-destructive"><button class="button danger small" id="deleteEvaluationSuite" type="button">Delete draft</button><button class="button ghost small" id="archiveEvaluationSuite" type="button">Archive suite</button></div><div class="button-row"><button class="button ghost close-evaluation-suite" type="button">Close</button><button class="button ghost" id="saveEvaluationSuite" type="submit">Save draft</button><button class="button primary" id="publishEvaluationSuite" type="button">Publish exact version</button></div></footer>
+      </form>
+    </section>
+  </div>
+
   <div class="modal-backdrop" id="artifactModal" hidden>
     <section class="modal compact" role="dialog" aria-modal="true" aria-labelledby="artifactTitle"><header><div><p class="eyebrow" id="artifactModalEyebrow">ADD TO CONTEXT</p><h2 id="artifactTitle">New evidence artifact</h2></div><button class="icon-button close-artifact" aria-label="Close">×</button></header><form id="artifactForm"><div class="form-grid"><label class="full"><span>Title</span><input id="newArtifactTitle" required></label><label><span>Type</span><select id="newArtifactKind"><option value="runbook">Runbook</option><option value="threat-intel">Threat intelligence</option><option value="spl">SPL library</option><option value="reference">Reference</option></select></label><label><span>Tags</span><input id="newArtifactTags" placeholder="identity, triage, windows"></label><label class="full"><span>Content</span><textarea id="newArtifactContent" rows="10" required></textarea></label></div><footer><button type="button" class="button ghost close-artifact">Cancel</button><button class="button primary" id="artifactSubmit" type="submit">Index artifact</button></footer></form></section>
   </div>
@@ -606,6 +636,6 @@
     </aside>
   </div>
   <div class="toast" id="toast" role="status"></div>
-  <script src="/static/app.js" defer></script>
+  <script src="/static/app.js?v=20260719-evaluation-suites" defer></script>
 </body>
 </html>

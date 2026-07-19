@@ -19,6 +19,8 @@ from .audit import AuditStore, bind_audit_actor, reset_audit_actor
 from .auth import AuthService, AuthStore
 from .auth.service import CSRF_COOKIE, SESSION_COOKIE
 from .benchmarks import (
+    EvaluationSuiteService,
+    EvaluationSuiteStore,
     GoldenBenchmarkService,
     GoldenBenchmarkStore,
     ModelTournamentService,
@@ -81,6 +83,10 @@ from .schemas import (
     DetectionUpdate,
     DetectionValidationDraftRequest,
     DiscoveryRequest,
+    EvaluationSuiteArchiveRequest,
+    EvaluationSuiteCreate,
+    EvaluationSuitePublishRequest,
+    EvaluationSuiteUpdate,
     GoldenBenchmarkRunCreate,
     ModelActivateRequest,
     ModelArtifactApproval,
@@ -126,6 +132,8 @@ class Services:
         )
         self.evidence = EvidenceStore(DATA / "evidence.db")
         self.feedback = AnalystFeedbackStore(DATA / "feedback.db")
+        self.evaluation_suite_store = EvaluationSuiteStore(DATA / "evaluation_suites.db")
+        self.evaluation_suites = EvaluationSuiteService(self.evaluation_suite_store)
         self.benchmark_store = GoldenBenchmarkStore(DATA / "benchmarks.db")
         self.benchmarks = GoldenBenchmarkService(
             self.config,
@@ -133,6 +141,7 @@ class Services:
             self.benchmark_store,
             DATA / "benchmark_runtime",
             self.model_trust,
+            self.evaluation_suites,
         )
         self.tournament_store = ModelTournamentStore(DATA / "model_tournaments.db")
         self.model_tournaments = ModelTournamentService(
@@ -987,6 +996,132 @@ async def benchmark_overview() -> dict[str, Any]:
     }
 
 
+@app.get("/api/benchmarks/suites/{suite_id}")
+async def evaluation_suite(suite_id: str) -> dict[str, Any]:
+    try:
+        return services.evaluation_suites.get(suite_id)
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+
+@app.post("/api/benchmarks/suites")
+async def create_evaluation_suite(
+    value: EvaluationSuiteCreate, request: Request
+) -> dict[str, Any]:
+    principal = getattr(request.state, "principal", {}) or {}
+    actor = str(principal.get("username") or "local-operator")
+    result = services.evaluation_suites.create(value, actor)
+    services.audit.record(
+        "evaluation.suite.created",
+        "create",
+        target_type="evaluation-suite",
+        target_id=result["id"],
+        summary="An editable local operator evaluation suite was created.",
+        metadata={
+            "draft_revision": result["draft_revision"],
+            "draft_fingerprint": result["draft_fingerprint"],
+        },
+    )
+    return result
+
+
+@app.patch("/api/benchmarks/suites/{suite_id}")
+async def update_evaluation_suite(
+    suite_id: str, value: EvaluationSuiteUpdate
+) -> dict[str, Any]:
+    try:
+        result = services.evaluation_suites.update(suite_id, value)
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    services.audit.record(
+        "evaluation.suite.draft.updated",
+        "update",
+        target_type="evaluation-suite",
+        target_id=suite_id,
+        summary="An operator evaluation draft changed without altering published history.",
+        metadata={
+            "draft_revision": result["draft_revision"],
+            "draft_fingerprint": result["draft_fingerprint"],
+            "custom_scenarios": len(result.get("draft_scenarios") or []),
+        },
+    )
+    return result
+
+
+@app.post("/api/benchmarks/suites/{suite_id}/publish")
+async def publish_evaluation_suite(
+    suite_id: str, value: EvaluationSuitePublishRequest, request: Request
+) -> dict[str, Any]:
+    principal = getattr(request.state, "principal", {}) or {}
+    actor = str(principal.get("username") or "local-operator")
+    try:
+        result = services.evaluation_suites.publish(
+            suite_id,
+            expected_revision=value.expected_draft_revision,
+            expected_fingerprint=value.expected_fingerprint,
+            synthetic_data_confirmed=value.synthetic_data_confirmed,
+            actor=actor,
+        )
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    services.audit.record(
+        "evaluation.suite.published",
+        "publish",
+        target_type="evaluation-suite",
+        target_id=suite_id,
+        summary="An exact synthetic evaluation draft became an immutable suite version.",
+        metadata={
+            "version": result["current_version"],
+            "fingerprint": result["current_fingerprint"],
+            "suite_version": result["suite_version"],
+        },
+    )
+    return result
+
+
+@app.post("/api/benchmarks/suites/{suite_id}/archive")
+async def archive_evaluation_suite(
+    suite_id: str, value: EvaluationSuiteArchiveRequest
+) -> dict[str, Any]:
+    try:
+        result = services.evaluation_suites.archive(suite_id, value.archived)
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    services.audit.record(
+        "evaluation.suite.archive.changed",
+        "archive" if value.archived else "restore",
+        target_type="evaluation-suite",
+        target_id=suite_id,
+        summary="An operator evaluation suite availability changed; history was retained.",
+        metadata={"status": result["status"]},
+    )
+    return result
+
+
+@app.delete("/api/benchmarks/suites/{suite_id}", status_code=204)
+async def delete_evaluation_suite(suite_id: str) -> Response:
+    try:
+        services.evaluation_suites.delete(suite_id)
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    services.audit.record(
+        "evaluation.suite.deleted",
+        "delete",
+        target_type="evaluation-suite",
+        target_id=suite_id,
+        summary="An unpublished operator evaluation draft was deleted.",
+    )
+    return Response(status_code=204)
+
+
 @app.post("/api/benchmarks/run/stream")
 async def run_golden_benchmark(request: GoldenBenchmarkRunCreate) -> StreamingResponse:
     if services.benchmark_lock.locked():
@@ -994,7 +1129,9 @@ async def run_golden_benchmark(request: GoldenBenchmarkRunCreate) -> StreamingRe
 
     async def run(progress: Any) -> dict[str, Any]:
         async with services.benchmark_lock:
-            return await services.benchmarks.run(request.profile_id, progress)
+            return await services.benchmarks.run(
+                request.profile_id, progress, suite_id=request.suite_id
+            )
 
     return _stream_response(run)
 
@@ -1025,6 +1162,7 @@ async def accept_benchmark_baseline(run_id: str) -> dict[str, Any]:
             "profile_id": result["profile_id"],
             "score": result["score"],
             "suite_version": result["suite_version"],
+            "suite_id": result["suite_id"],
             "prompt_version": result["prompt_version"],
             "artifact_fingerprint": trust.get("identity_fingerprint", ""),
         },
@@ -1039,7 +1177,12 @@ async def run_model_tournament(request: ModelTournamentRunCreate) -> StreamingRe
 
     async def run(progress: Any) -> dict[str, Any]:
         async with services.benchmark_lock:
-            return await services.model_tournaments.run(request.profile_ids, request.target, progress)
+            return await services.model_tournaments.run(
+                request.profile_ids,
+                request.target,
+                progress,
+                request.suite_id,
+            )
 
     return _stream_response(run)
 

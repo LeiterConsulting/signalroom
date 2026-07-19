@@ -8,6 +8,7 @@ const state = {
   assurance: null, assurancePolicyDirty: false, connectionDiagnostics: null, queryIntelligence: null,
   workload: null,
   feedbackBenchmarks: null, goldenBenchmarks: null, selectedTournamentId: null, deliveryPolicyDirty: false,
+  evaluationDraft: null, evaluationScenarioIndex: 0,
   deliveryPreview: null, detections: [], activeDetection: null, detectionGitExport: null,
   repositoryStatus: null, repositoryHandoff: null, auth: null, authUsers: [],
   workspaceLoaded: false, assuranceTimer: null, discoveryJobs: null,
@@ -1244,6 +1245,194 @@ function renderModels() {
   renderModelCatalog();
 }
 
+function evaluationSuites() {
+  return state.goldenBenchmarks?.evaluation_suites?.suites || [];
+}
+
+function runnableEvaluationSuites() {
+  return evaluationSuites().filter(item => item.id === 'builtin-core' || (item.status === 'active' && item.current_version > 0));
+}
+
+function evaluationSuiteOptions(selected = 'builtin-core') {
+  return runnableEvaluationSuites().map(item => `<option value="${escapeHtml(item.id)}" ${item.id === selected ? 'selected' : ''}>${escapeHtml(item.name)} · ${item.scenario_count} scenarios</option>`).join('');
+}
+
+function evaluationSuiteName(suiteId) {
+  return evaluationSuites().find(item => item.id === suiteId)?.name || suiteId || 'Core gate';
+}
+
+function renderEvaluationSuites() {
+  const authority = state.goldenBenchmarks?.evaluation_suites;
+  if (!authority) return;
+  $('#evaluationSuiteGrid').innerHTML = (authority.suites || []).map(item => {
+    const builtIn = item.id === 'builtin-core';
+    const customCount = item.draft_dirty ? item.draft_custom_scenario_count : item.custom_scenario_count;
+    const totalCount = item.draft_dirty ? item.draft_scenario_count : item.scenario_count;
+    const version = builtIn ? `CORE · ${item.scenario_count} controls` : item.current_version ? `v${item.current_version} · ${customCount} custom in draft` : 'DRAFT · unpublished';
+    const status = builtIn ? 'always required' : item.status === 'archived' ? 'archived' : item.draft_dirty ? 'draft changes' : 'published';
+    return `<article class="evaluation-suite-card ${builtIn ? 'builtin' : ''} ${escapeHtml(item.status)}">
+      <header><div><span>${escapeHtml(version)}</span><h4>${escapeHtml(item.name)}</h4></div><b>${escapeHtml(status)}</b></header>
+      <p>${escapeHtml(item.description || (builtIn ? 'SignalRoom evidence, safety, tool, and conclusion contracts.' : 'No purpose has been documented yet.'))}</p>
+      <div><span><b>${totalCount}</b> ${item.draft_dirty ? 'draft' : 'total'} scenarios</span><span><b>${customCount}</b> organization controls</span><span><b>${item.versions?.length || (builtIn ? 1 : 0)}</b> retained versions</span></div>
+      <footer><code>${escapeHtml(item.suite_version || item.draft_fingerprint || '')}</code>${builtIn ? '<span class="baseline-badge">Immutable</span>' : `<button class="button ghost small" data-edit-evaluation-suite="${escapeHtml(item.id)}">Open suite</button>`}</footer>
+    </article>`;
+  }).join('');
+}
+
+function newEvaluationScenario(index) {
+  return {
+    id:`organization-control-${index + 1}`, title:'', task_type:'triage', mode:'triage',
+    message:'', fixture_title:'Synthetic organization evidence', fixture_content:'',
+    expected_tools:[], forbidden_tools:['run_query'], evidence_groups:[['']],
+    conclusion_groups:[['']], forbidden_claims:[], expected_blocked:false
+  };
+}
+
+function matchGroupsFromText(value) {
+  return value.split('\n').map(line => line.split('|').map(term => term.trim()).filter(Boolean)).filter(group => group.length);
+}
+
+function matchGroupsToText(groups) {
+  return (groups || []).map(group => group.join(' | ')).join('\n');
+}
+
+function syncEvaluationScenario() {
+  const suite = state.evaluationDraft;
+  const scenario = suite?.draft_scenarios?.[state.evaluationScenarioIndex];
+  if (!scenario || !$('#evaluationScenarioId')) return;
+  scenario.id = $('#evaluationScenarioId').value.trim();
+  scenario.title = $('#evaluationScenarioTitle').value.trim();
+  scenario.task_type = $('#evaluationScenarioTask').value.trim();
+  scenario.mode = $('#evaluationScenarioMode').value;
+  scenario.message = $('#evaluationScenarioMessage').value.trim();
+  scenario.fixture_title = $('#evaluationFixtureTitle').value.trim();
+  scenario.fixture_content = $('#evaluationFixtureContent').value.trim();
+  scenario.expected_tools = $$('#evaluationExpectedTools input:checked').map(node => node.value);
+  scenario.forbidden_tools = $$('#evaluationForbiddenTools input:checked').map(node => node.value);
+  scenario.evidence_groups = matchGroupsFromText($('#evaluationEvidenceGroups').value);
+  scenario.conclusion_groups = matchGroupsFromText($('#evaluationConclusionGroups').value);
+  scenario.forbidden_claims = $('#evaluationForbiddenClaims').value.split('\n').map(value => value.trim()).filter(Boolean);
+  scenario.expected_blocked = $('#evaluationExpectedBlocked').checked;
+}
+
+function renderEvaluationScenarioEditor() {
+  const suite = state.evaluationDraft;
+  const scenarios = suite?.draft_scenarios || [];
+  $('#evaluationScenarioList').innerHTML = scenarios.length ? scenarios.map((scenario,index) => `<button type="button" class="${index === state.evaluationScenarioIndex ? 'active' : ''}" data-evaluation-scenario="${index}"><span>${escapeHtml(scenario.task_type || 'general')}</span><b>${escapeHtml(scenario.title || scenario.id || `Scenario ${index + 1}`)}</b><small>${escapeHtml(scenario.id || 'ID required')}</small></button>`).join('') : '<div class="empty-inline compact-empty">Add an organization scenario to make this draft publishable.</div>';
+  const scenario = scenarios[state.evaluationScenarioIndex];
+  if (!scenario) {
+    $('#evaluationScenarioEditor').innerHTML = '<div class="empty-inline compact-empty">A scenario defines the synthetic evidence, expected behavior, and prohibited behavior that matter to your team.</div>';
+    return;
+  }
+  const tools = ['get_info','get_indexes','get_metadata','get_knowledge_objects','run_query'];
+  const toolChecks = (id, selected) => `<fieldset id="${id}" class="evaluation-tool-checks"><legend>${id === 'evaluationExpectedTools' ? 'Expected tools · exact set' : 'Forbidden tools · critical if called'}</legend>${tools.map(tool => `<label><input type="checkbox" value="${tool}" ${(selected || []).includes(tool) ? 'checked' : ''}><span>${escapeHtml(tool)}</span></label>`).join('')}</fieldset>`;
+  $('#evaluationScenarioEditor').innerHTML = `
+    <header><div><span>SCENARIO ${state.evaluationScenarioIndex + 1} OF ${scenarios.length}</span><h3>Evidence and behavior contract</h3></div><button class="button danger small" type="button" id="removeEvaluationScenario">Remove scenario</button></header>
+    <div class="form-grid">
+      <label><span>Stable scenario ID</span><input id="evaluationScenarioId" required minlength="3" maxlength="80" pattern="[a-z0-9][a-z0-9-]*[a-z0-9]" value="${escapeHtml(scenario.id || '')}"></label>
+      <label><span>Analyst task type</span><input id="evaluationScenarioTask" required maxlength="80" value="${escapeHtml(scenario.task_type || '')}"></label>
+      <label class="full"><span>Outcome title</span><input id="evaluationScenarioTitle" required minlength="3" maxlength="240" value="${escapeHtml(scenario.title || '')}"></label>
+      <label><span>Agent mode</span><select id="evaluationScenarioMode">${['general','discovery','detection','hunt','triage','spl','brief'].map(mode => `<option value="${mode}" ${scenario.mode === mode ? 'selected' : ''}>${mode}</option>`).join('')}</select></label>
+      <label class="evaluation-blocked"><input id="evaluationExpectedBlocked" type="checkbox" ${scenario.expected_blocked ? 'checked' : ''}><span>Agent must block this request</span></label>
+      <label class="full"><span>User request under test</span><textarea id="evaluationScenarioMessage" rows="3" required minlength="3" maxlength="4000">${escapeHtml(scenario.message || '')}</textarea></label>
+      <label class="full"><span>Synthetic evidence title</span><input id="evaluationFixtureTitle" required minlength="3" maxlength="240" value="${escapeHtml(scenario.fixture_title || '')}"></label>
+      <label class="full"><span>Synthetic evidence fixture</span><textarea id="evaluationFixtureContent" rows="6" required minlength="3" maxlength="20000">${escapeHtml(scenario.fixture_content || '')}</textarea><small class="field-help">This is indexed only in the temporary benchmark evidence store.</small></label>
+      ${toolChecks('evaluationExpectedTools', scenario.expected_tools)}
+      ${toolChecks('evaluationForbiddenTools', scenario.forbidden_tools)}
+      <label class="full"><span>Required evidence groups</span><textarea id="evaluationEvidenceGroups" rows="4" required>${escapeHtml(matchGroupsToText(scenario.evidence_groups))}</textarea><small class="field-help">One required group per line; separate acceptable alternatives with <code>|</code>.</small></label>
+      <label class="full"><span>Required conclusion groups</span><textarea id="evaluationConclusionGroups" rows="4" required>${escapeHtml(matchGroupsToText(scenario.conclusion_groups))}</textarea><small class="field-help">Every line must match at least one term in the agent response.</small></label>
+      <label class="full"><span>Prohibited exact claims</span><textarea id="evaluationForbiddenClaims" rows="3">${escapeHtml((scenario.forbidden_claims || []).join('\n'))}</textarea><small class="field-help">One case-insensitive phrase per line; a match is a critical failure.</small></label>
+    </div>`;
+}
+
+function renderEvaluationSuiteModal() {
+  const suite = state.evaluationDraft; if (!suite) return;
+  $('#evaluationSuiteModalTitle').textContent = suite.name || 'Edit organization suite';
+  $('#evaluationSuiteName').value = suite.name || '';
+  $('#evaluationSuiteDescription').value = suite.description || '';
+  $('#evaluationSuiteRevision').value = String(suite.draft_revision || 1);
+  $('#evaluationSuiteFingerprint').textContent = suite.draft_fingerprint || '';
+  $('#evaluationSyntheticConfirmed').checked = false;
+  $('#deleteEvaluationSuite').hidden = suite.current_version > 0;
+  $('#archiveEvaluationSuite').hidden = suite.current_version === 0;
+  $('#archiveEvaluationSuite').textContent = suite.status === 'archived' ? 'Restore suite' : 'Archive suite';
+  $('#saveEvaluationSuite').disabled = suite.status === 'archived';
+  $('#publishEvaluationSuite').disabled = suite.status === 'archived' || !suite.draft_dirty;
+  renderEvaluationScenarioEditor();
+}
+
+async function openEvaluationSuite(suiteId) {
+  try {
+    state.evaluationDraft = await api(`/api/benchmarks/suites/${encodeURIComponent(suiteId)}`);
+    state.evaluationScenarioIndex = 0;
+    renderEvaluationSuiteModal();
+    $('#evaluationSuiteModal').hidden = false;
+  } catch (error) { toast(error.message); }
+}
+
+async function createEvaluationSuite() {
+  try {
+    const created = await api('/api/benchmarks/suites', {method:'POST',body:JSON.stringify({name:'Untitled evaluation suite',description:'',scenarios:[]})});
+    await loadGoldenBenchmarks();
+    await openEvaluationSuite(created.id);
+  } catch (error) { toast(error.message); }
+}
+
+async function saveEvaluationSuiteDraft(showToast = true) {
+  const suite = state.evaluationDraft; if (!suite) return null;
+  syncEvaluationScenario();
+  const payload = {
+    expected_draft_revision:suite.draft_revision,
+    name:$('#evaluationSuiteName').value.trim(),
+    description:$('#evaluationSuiteDescription').value.trim(),
+    scenarios:suite.draft_scenarios || []
+  };
+  const saved = await api(`/api/benchmarks/suites/${encodeURIComponent(suite.id)}`, {method:'PATCH',body:JSON.stringify(payload)});
+  state.evaluationDraft = saved;
+  renderEvaluationSuiteModal();
+  await loadGoldenBenchmarks();
+  if (showToast) toast('Evaluation draft saved locally');
+  return saved;
+}
+
+async function publishEvaluationSuite() {
+  const form = $('#evaluationSuiteForm');
+  if (!form.reportValidity()) return;
+  if (!$('#evaluationSyntheticConfirmed').checked) { toast('Confirm the synthetic fixture attestation before publication'); return; }
+  try {
+    const saved = await saveEvaluationSuiteDraft(false);
+    if (!saved?.draft_scenarios?.length) { toast('Add at least one organization scenario before publication'); return; }
+    const approved = confirm(`Publish immutable evaluation suite v${saved.current_version + 1}?\n\nExact draft fingerprint:\n${saved.draft_fingerprint}\n\nThe five built-in controls will remain required and ${saved.draft_scenarios.length} organization scenario(s) will be added.`);
+    if (!approved) return;
+    const published = await api(`/api/benchmarks/suites/${encodeURIComponent(saved.id)}/publish`, {method:'POST',body:JSON.stringify({expected_draft_revision:saved.draft_revision,expected_fingerprint:saved.draft_fingerprint,synthetic_data_confirmed:true})});
+    state.evaluationDraft = published;
+    renderEvaluationSuiteModal();
+    await loadGoldenBenchmarks();
+    toast(`Evaluation suite v${published.current_version} published`);
+  } catch (error) { toast(error.message); }
+}
+
+async function archiveEvaluationSuite() {
+  const suite = state.evaluationDraft; if (!suite) return;
+  const archived = suite.status !== 'archived';
+  if (archived && !confirm('Archive this suite? Published history and benchmark results will remain available, but new runs will be disabled.')) return;
+  try {
+    state.evaluationDraft = await api(`/api/benchmarks/suites/${encodeURIComponent(suite.id)}/archive`, {method:'POST',body:JSON.stringify({archived})});
+    renderEvaluationSuiteModal(); await loadGoldenBenchmarks();
+    toast(archived ? 'Evaluation suite archived; history retained' : 'Evaluation suite restored');
+  } catch (error) { toast(error.message); }
+}
+
+async function deleteEvaluationSuite() {
+  const suite = state.evaluationDraft; if (!suite) return;
+  if (!confirm('Delete this unpublished evaluation draft? This cannot be undone.')) return;
+  try {
+    await api(`/api/benchmarks/suites/${encodeURIComponent(suite.id)}`, {method:'DELETE'});
+    state.evaluationDraft = null; $('#evaluationSuiteModal').hidden = true;
+    await loadGoldenBenchmarks(); toast('Unpublished evaluation draft deleted');
+  } catch (error) { toast(error.message); }
+}
+
 function benchmarkTime(value) {
   return value ? new Date(value).toLocaleString() : 'not completed';
 }
@@ -1309,21 +1498,25 @@ function renderModelTournaments() {
   const targetSelect = $('#tournamentTarget'); const priorTarget = targetSelect.value || 'security_reasoning_model';
   targetSelect.innerHTML = (overview.targets || []).map(item => `<option value="${escapeHtml(item.id)}">${escapeHtml(item.label)}</option>`).join('');
   if ([...targetSelect.options].some(option => option.value === priorTarget)) targetSelect.value = priorTarget;
+  const suiteSelect = $('#tournamentSuite'); const priorSuite = suiteSelect.value || 'builtin-core';
+  suiteSelect.innerHTML = evaluationSuiteOptions(priorSuite);
+  if ([...suiteSelect.options].some(option => option.value === priorSuite)) suiteSelect.value = priorSuite;
   updateTournamentAssignmentHelp();
   const selectedProfiles = new Set($$('#tournamentProfiles input:checked').map(node => node.value));
   $('#tournamentProfiles').innerHTML = profiles.map(profile => `<label><input type="checkbox" value="${escapeHtml(profile.id)}" ${selectedProfiles.size ? selectedProfiles.has(profile.id) ? 'checked' : '' : 'checked'}><span><b>${escapeHtml(profile.label)}</b><small>${escapeHtml(profile.model)}</small></span></label>`).join('');
-  const tournaments = overview.tournaments || [];
+  const tournaments = (overview.tournaments || []).filter(item => item.suite_id === suiteSelect.value);
   const selected = tournaments.find(item => item.id === state.selectedTournamentId) || tournaments[0];
   if (selected) state.selectedTournamentId = selected.id;
   $('#tournamentLatest').innerHTML = renderTournamentRun(selected, overview);
   $('#tournamentStatus').textContent = (overview.active_promotions || []).length ? `${overview.active_promotions.length} promoted route${overview.active_promotions.length === 1 ? '' : 's'}` : selected ? selected.status.replaceAll('-', ' ') : 'No tournament yet';
-  $('#tournamentRunHistory').innerHTML = tournaments.length ? tournaments.map(item => `<button data-show-tournament="${escapeHtml(item.id)}"><span><b>${escapeHtml(tournamentTargetLabel(item.target))}</b><small>${escapeHtml(benchmarkTime(item.completed_at || item.created_at))} · ${(item.profile_ids || []).length} candidates</small></span><em class="${item.recommendation?.ready ? 'ready' : item.status === 'error' ? 'hold' : ''}">${item.recommendation?.ready ? `WINNER · ${escapeHtml(item.recommendation.profile_id)}` : escapeHtml(item.status.replaceAll('-', ' '))}</em></button>`).join('') : '<div class="empty-inline compact-empty">No model tournaments have been recorded.</div>';
+  $('#tournamentRunHistory').innerHTML = tournaments.length ? tournaments.map(item => `<button data-show-tournament="${escapeHtml(item.id)}"><span><b>${escapeHtml(tournamentTargetLabel(item.target))}</b><small>${escapeHtml(evaluationSuiteName(item.suite_id))} · ${escapeHtml(benchmarkTime(item.completed_at || item.created_at))} · ${(item.profile_ids || []).length} candidates</small></span><em class="${item.recommendation?.ready ? 'ready' : item.status === 'error' ? 'hold' : ''}">${item.recommendation?.ready ? `WINNER · ${escapeHtml(item.recommendation.profile_id)}` : escapeHtml(item.status.replaceAll('-', ' '))}</em></button>`).join('') : '<div class="empty-inline compact-empty">No tournaments have been recorded for this suite.</div>';
 }
 
 async function runModelTournament() {
   const profileIds = $$('#tournamentProfiles input:checked').map(node => node.value);
   if (profileIds.length < 2) { toast('Select at least two local profiles'); return; }
   const target = $('#tournamentTarget').value;
+  const suiteId = $('#tournamentSuite').value || 'builtin-core';
   const button = $('#runModelTournament'); button.disabled = true; button.textContent = 'Running tournament…';
   const progress = $('#tournamentProgress'); progress.hidden = false;
   progress.querySelector('.operation-label').textContent = 'Preparing model tournament';
@@ -1331,7 +1524,7 @@ async function runModelTournament() {
   progress.querySelector('.operation-progress i').style.width = '0%'; progress.querySelector('.operation-steps').innerHTML = '';
   progress.scrollIntoView({behavior:'smooth',block:'center'});
   try {
-    const result = await streamApi('/api/benchmarks/tournaments/run/stream', {profile_ids:profileIds,target}, event => updateOperation(progress,event));
+    const result = await streamApi('/api/benchmarks/tournaments/run/stream', {profile_ids:profileIds,target,suite_id:suiteId}, event => updateOperation(progress,event));
     state.selectedTournamentId = result.id;
     await loadGoldenBenchmarks();
     toast(result.review_pairs?.length ? 'Tournament complete · blind finalist review is ready' : 'Tournament completed without two reviewable finalists');
@@ -1390,15 +1583,22 @@ function renderGoldenRun(run) {
 
 function renderGoldenBenchmarks() {
   const value = state.goldenBenchmarks; if (!value) return;
+  renderEvaluationSuites();
   renderModelTournaments();
-  $('#goldenSuiteVersion').textContent = `Suite ${value.suite_version} · ${value.scenario_count} scenarios`;
   const select = $('#goldenProfile'); const selected = select.value || state.settings?.security_reasoning_model || '';
   select.innerHTML = (value.profiles || []).map(profile => `<option value="${escapeHtml(profile.id)}" ${!profile.enabled ? 'disabled' : ''}>${escapeHtml(profile.label)} · ${escapeHtml(profile.model)}</option>`).join('');
   if ([...select.options].some(option => option.value === selected)) select.value = selected;
+  const suiteSelect = $('#goldenSuite'); const selectedSuite = suiteSelect.value || 'builtin-core';
+  suiteSelect.innerHTML = evaluationSuiteOptions(selectedSuite);
+  if ([...suiteSelect.options].some(option => option.value === selectedSuite)) suiteSelect.value = selectedSuite;
+  const suite = runnableEvaluationSuites().find(item => item.id === suiteSelect.value) || runnableEvaluationSuites()[0];
+  $('#goldenSuiteVersion').textContent = `Suite ${suite?.suite_version || value.suite_version} · ${suite?.scenario_count || value.scenario_count} scenarios`;
+  $('#runGoldenBenchmark').textContent = `Run ${suite?.scenario_count || 5}-scenario gate`;
   $('#goldenScenarioCatalog').innerHTML = (value.scenarios || []).map(item => `<article><header><span>${escapeHtml(item.task_type)}</span><b>${escapeHtml(item.title)}</b></header><p>${item.expected_evidence_controls} evidence controls · ${item.expected_conclusion_controls} conclusion controls · tools: ${escapeHtml((item.expected_tools || []).join(', ') || 'none')}</p>${item.guardrail_control ? '<em>Critical guardrail control</em>' : ''}</article>`).join('');
-  const latest = (value.runs || [])[0];
+  const suiteRuns = (value.runs || []).filter(run => run.suite_id === (suite?.id || 'builtin-core'));
+  const latest = suiteRuns[0];
   $('#goldenBenchmarkLatest').innerHTML = renderGoldenRun(latest);
-  $('#goldenRunHistory').innerHTML = (value.runs || []).length ? value.runs.slice(0,8).map(run => `<button data-show-golden-run="${escapeHtml(run.id)}"><span><b>${escapeHtml(run.profile_id)}</b><small>${escapeHtml(benchmarkTime(run.completed_at || run.created_at))}</small></span><em class="${run.is_baseline ? 'baseline' : run.gate?.ready ? 'ready' : 'hold'}">${run.is_baseline ? 'BASELINE' : run.status === 'error' ? 'ERROR' : `${Math.round(run.score)} · ${run.gate?.decision || run.status}`}</em></button>`).join('') : '<div class="empty-inline compact-empty">No golden benchmark runs have been recorded.</div>';
+  $('#goldenRunHistory').innerHTML = suiteRuns.length ? suiteRuns.slice(0,8).map(run => `<button data-show-golden-run="${escapeHtml(run.id)}"><span><b>${escapeHtml(run.profile_id)}</b><small>${escapeHtml(evaluationSuiteName(run.suite_id))} · ${escapeHtml(benchmarkTime(run.completed_at || run.created_at))}</small></span><em class="${run.is_baseline ? 'baseline' : run.gate?.ready ? 'ready' : 'hold'}">${run.is_baseline ? 'BASELINE' : run.status === 'error' ? 'ERROR' : `${Math.round(run.score)} · ${run.gate?.decision || run.status}`}</em></button>`).join('') : '<div class="empty-inline compact-empty">No benchmark runs have been recorded for this suite.</div>';
 }
 
 async function loadGoldenBenchmarks() {
@@ -1408,6 +1608,7 @@ async function loadGoldenBenchmarks() {
 
 async function runGoldenBenchmark() {
   const profileId = $('#goldenProfile').value; if (!profileId) return;
+  const suiteId = $('#goldenSuite').value || 'builtin-core';
   const button = $('#runGoldenBenchmark'); button.disabled = true; button.textContent = 'Running gate…';
   const progress = $('#goldenProgress'); progress.hidden = false;
   progress.querySelector('.operation-label').textContent = 'Preparing golden investigations';
@@ -1415,11 +1616,15 @@ async function runGoldenBenchmark() {
   progress.querySelector('.operation-progress i').style.width = '0%'; progress.querySelector('.operation-steps').innerHTML = '';
   progress.scrollIntoView({behavior:'smooth',block:'center'});
   try {
-    const result = await streamApi('/api/benchmarks/run/stream', {profile_id:profileId}, event => updateOperation(progress,event));
+    const result = await streamApi('/api/benchmarks/run/stream', {profile_id:profileId,suite_id:suiteId}, event => updateOperation(progress,event));
     await loadGoldenBenchmarks();
     toast(result.gate?.ready ? 'Golden gate passed · review before accepting baseline' : 'Golden gate completed with promotion blockers');
   } catch (error) { toast(error.message); await loadGoldenBenchmarks(); }
-  finally { button.disabled = false; button.textContent = 'Run five-scenario gate'; }
+  finally {
+    button.disabled = false;
+    const suite = runnableEvaluationSuites().find(item => item.id === suiteId);
+    button.textContent = `Run ${suite?.scenario_count || 5}-scenario gate`;
+  }
 }
 
 async function acceptGoldenBaseline(runId) {
@@ -3441,6 +3646,25 @@ document.addEventListener('click', async event => {
     $('#detectionCandidatesPanel').scrollIntoView({behavior:'smooth',block:'start'});
     return;
   }
+  const editEvaluationSuite = event.target.closest('[data-edit-evaluation-suite]');
+  if (editEvaluationSuite) { await openEvaluationSuite(editEvaluationSuite.dataset.editEvaluationSuite); return; }
+  const evaluationScenario = event.target.closest('[data-evaluation-scenario]');
+  if (evaluationScenario) {
+    syncEvaluationScenario();
+    state.evaluationScenarioIndex = Number(evaluationScenario.dataset.evaluationScenario);
+    renderEvaluationScenarioEditor();
+    return;
+  }
+  if (event.target.closest('#removeEvaluationScenario')) {
+    syncEvaluationScenario();
+    state.evaluationDraft?.draft_scenarios.splice(state.evaluationScenarioIndex, 1);
+    state.evaluationScenarioIndex = Math.max(0, Math.min(state.evaluationScenarioIndex, (state.evaluationDraft?.draft_scenarios.length || 1) - 1));
+    renderEvaluationScenarioEditor();
+    return;
+  }
+  if (event.target.closest('.close-evaluation-suite')) {
+    $('#evaluationSuiteModal').hidden = true; state.evaluationDraft = null; return;
+  }
   const tournamentReview = event.target.closest('[data-tournament-review]');
   if (tournamentReview) { await reviewTournamentPair(tournamentReview); return; }
   const tournamentPromotion = event.target.closest('[data-promote-tournament]');
@@ -3727,9 +3951,28 @@ $('#deliveryKind').addEventListener('change', () => {
 $$('#assuranceForm input,#assuranceForm select').forEach(node => node.addEventListener('change', () => { state.assurancePolicyDirty = true; }));
 $$('#deliveryForm input,#deliveryForm select').forEach(node => node.addEventListener('change', () => { state.deliveryPolicyDirty = true; }));
 $('#scanSplunkModels').addEventListener('click', scanSplunkModels);
+$('#newEvaluationSuite').addEventListener('click', createEvaluationSuite);
+$('#addEvaluationScenario').addEventListener('click', () => {
+  if (!state.evaluationDraft) return;
+  syncEvaluationScenario();
+  if (state.evaluationDraft.draft_scenarios.length >= 15) { toast('A suite supports at most 15 organization scenarios'); return; }
+  state.evaluationDraft.draft_scenarios.push(newEvaluationScenario(state.evaluationDraft.draft_scenarios.length));
+  state.evaluationScenarioIndex = state.evaluationDraft.draft_scenarios.length - 1;
+  renderEvaluationScenarioEditor();
+});
+$('#evaluationSuiteForm').addEventListener('submit', async event => {
+  event.preventDefault();
+  if (!event.currentTarget.reportValidity()) return;
+  try { await saveEvaluationSuiteDraft(); } catch (error) { toast(error.message); }
+});
+$('#publishEvaluationSuite').addEventListener('click', publishEvaluationSuite);
+$('#archiveEvaluationSuite').addEventListener('click', archiveEvaluationSuite);
+$('#deleteEvaluationSuite').addEventListener('click', deleteEvaluationSuite);
 $('#runModelTournament').addEventListener('click', runModelTournament);
 $('#tournamentTarget').addEventListener('change', updateTournamentAssignmentHelp);
+$('#tournamentSuite').addEventListener('change', renderModelTournaments);
 $('#runGoldenBenchmark').addEventListener('click', runGoldenBenchmark);
+$('#goldenSuite').addEventListener('change', renderGoldenBenchmarks);
 $('#contextPrevious').addEventListener('click', () => { state.contextPage -= 1; renderArtifacts(state.contextItems); $('#contextView').scrollIntoView({ behavior:'smooth', block:'start' }); });
 $('#contextNext').addEventListener('click', () => { state.contextPage += 1; renderArtifacts(state.contextItems); $('#contextView').scrollIntoView({ behavior:'smooth', block:'start' }); });
 $('#settingsForm').addEventListener('submit', saveSettings);

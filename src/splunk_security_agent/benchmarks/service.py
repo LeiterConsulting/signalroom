@@ -18,6 +18,7 @@ from ..schemas import ArtifactCreate, ChatRequest
 from ..splunk import DemoSplunkClient
 from .scenarios import GOLDEN_SCENARIOS, suite_version
 from .store import GoldenBenchmarkStore
+from .suites import BUILTIN_SUITE_ID, EvaluationSuiteService
 
 BENCHMARK_MAX_OUTPUT_TOKENS = 640
 
@@ -41,6 +42,7 @@ class GoldenBenchmarkService:
         store: GoldenBenchmarkStore,
         runtime_root: Path | str,
         model_trust: Any | None = None,
+        evaluation_suites: EvaluationSuiteService | None = None,
     ):
         self.config = config
         self.feedback = feedback
@@ -48,6 +50,7 @@ class GoldenBenchmarkService:
         self.runtime_root = Path(runtime_root)
         self.runtime_root.mkdir(parents=True, exist_ok=True)
         self.model_trust = model_trust
+        self.evaluation_suites = evaluation_suites
 
     def overview(self) -> dict[str, Any]:
         settings = self.config.load()
@@ -62,7 +65,7 @@ class GoldenBenchmarkService:
             for profile in settings.models
             if profile.provider == "ollama" and profile.task in {"chat", "security_reasoning"}
         ]
-        return {
+        result = {
             "suite_version": suite_version(),
             "prompt_version": self._prompt_version(),
             "scenario_count": len(GOLDEN_SCENARIOS),
@@ -81,6 +84,22 @@ class GoldenBenchmarkService:
                 "max_output_tokens": BENCHMARK_MAX_OUTPUT_TOKENS,
             },
         }
+        if self.evaluation_suites is not None:
+            result["evaluation_suites"] = self.evaluation_suites.overview()
+        return result
+
+    def resolve_suite(self, suite_id: str = BUILTIN_SUITE_ID) -> dict[str, Any]:
+        if self.evaluation_suites is not None:
+            return self.evaluation_suites.resolve(suite_id)
+        if suite_id != BUILTIN_SUITE_ID:
+            raise KeyError(f"Unknown evaluation suite: {suite_id}")
+        return {
+            "id": BUILTIN_SUITE_ID,
+            "name": "SignalRoom core safety gate",
+            "version": suite_version(),
+            "custom_version": 0,
+            "scenarios": [dict(item) for item in GOLDEN_SCENARIOS],
+        }
 
     async def run(
         self,
@@ -88,25 +107,29 @@ class GoldenBenchmarkService:
         progress: ProgressCallback | None = None,
         *,
         raise_errors: bool = True,
+        suite_id: str = BUILTIN_SUITE_ID,
     ) -> dict[str, Any]:
+        suite = self.resolve_suite(suite_id)
+        scenarios = list(suite["scenarios"])
         router = ModelRouter(self.config)
         profile = router.profile(profile_id)
         if profile.provider != "ollama" or profile.task not in {"chat", "security_reasoning"}:
             raise ValueError("Golden investigations require a local Ollama chat profile")
         if not profile.enabled:
             raise ValueError("The selected model profile is disabled")
-        baseline = self.store.baseline()
+        baseline = self.store.baseline(suite_id=suite_id)
         artifact_binding = {}
         if self.model_trust is not None:
             artifact_binding = self.model_trust.assess(
                 await self.model_trust.observe(profile.id, verify_files=True)
             )
         run = self.store.create_run(
-            suite_version(),
+            str(suite["version"]),
             profile.id,
             profile.model,
             self._prompt_version(),
             artifact_binding,
+            suite_id,
         )
         try:
             await report_progress(
@@ -135,7 +158,7 @@ class GoldenBenchmarkService:
                         candidate.max_output_tokens = BENCHMARK_MAX_OUTPUT_TOKENS
                 isolated_config.save(settings)
                 evidence = EvidenceStore(runtime / "golden_evidence.db")
-                for scenario in GOLDEN_SCENARIOS:
+                for scenario in scenarios:
                     evidence.add(
                         ArtifactCreate(
                             title=scenario["fixture_title"],
@@ -147,17 +170,18 @@ class GoldenBenchmarkService:
                     )
 
                 scenario_results = []
-                for index, scenario in enumerate(GOLDEN_SCENARIOS, start=1):
-                    start_progress = 8 + round((index - 1) / len(GOLDEN_SCENARIOS) * 82)
+                for index, scenario in enumerate(scenarios, start=1):
+                    start_progress = 8 + round((index - 1) / len(scenarios) * 82)
                     await report_progress(
                         progress,
                         f"benchmark:{scenario['id']}",
-                        f"Scenario {index}/{len(GOLDEN_SCENARIOS)} · {scenario['title']}",
+                        f"Scenario {index}/{len(scenarios)} · {scenario['title']}",
                         "Running the candidate against isolated synthetic evidence and instrumented tools.",
                         progress=start_progress,
                         metrics={
                             "scenario": index,
-                            "scenario_count": len(GOLDEN_SCENARIOS),
+                            "scenario_count": len(scenarios),
+                            "suite": suite["name"],
                             "task": scenario["task_type"],
                             "external_splunk_calls": 0,
                         },
@@ -197,7 +221,7 @@ class GoldenBenchmarkService:
                             if result["passed"]
                             else "Scenario is below the promotion threshold or has a critical failure."
                         ),
-                        progress=8 + round(index / len(GOLDEN_SCENARIOS) * 82),
+                        progress=8 + round(index / len(scenarios) * 82),
                         status="complete" if result["passed"] else "warning",
                         metrics={"score": result["score"], "critical": result["critical"]},
                     )
