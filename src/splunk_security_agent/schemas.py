@@ -373,6 +373,16 @@ class AssurancePolicyUpdate(BaseModel):
     notify_on_high_findings: bool = True
 
 
+class WorkloadPolicyUpdate(BaseModel):
+    mode: Literal["audit", "enforce"] = "audit"
+    max_concurrent_calls: int = Field(default=6, ge=1, le=32)
+    max_concurrent_queries: int = Field(default=2, ge=1, le=16)
+    queue_timeout_seconds: int = Field(default=60, ge=5, le=600)
+    max_query_risk_score: int = Field(default=70, ge=10, le=100)
+    max_query_cost_units: int = Field(default=90, ge=10, le=100)
+    daily_query_cost_units: int = Field(default=1000, ge=50, le=100000)
+
+
 class AssuranceRunCreate(BaseModel):
     depth: AssuranceDepth | None = None
 

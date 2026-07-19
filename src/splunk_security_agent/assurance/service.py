@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 from collections.abc import Awaitable, Callable
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import Any
 
@@ -35,6 +36,16 @@ class BudgetedSplunkClient:
                 )
             self.calls_used += 1
         return await self.client.call(name, arguments or {})
+
+    def scope(self, operation: str, progress: Any = None):
+        if hasattr(self.client, "scope"):
+            return self.client.scope(operation, progress)
+
+        @asynccontextmanager
+        async def passthrough():
+            yield
+
+        return passthrough()
 
 
 class AssuranceService:
@@ -264,24 +275,25 @@ class AssuranceService:
                     )
                     return
             pipeline = self.pipeline_factory(client)
-            if self.run_lock is not None:
-                if self.run_lock.locked():
-                    await progress(
-                        {
-                            "phase": "instance-queue",
-                            "label": "Waiting for the Splunk discovery lane",
-                            "detail": (
-                                "Another discovery or MLTK inventory owns the single-instance "
-                                "read-only execution lane."
-                            ),
-                            "progress": 1,
-                            "metrics": {"instance_concurrency": 1},
-                        }
-                    )
-                async with self.run_lock:
+            async with client.scope(f"assurance:{run_id}", progress):
+                if self.run_lock is not None:
+                    if self.run_lock.locked():
+                        await progress(
+                            {
+                                "phase": "instance-queue",
+                                "label": "Waiting for the Splunk discovery lane",
+                                "detail": (
+                                    "Another discovery or MLTK inventory owns the single-instance "
+                                    "read-only execution lane."
+                                ),
+                                "progress": 1,
+                                "metrics": {"instance_concurrency": 1},
+                            }
+                        )
+                    async with self.run_lock:
+                        result = await pipeline.run(running.depth, progress=progress)
+                else:
                     result = await pipeline.run(running.depth, progress=progress)
-            else:
-                result = await pipeline.run(running.depth, progress=progress)
             summary = self._summary(result)
             if client.exceeded:
                 status = "budget-blocked"

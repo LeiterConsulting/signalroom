@@ -182,26 +182,27 @@ class DiscoveryJobService:
                     return
 
             pipeline = self.pipeline_factory(client)
-            if self.run_lock is not None:
-                if self.run_lock.locked():
-                    await progress(
-                        {
-                            "phase": "instance-queue",
-                            "label": "Waiting for the Splunk discovery lane",
-                            "detail": (
-                                "Another manual discovery, assurance run, or MLTK inventory "
-                                "owns the single-instance read-only lane."
-                            ),
-                            "progress": 1,
-                            "metrics": {"instance_concurrency": 1},
-                        }
-                    )
-                async with self.run_lock:
+            async with client.scope(f"discovery-job:{job_id}", progress):
+                if self.run_lock is not None:
+                    if self.run_lock.locked():
+                        await progress(
+                            {
+                                "phase": "instance-queue",
+                                "label": "Waiting for the Splunk discovery lane",
+                                "detail": (
+                                    "Another manual discovery, assurance run, or MLTK inventory "
+                                    "owns the single-instance read-only lane."
+                                ),
+                                "progress": 1,
+                                "metrics": {"instance_concurrency": 1},
+                            }
+                        )
+                    async with self.run_lock:
+                        result = await pipeline.run(running.depth, progress=progress)
+                        projection = self._projection(pipeline, result)
+                else:
                     result = await pipeline.run(running.depth, progress=progress)
                     projection = self._projection(pipeline, result)
-            else:
-                result = await pipeline.run(running.depth, progress=progress)
-                projection = self._projection(pipeline, result)
 
             summary = self._summary(result)
             if client.exceeded:

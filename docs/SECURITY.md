@@ -13,6 +13,8 @@ The local prototype defaults to localhost, opt-in demo mode, local specialist ex
 - Failed login attempts are throttled per normalized username and source. Role, connection, active-state, and password changes revoke affected sessions; disabling RBAC revokes all sessions and requires the current admin password.
 - Request-scoped audit events inherit the authenticated username. Authentication enablement, disablement, login, logout, user changes, and authorization denials are explicitly audited.
 - Known modifying/high-risk SPL commands are blocked in the chat execution path.
+- Every normal SignalRoom Splunk MCP caller shares one per-instance admission controller. MCP-call and query concurrency limits always apply; risk, per-query relative-cost, and UTC-day budget thresholds default to non-blocking audit mode and become fail-closed only after explicit admin promotion to enforce mode.
+- Workload decisions retain operation metadata and a query fingerprint, never raw SPL. SignalRoom cost units are deterministic comparisons rather than claims about scan bytes, execution time, or Splunk scheduler cost.
 - Uploaded context is restricted to text-like extensions and 2 MB.
 - Retrieved context is framed as untrusted evidence, not instructions.
 - External fonts and script CDNs are not used.
@@ -51,6 +53,7 @@ The local prototype defaults to localhost, opt-in demo mode, local specialist ex
 - Local RBAC is not tenant isolation, OIDC/SSO, MFA, account self-service, or a recovery system. Protect `data/auth.db`, retain at least one active admin, and use a controlled HTTPS reverse proxy and external identity boundary for production exposure.
 - The app does not terminate HTTPS itself. Session cookies receive the `Secure` attribute only when the request scheme is HTTPS; configure and validate trusted proxy behavior in the deployment environment.
 - SPL command blocking is a guardrail, not a parser or authorization boundary. Enforce read-only roles in Splunk.
+- SignalRoom workload estimation is static and cannot know real index volume, bucket locality, acceleration state, concurrent non-SignalRoom searches, or Splunk scheduler decisions. Keep authoritative quotas and workload pools in Splunk.
 - Model output can contain incorrect or unsafe recommendations. Human verification remains required.
 - Model approval is a local operator attestation, not a publisher signature, license review, malware scan, training-data assessment, or vulnerability verdict. Protect and independently inventory `data/model_trust_signing.key`; changing or losing it invalidates the local approval authority.
 - The audit chain is local and tamper-evident, not remotely immutable. A fully compromised host can modify the database and application together; production should export verified events to a dedicated audit system.

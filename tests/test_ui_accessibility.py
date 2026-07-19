@@ -92,3 +92,15 @@ def test_model_artifact_trust_is_explicit_and_audit_first() -> None:
     assert "publisher signature or a software-vulnerability verdict" in INDEX_HTML
     assert "[data-approve-model-artifact]" in APP_JS
     assert ".model-trust-card.approved" in STYLES_CSS
+
+
+def test_splunk_workload_policy_is_explainable_and_audit_first() -> None:
+    assert 'id="workloadPolicySection"' in INDEX_HTML
+    assert '<option value="audit">Audit only' in INDEX_HTML
+    assert '<option value="enforce">Enforce' in INDEX_HTML
+    assert 'id="workloadConcurrentCalls"' in INDEX_HTML
+    assert 'id="workloadConcurrentQueries"' in INDEX_HTML
+    assert "not predicted scan bytes or Splunk scheduler cost" in INDEX_HTML
+    assert "async function loadWorkload()" in APP_JS
+    assert "query-workload" in APP_JS
+    assert ".workload-mode-banner" in STYLES_CSS

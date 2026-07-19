@@ -500,6 +500,22 @@
           </div>
           <p class="access-read-only-note" id="accessReadOnlyNote" hidden>Only a SignalRoom administrator can change workspace or access policy. These settings are shown read-only.</p>
         </div>
+        <div class="form-section" id="workloadPolicySection">
+          <h3>Splunk workload protection</h3>
+          <p>One admission controller protects the configured Splunk instance across Investigate, Discovery, Validation, Assurance, and MLTK inventory. Audit mode is the POC-safe default; concurrency limits still prevent local request bursts.</p>
+          <div class="workload-mode-banner audit" id="workloadModeBanner" aria-live="polite"><span>AUDIT</span><div><b>Thresholds are visible, not blocking</b><small>Read-only guardrails and concurrency limits remain active.</small></div></div>
+          <div class="form-grid">
+            <label class="full"><span>Policy mode</span><select id="workloadMode"><option value="audit">Audit only · report threshold crossings</option><option value="enforce">Enforce · block threshold crossings</option></select><small class="field-help">Enforcement applies to SignalRoom callers. Splunk workload pools, roles, quotas, and search limits remain authoritative.</small></label>
+            <label><span>Concurrent MCP calls</span><input id="workloadConcurrentCalls" type="number" min="1" max="32" value="6"></label>
+            <label><span>Concurrent searches</span><input id="workloadConcurrentQueries" type="number" min="1" max="16" value="2"></label>
+            <label><span>Queue timeout · seconds</span><input id="workloadQueueTimeout" type="number" min="5" max="600" value="60"></label>
+            <label><span>Maximum query risk score</span><input id="workloadRiskScore" type="number" min="10" max="100" value="70"></label>
+            <label><span>Maximum per-query units</span><input id="workloadQueryUnits" type="number" min="10" max="100" value="90"></label>
+            <label><span>UTC-day query budget</span><input id="workloadDailyUnits" type="number" min="50" max="100000" value="1000"></label>
+          </div>
+          <section class="workload-live" id="workloadLive"><div><b>Live admission state</b><span>Loading…</span></div><div class="workload-meter"><i></i></div><small>SignalRoom units are a deterministic preflight comparison—not predicted scan bytes or Splunk scheduler cost.</small></section>
+          <details class="workload-history"><summary>Recent admission decisions</summary><div id="workloadEvents"><div class="empty-inline compact-empty">No workload events have been recorded.</div></div></details>
+        </div>
         <div class="form-section"><h3>Agent execution policy</h3><label class="switch-line"><span><b>Allow write-capable Splunk tools</b><small>Keep disabled for analyst workspaces; repository handoff has its own narrower controls above</small></span><input type="checkbox" id="allowWrites" disabled><span class="switch-control" aria-hidden="true"></span></label></div>
         <footer><span><i class="lock-icon">◆</i> Tokens are encrypted at rest and never returned by the API.</span><button class="button primary" id="saveWorkspace" type="submit">Save workspace</button></footer>
       </form>

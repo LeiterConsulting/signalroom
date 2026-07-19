@@ -24,6 +24,7 @@ ADMIN_MUTATION_PREFIXES = (
     "/api/model-setup/activate",
     "/api/model-trust",
     "/api/detection-repository/",
+    "/api/workload/",
 )
 ADMIN_MUTATION_PATHS = {
     "/api/auth/disable",

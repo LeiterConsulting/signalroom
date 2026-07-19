@@ -15,6 +15,8 @@ def test_query_intelligence_explains_scope_cost_and_staged_contract(tmp_path):
 
     assert result["risk"] == "high"
     assert result["score"] >= 55
+    assert result["estimated_cost_units"] >= 55
+    assert "not Splunk scan bytes" in result["cost_model"]
     assert any("index scope" in item["label"] for item in result["cost_drivers"])
     assert any("Transaction" in item["label"] for item in result["cost_drivers"])
     assert result["staged_contract"]["earliest_time"] == "-24h"

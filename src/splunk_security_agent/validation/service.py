@@ -31,11 +31,13 @@ class ValidationService:
         splunk_client: Any,
         evidence: EvidenceStore,
         cases: CaseStore,
+        workload: Any | None = None,
     ):
         self.store = store
         self.splunk = splunk_client
         self.evidence = evidence
         self.cases = cases
+        self.workload = workload
 
     def create(self, value: ValidationTaskCreate) -> ValidationTaskRecord:
         self.validate_contract(value.spl, value.earliest_time, value.latest_time, value.row_limit)
@@ -119,7 +121,13 @@ class ValidationService:
                 progress=46,
                 metrics={"tool": "run_query", "fingerprint": running.query_fingerprint[:12]},
             )
-            result = await self.splunk.call("run_query", arguments)
+            if self.workload is not None:
+                async with self.workload.scope(
+                    f"validation:{running.id}", progress
+                ):
+                    result = await self.splunk.call("run_query", arguments)
+            else:
+                result = await self.splunk.call("run_query", arguments)
             rows = self._rows(result)
             preview = self._bounded_preview(rows)
             await report_progress(

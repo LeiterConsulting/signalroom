@@ -6,6 +6,7 @@ const state = {
   modelRecommendations: {}, validations: [], editingValidationId: null,
   modelUpdates: null, modelCatalog: null, modelTrust: null, splunkModels: null,
   assurance: null, assurancePolicyDirty: false, connectionDiagnostics: null, queryIntelligence: null,
+  workload: null,
   feedbackBenchmarks: null, goldenBenchmarks: null, selectedTournamentId: null, deliveryPolicyDirty: false,
   deliveryPreview: null, detections: [], activeDetection: null, detectionGitExport: null,
   repositoryStatus: null, repositoryHandoff: null, auth: null, authUsers: [],
@@ -615,6 +616,7 @@ function hydrateSettings() {
   $('#connectionDetail').textContent = settings.demo_mode ? 'Guided sample workspace' : (settings.splunk.url || 'Endpoint missing');
   $('#startDemoTour').hidden = !settings.demo_mode;
   applyAccessPermissions();
+  hydrateWorkload();
 }
 
 async function loadSettings() {
@@ -625,6 +627,51 @@ async function loadSettings() {
   }
   loadModelReadiness();
   await loadDetectionRepositoryStatus();
+}
+
+function workloadPolicyPayload() {
+  return {
+    mode:$('#workloadMode').value,
+    max_concurrent_calls:Number($('#workloadConcurrentCalls').value),
+    max_concurrent_queries:Number($('#workloadConcurrentQueries').value),
+    queue_timeout_seconds:Number($('#workloadQueueTimeout').value),
+    max_query_risk_score:Number($('#workloadRiskScore').value),
+    max_query_cost_units:Number($('#workloadQueryUnits').value),
+    daily_query_cost_units:Number($('#workloadDailyUnits').value)
+  };
+}
+
+function hydrateWorkload() {
+  if (!state.workload) return;
+  const policy = state.workload.policy || {};
+  $('#workloadMode').value = policy.mode || 'audit';
+  $('#workloadConcurrentCalls').value = policy.max_concurrent_calls ?? 6;
+  $('#workloadConcurrentQueries').value = policy.max_concurrent_queries ?? 2;
+  $('#workloadQueueTimeout').value = policy.queue_timeout_seconds ?? 60;
+  $('#workloadRiskScore').value = policy.max_query_risk_score ?? 70;
+  $('#workloadQueryUnits').value = policy.max_query_cost_units ?? 90;
+  $('#workloadDailyUnits').value = policy.daily_query_cost_units ?? 1000;
+  const enforce = policy.mode === 'enforce';
+  const banner = $('#workloadModeBanner');
+  banner.className = `workload-mode-banner ${enforce ? 'enforce' : 'audit'}`;
+  banner.innerHTML = enforce
+    ? '<span>ENFORCE</span><div><b>Risk and budget thresholds can block execution</b><small>Read-only guardrails and concurrency limits are also active.</small></div>'
+    : '<span>AUDIT</span><div><b>Thresholds are visible, not blocking</b><small>Read-only guardrails and concurrency limits remain active.</small></div>';
+  const runtime = state.workload.runtime || {};
+  const budget = state.workload.budget || {};
+  const used = Number(budget.used_units || 0) + Number(budget.reserved_units || 0);
+  const limit = Math.max(1, Number(budget.limit_units || policy.daily_query_cost_units || 1));
+  $('#workloadLive').querySelector('div span').textContent = `${runtime.active_calls || 0}/${policy.max_concurrent_calls || 0} calls active · ${runtime.active_queries || 0}/${policy.max_concurrent_queries || 0} searches active · ${runtime.queued_calls || 0} queued · ${used.toLocaleString()}/${limit.toLocaleString()} UTC-day units`;
+  $('#workloadLive .workload-meter i').style.width = `${Math.min(100, Math.round((used / limit) * 100))}%`;
+  const events = state.workload.events || [];
+  $('#workloadEvents').innerHTML = events.length ? events.slice(0, 12).map(event => `<article class="workload-event ${escapeHtml(event.status)}"><header><b>${escapeHtml(event.operation)}</b><span>${escapeHtml(event.decision.replaceAll('-', ' '))}</span></header><p>${escapeHtml(event.logical_name)} · ${escapeHtml(event.lane)}${event.cost_units ? ` · ${Number(event.cost_units)} units` : ''}${event.wait_ms ? ` · waited ${Number(event.wait_ms).toLocaleString()} ms` : ''}</p><footer><time>${new Date(event.created_at).toLocaleString()}</time><code>${escapeHtml((event.query_fingerprint || '').slice(0, 12))}</code></footer></article>`).join('') : '<div class="empty-inline compact-empty">No workload events have been recorded.</div>';
+}
+
+async function loadWorkload() {
+  try {
+    state.workload = await api('/api/workload');
+    hydrateWorkload();
+  } catch (error) { toast(`Workload policy: ${error.message}`); }
 }
 
 function repositorySettingsPayload() {
@@ -2361,8 +2408,10 @@ function renderQueryIntelligence(value) {
   const drivers = (value.cost_drivers || []).map(item => `<li>${escapeHtml(item.label)}</li>`).join('');
   const controls = (value.positive_controls || []).map(item => `<li>${escapeHtml(item)}</li>`).join('');
   const reuse = value.reusable_result ? `<div class="query-reuse"><b>Preserved result available</b><span>${escapeHtml(value.reusable_result.title)} · ${new Date(value.reusable_result.completed_at).toLocaleString()}</span></div>` : '';
+  const workload = value.workload || {};
+  const workloadStatus = workload.decision ? `<div class="query-workload ${escapeHtml(workload.decision)}"><b>${escapeHtml(workload.mode === 'enforce' ? 'Enforced workload preflight' : 'Audit workload preflight')} · ${Number(workload.estimated_cost_units || value.estimated_cost_units || 0)} relative units</b><span>${escapeHtml((workload.reasons || []).join(' · ') || `${Number(workload.daily_remaining_units || 0).toLocaleString()} of ${Number(workload.daily_budget_units || 0).toLocaleString()} UTC-day units remain`)}</span><small>${escapeHtml(workload.cost_model || value.cost_model || '')}</small></div>` : '';
   const staged = value.staged_contract || {};
-  panel.innerHTML = `<header><b>Execution intelligence</b><span>${escapeHtml(value.risk.toUpperCase())} · score ${value.score}/100</span></header><p>${escapeHtml(value.execution_recommendation)}</p>${reuse}<div class="query-intelligence-grid"><div><b>Cost and risk drivers</b><ul>${drivers || '<li>No material cost driver detected</li>'}</ul></div><div><b>Bounding controls</b><ul>${controls || '<li>Add an index, time, or result boundary</li>'}</ul></div></div>${staged.spl && staged.spl !== $('#validationSpl').value ? `<details><summary>Safer staged SPL</summary><pre><code>${escapeHtml(staged.spl)}</code></pre></details>` : ''}`;
+  panel.innerHTML = `<header><b>Execution intelligence</b><span>${escapeHtml(value.risk.toUpperCase())} · score ${value.score}/100</span></header><p>${escapeHtml(value.execution_recommendation)}</p>${workloadStatus}${reuse}<div class="query-intelligence-grid"><div><b>Cost and risk drivers</b><ul>${drivers || '<li>No material cost driver detected</li>'}</ul></div><div><b>Bounding controls</b><ul>${controls || '<li>Add an index, time, or result boundary</li>'}</ul></div></div>${staged.spl && staged.spl !== $('#validationSpl').value ? `<details><summary>Safer staged SPL</summary><pre><code>${escapeHtml(staged.spl)}</code></pre></details>` : ''}`;
 }
 
 async function analyzeValidationContract(task = null) {
@@ -2391,9 +2440,10 @@ async function queueValidation(candidateId) {
 async function approveValidation(taskId) {
   const task = state.validations.find(item => item.id === taskId); if (!task) return;
   const intelligence = await analyzeValidationContract(task);
-  if (!intelligence || intelligence.risk === 'blocked') { toast(intelligence?.blocked_reason || 'Query approval is blocked'); return; }
+  if (!intelligence || intelligence.risk === 'blocked' || intelligence.workload?.decision === 'block') { toast(intelligence?.blocked_reason || intelligence?.workload?.reasons?.join(' · ') || 'Query approval is blocked'); return; }
   const reuse = intelligence.reusable_result ? `\n\nA preserved matching result exists from ${new Date(intelligence.reusable_result.completed_at).toLocaleString()}. Approve only if fresher evidence is required.` : '';
-  if (!confirm(`Approve this exact read-only SPL contract?\n\nRisk: ${intelligence.risk.toUpperCase()} (${intelligence.score}/100)\n${intelligence.execution_recommendation}${reuse}\n\n${task.spl}\n\nWindow: ${task.earliest_time} to ${task.latest_time}\nMaximum rows: ${task.row_limit}`)) return;
+  const workload = intelligence.workload ? `\nWorkload: ${intelligence.workload.mode.toUpperCase()} · ${intelligence.workload.decision.replaceAll('-', ' ')} · ${intelligence.workload.estimated_cost_units} relative units` : '';
+  if (!confirm(`Approve this exact read-only SPL contract?\n\nRisk: ${intelligence.risk.toUpperCase()} (${intelligence.score}/100)${workload}\n${intelligence.execution_recommendation}${reuse}\n\n${task.spl}\n\nWindow: ${task.earliest_time} to ${task.latest_time}\nMaximum rows: ${task.row_limit}`)) return;
   try {
     const approved = await api(`/api/validations/${encodeURIComponent(taskId)}/approve`, { method:'POST', body:'{}' });
     state.validations = state.validations.map(item => item.id === taskId ? approved : item); renderValidations();
@@ -3255,6 +3305,7 @@ async function saveSettings(event) {
     if (model.id === settings.ner_model) model.endpoint = $('#hfNerEndpoint').value.trim() || model.endpoint;
   });
   try {
+    state.workload = await api('/api/workload/policy', { method:'PUT', body:JSON.stringify(workloadPolicyPayload()) });
     state.settings = await api('/api/settings', { method:'PUT', body:JSON.stringify({ settings, splunk_token:$('#splunkToken').value || null, huggingface_token:$('#hfToken').value || null }) });
     hydrateSettings(); renderModels(); await loadModelReadiness(); await loadDetectionRepositoryStatus(); $('#settingsModal').hidden = true; $('#splunkToken').value = ''; $('#hfToken').value = ''; toast('Workspace saved');
     if (state.settings.demo_mode && !demoWasEnabled) startDemoTour();
@@ -3573,7 +3624,7 @@ document.addEventListener('click', async event => {
   }
   const change = event.target.closest('[data-change-investigate]');
   if (change) openInvestigation('discovery', `Explain and validate this change since the previous discovery: ${change.dataset.changeCategory} ${change.dataset.changeInvestigate}. Determine whether it is a real posture change or a collection issue.`, false);
-  if (event.target.closest('#openSettings,#configureModels,[data-open-settings]')) $('#settingsModal').hidden = false;
+  if (event.target.closest('#openSettings,#configureModels,[data-open-settings]')) { $('#settingsModal').hidden = false; loadWorkload(); }
   if (event.target.closest('#closeSettings')) $('#settingsModal').hidden = true;
   if (event.target.closest('#addArtifact')) openArtifactEditor();
   if (event.target.closest('.close-artifact')) { $('#artifactModal').hidden = true; state.editingArtifactId = null; }
@@ -3763,7 +3814,7 @@ const accessObserver = new MutationObserver(() => {
 accessObserver.observe(document.body, { childList:true, subtree:true });
 
 async function loadWorkspace() {
-  await Promise.all([loadSettings(), loadArtifacts(), loadCases(), loadLatestDiscovery(), loadDiscoveryJobs(), loadValidations(), loadDetections(), loadModelCatalog(), loadModelTrust(), loadSplunkModels(), loadAssurance(), loadConnectionDiagnostics(), loadFeedbackBenchmarks(), loadGoldenBenchmarks()]);
+  await Promise.all([loadSettings(), loadWorkload(), loadArtifacts(), loadCases(), loadLatestDiscovery(), loadDiscoveryJobs(), loadValidations(), loadDetections(), loadModelCatalog(), loadModelTrust(), loadSplunkModels(), loadAssurance(), loadConnectionDiagnostics(), loadFeedbackBenchmarks(), loadGoldenBenchmarks()]);
   renderPromptTree(); renderValidations(); renderDetections(); handleDeepLink(); renderAuth();
   state.workspaceLoaded = true;
   if (!state.assuranceTimer) state.assuranceTimer = setInterval(() => {

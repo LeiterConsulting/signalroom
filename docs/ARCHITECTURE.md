@@ -16,7 +16,7 @@ FastAPI application ───── outward MCP tools
         │        ├── hybrid evidence retrieval + evidence ledger
         │        └── bounded read-only Splunk tool plans
         │
-        └── DiscoveryPipeline ── Splunk MCP ── deterministic evidence map + fingerprints
+       └── DiscoveryPipeline ── Splunk MCP ── deterministic evidence map + fingerprints
                    ├── read-only MLTK inventory + definition drift
                    │                         ├── SecureBERT NER + correlation (parallel)
                    │                         ├── general Ollama synthesis
@@ -24,6 +24,12 @@ FastAPI application ───── outward MCP tools
                    │                         └── deterministic reconciliation
                    ├── JSON + Markdown artifacts ── indexed back into evidence store
                    └── ValidationService ── draft → approve → bounded SPL → preserved evidence
+
+SplunkWorkloadService ── one wrapped Splunk MCP client per configured instance
+        ├── read-only + deterministic relative-cost preflight
+        ├── shared MCP-call and query concurrency admission
+        ├── audit / enforce risk and UTC-day unit policy
+        └── fingerprint-only SQLite decisions + streamed queue state
 
 AssuranceService ── SQLite policy + runs + events + notices
         ├── one restart-safe background worker
@@ -78,6 +84,31 @@ High-confidence asks use deterministic read-only MCP plans capped by `max_agent_
 metadata, and knowledge-object intents may collect several independent results concurrently. Explicit
 SPL is checked against modifying and high-risk commands before execution. Model synthesis happens only
 after results are captured, distilled, and added to the evidence ledger.
+
+### Splunk admission is shared and audit-first
+
+`Services.refresh()` creates the normal demo or live Splunk client, derives an instance identity from non-secret
+transport configuration, and wraps it once with `WorkloadControlledSplunkClient`. The agent, discovery pipeline,
+validation queue, assurance pipeline, and MLTK inventory all receive that wrapper. Per-run discovery and assurance
+call ceilings remain inner budgets; the workload wrapper is the outer shared instance authority, including calls
+launched concurrently by a deterministic tool plan.
+
+`SplunkWorkloadService` uses condition-based admission counters so changed limits apply without process restart.
+The MCP-call lane bounds all normal tools; a narrower query lane additionally bounds `run_query`. Concurrency
+limits always apply and default high enough for the POC path. Risk, per-query relative-unit, and UTC-day unit
+thresholds are advisory in the default `audit` mode and fail closed only after an administrator promotes the
+policy to `enforce`. A queued call rechecks the current policy before admission, so it cannot inherit stale
+authority. Queue timeout is bounded and visible through existing streamed operation events.
+
+The estimator is deterministic and shared with validation query intelligence. It considers read-only status,
+explicit non-wildcard index scope, relative time range, result cap, known expensive commands, and accelerated
+`tstats` patterns. Its units are a relative SignalRoom comparison—not predicted scan bytes, dispatch latency, or
+Splunk scheduler cost. Splunk workload pools, quotas, roles, and search limits remain authoritative.
+
+`WorkloadStore` retains the instance fingerprint, operation, MCP tool, lane, query fingerprint, risk, relative
+units, decision, queue wait, execution duration, policy generation, and terminal state. It never stores raw SPL.
+Interrupted admissions are marked explicitly after restart, terminal query estimates contribute to the UTC-day
+budget, and recent history is bounded locally.
 
 ### Evidence is a first-class object
 
@@ -280,7 +311,6 @@ SignalRoom is an MCP client of a Splunk MCP server and an MCP server to agent ho
 
 ## Next production increments
 
-1. Search cost estimation, per-instance concurrency limits, and Splunk workload controls
-2. Broader operator-authored evaluation suites beyond the durable golden, tournament, and feedback history
-3. Audit events sent to a dedicated Splunk index
-4. OIDC/MFA integration, account recovery, and tenant boundaries beyond local RBAC
+1. Broader operator-authored evaluation suites beyond the durable golden, tournament, and feedback history
+2. Audit events sent to a dedicated Splunk index
+3. OIDC/MFA integration, account recovery, and tenant boundaries beyond local RBAC

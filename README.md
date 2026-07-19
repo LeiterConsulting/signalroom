@@ -19,6 +19,7 @@ This is a focused reimplementation inspired by [LeiterConsulting/splunk-discover
 - An evidence-first agent with bounded multi-tool plans, investigation modes, and a structured ledger
 - Durable local investigation cases with an evidence-health cockpit, next-best actions, case-scoped context packets, chronological timelines, and handoff exports
 - Deterministic SPL cost and reuse intelligence before approval, including safer staged contracts and exact-result reuse
+- Audit-first Splunk workload protection with relative query-cost units, shared per-instance concurrency lanes, queue visibility, daily budgets, and enforce-mode gates
 - Local analyst feedback and model/task outcome scorecards with no telemetry export
 - Versioned local golden investigations with isolated evidence, instrumented tool selection, durable baselines, and explicit promotion gates
 - Audit-first model publisher allowlists and local Ed25519 approvals bound to exact model revisions and content digests
@@ -313,6 +314,7 @@ src/splunk_security_agent/
   rag/             SQLite evidence and chunk retrieval
   splunk/          tolerant MCP client, layered connection diagnostics, and safe demo client
   validation/      bounded execution queue plus deterministic query cost/reuse intelligence
+  workload/        shared Splunk admission control, relative cost policy, and safe local history
   feedback.py      local analyst outcomes and model/task scorecards
   static/          dependency-free operator SPA
   app.py           FastAPI routes and service wiring
@@ -575,8 +577,27 @@ no artifacts, durable correlation, self-signed/private-CA transport support, and
 Correlated Jira issues retain explicit read-only reconciliation and immutable local drift history. Optional local
 RBAC gives those actions named role and connection boundaries. Durable manual discovery preserves progress,
 cancellation, restart recovery, and retained results. Model evaluation and promotion now carry exact revision and
-digest bindings through operator-signed local attestations. The next roadmap increment is search cost estimation,
-per-instance concurrency limits, and Splunk workload controls.
+digest bindings through operator-signed local attestations. A shared Splunk admission controller now protects
+Investigate, Discovery, Validation, Assurance, and MLTK traffic with live queue state, relative cost preflight,
+per-instance concurrency, and audit-first risk and UTC-day budget policy. The next roadmap increment is broader
+operator-authored evaluation suites built on the durable golden and tournament authorities.
+
+### Splunk workload protection
+
+Settings exposes a separate, durable workload policy. `audit` is the default: read-only guardrails and configured
+concurrency limits are active, while risk, per-query cost, and UTC-day budget crossings are reported without
+blocking. Promoting the policy to `enforce` makes those threshold crossings fail closed before the Splunk MCP call.
+Policy changes require administrator authority when RBAC is enabled.
+
+Every normal Splunk MCP call uses one per-instance controller, so parallel chat tool plans cannot bypass Discovery,
+Validation, Assurance, or MLTK capacity. Streamed operations show local queue position and admission state.
+Validation preflight shows the estimated units, threshold decision, remaining daily budget, and safer staged
+contract before approval. History retains operation, tool, lane, query fingerprint, decision, wait, duration, and
+relative units; raw SPL is never written to the workload database.
+
+Relative units are a deterministic comparison derived from SPL shape, explicit index and time scope, result cap,
+and known expensive commands. They are not predicted scan bytes, search runtime, or an authoritative Splunk
+scheduler estimate. Splunk roles, workload pools, quotas, and search limits remain the resource boundary.
 
 ### Context
 

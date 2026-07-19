@@ -93,6 +93,7 @@ from .schemas import (
     SettingsUpdate,
     ValidationTaskCreate,
     ValidationTaskUpdate,
+    WorkloadPolicyUpdate,
 )
 from .splunk import (
     ConnectionDiagnosticsStore,
@@ -102,6 +103,11 @@ from .splunk import (
 )
 from .splunk_models import SplunkModelInventoryService
 from .validation import QueryIntelligenceService, ValidationService, ValidationStore
+from .workload import (
+    SplunkWorkloadService,
+    WorkloadControlledSplunkClient,
+    WorkloadStore,
+)
 
 ROOT = Path(os.getenv("SIGNALROOM_ROOT", Path.cwd())).resolve()
 STATIC = Path(__file__).resolve().parent / "static"
@@ -138,7 +144,11 @@ class Services:
         )
         self.cases = CaseStore(DATA / "cases.db", DATA / "case_exports")
         self.validation_store = ValidationStore(DATA / "validations.db")
-        self.query_intelligence = QueryIntelligenceService(self.validation_store)
+        self.workload_store = WorkloadStore(DATA / "workload.db")
+        self.workload = SplunkWorkloadService(self.workload_store)
+        self.query_intelligence = QueryIntelligenceService(
+            self.validation_store, self.workload
+        )
         self.detection_store = DetectionStore(DATA / "detections.db")
         self.detections = DetectionService(
             self.detection_store,
@@ -244,14 +254,25 @@ class Services:
         if not force and fingerprint == self._fingerprint:
             return
         if settings.demo_mode:
-            self._splunk = DemoSplunkClient()
+            raw_splunk = DemoSplunkClient()
         else:
-            self._splunk = SplunkMCPClient(
+            raw_splunk = SplunkMCPClient(
                 settings.splunk.url,
                 self.config.secret("splunk_token"),
                 settings.splunk.verify_ssl,
                 settings.splunk.ca_bundle,
             )
+        instance_id = self.workload.set_current_instance(
+            {
+                "demo": settings.demo_mode,
+                "url": "demo://isolated" if settings.demo_mode else settings.splunk.url,
+                "verify_tls": settings.splunk.verify_ssl,
+                "ca_bundle": bool(settings.splunk.ca_bundle),
+            }
+        )
+        self._splunk = WorkloadControlledSplunkClient(
+            raw_splunk, self.workload, instance_id
+        )
         self._agent = SecurityAgent(self.config, self.evidence, self._splunk)
         self._splunk_models = SplunkModelInventoryService(self.config, self._splunk)
         self._discovery = DiscoveryPipeline(
@@ -261,7 +282,13 @@ class Services:
             self.config,
             self._splunk_models,
         )
-        self._validations = ValidationService(self.validation_store, self._splunk, self.evidence, self.cases)
+        self._validations = ValidationService(
+            self.validation_store,
+            self._splunk,
+            self.evidence,
+            self.cases,
+            self.workload,
+        )
         self._fingerprint = fingerprint
 
     @property
@@ -590,6 +617,38 @@ async def put_settings(update: SettingsUpdate) -> dict[str, Any]:
     return services.config.public_payload()
 
 
+@app.get("/api/workload")
+async def workload_overview() -> dict[str, Any]:
+    services.refresh()
+    return services.workload.overview()
+
+
+@app.put("/api/workload/policy")
+async def update_workload_policy(
+    value: WorkloadPolicyUpdate, request: Request
+) -> dict[str, Any]:
+    result = await services.workload.update_policy(value)
+    principal = getattr(request.state, "principal", None) or {}
+    services.audit.record(
+        "workload.policy.updated",
+        "update",
+        target_type="splunk-workload-policy",
+        target_id="primary",
+        summary=f"Splunk workload policy changed to {value.mode} mode.",
+        metadata={
+            "mode": value.mode,
+            "max_concurrent_calls": value.max_concurrent_calls,
+            "max_concurrent_queries": value.max_concurrent_queries,
+            "queue_timeout_seconds": value.queue_timeout_seconds,
+            "max_query_risk_score": value.max_query_risk_score,
+            "max_query_cost_units": value.max_query_cost_units,
+            "daily_query_cost_units": value.daily_query_cost_units,
+        },
+        actor=str(principal.get("username") or "local-operator"),
+    )
+    return result
+
+
 @app.get("/api/detection-repository/status")
 async def detection_repository_status() -> dict[str, Any]:
     return services.detection_repository.inspect()
@@ -804,7 +863,8 @@ async def model_pull_status(job_id: str) -> dict[str, Any]:
 @app.post("/api/chat")
 async def chat(request: ChatRequest) -> dict[str, Any]:
     try:
-        return (await services.agent.chat(request)).model_dump(mode="json")
+        async with services.workload.scope("investigate:chat"):
+            return (await services.agent.chat(request)).model_dump(mode="json")
     except Exception as exc:
         raise HTTPException(502, str(exc)) from exc
 
@@ -1088,7 +1148,8 @@ async def scan_splunk_models() -> StreamingResponse:
                 }
             )
         async with services.discovery_lock:
-            return await services.splunk_models.scan(progress=progress)
+            async with services.workload.scope("models:mltk-scan", progress):
+                return await services.splunk_models.scan(progress=progress)
 
     return _stream_response(run)
 
@@ -1096,7 +1157,8 @@ async def scan_splunk_models() -> StreamingResponse:
 @app.post("/api/chat/stream")
 async def chat_stream(request: ChatRequest) -> StreamingResponse:
     async def run(progress: Any) -> dict[str, Any]:
-        return (await services.agent.chat(request, progress=progress)).model_dump(mode="json")
+        async with services.workload.scope("investigate:chat", progress):
+            return (await services.agent.chat(request, progress=progress)).model_dump(mode="json")
 
     return _stream_response(run)
 
@@ -1104,7 +1166,8 @@ async def chat_stream(request: ChatRequest) -> StreamingResponse:
 @app.post("/api/discovery")
 async def discovery(request: DiscoveryRequest) -> dict[str, Any]:
     async with services.discovery_lock:
-        result = await services.discovery.run(request.depth)
+        async with services.workload.scope(f"discovery:{request.depth}"):
+            result = await services.discovery.run(request.depth)
     services.agent.invalidate_context_cache()
     services.model_setup.schedule_context_index()
     return result
@@ -1215,7 +1278,10 @@ async def discovery_stream(request: DiscoveryRequest) -> StreamingResponse:
                 }
             )
         async with services.discovery_lock:
-            result = await services.discovery.run(request.depth, progress=progress)
+            async with services.workload.scope(
+                f"discovery:{request.depth}", progress
+            ):
+                result = await services.discovery.run(request.depth, progress=progress)
         services.agent.invalidate_context_cache()
         services.model_setup.schedule_context_index()
         return result
