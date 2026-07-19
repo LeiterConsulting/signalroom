@@ -117,3 +117,20 @@ def test_operator_evaluation_suites_expose_safe_versioned_authoring() -> None:
     assert "expected_draft_revision" in APP_JS
     assert "expected_fingerprint" in APP_JS
     assert ".evaluation-suite-card.builtin" in STYLES_CSS
+
+
+def test_investigation_columns_scroll_independently() -> None:
+    assert '<body class="chat-active">' in INDEX_HTML
+    assert "document.body.classList.toggle('chat-active', name === 'chat')" in APP_JS
+    assert "body.chat-active{overflow:hidden}" in STYLES_CSS
+    assert "body.chat-active .workspace{height:100vh;height:100dvh;min-height:0;overflow:hidden}" in STYLES_CSS
+    assert "body.chat-active .conversation-panel{min-height:0;overflow:hidden}" in STYLES_CSS
+    assert (
+        "body.chat-active .messages{min-height:0;overflow-x:hidden;overflow-y:auto;"
+        "overscroll-behavior:contain;scrollbar-gutter:stable}"
+    ) in STYLES_CSS
+    assert (
+        "body.chat-active .evidence-panel{height:100%;min-height:0;overflow-x:hidden;"
+        "overflow-y:auto;overscroll-behavior:contain;scrollbar-gutter:stable}"
+    ) in STYLES_CSS
+    assert ".rail{position:fixed;" in STYLES_CSS

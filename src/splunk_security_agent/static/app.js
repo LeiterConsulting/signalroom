@@ -528,6 +528,7 @@ function setView(name) {
   $$('.nav-item[data-view]').forEach(node => node.classList.toggle('active', node.dataset.view === name));
   $$('.view').forEach(node => node.classList.remove('active'));
   $(`#${name}View`).classList.add('active');
+  document.body.classList.toggle('chat-active', name === 'chat');
   $('#viewEyebrow').textContent = titles[name][0]; $('#viewTitle').textContent = titles[name][1];
   $('#newConversation').hidden = name !== 'chat';
   if (name === 'context') loadArtifacts();

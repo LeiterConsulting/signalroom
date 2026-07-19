@@ -242,3 +242,15 @@ input[type=checkbox]:not(.switch-line input):not(.toggle input){accent-color:#07
 @media(max-width:650px){.rail-footer .access-card{display:none}}
 .tournament-controls{grid-template-columns:minmax(190px,.7fr) minmax(210px,.8fr) minmax(300px,1.5fr) minmax(190px,.7fr)}
 @media(max-width:1150px){.tournament-controls{grid-template-columns:1fr 1fr}.tournament-controls>fieldset,.tournament-controls>div{grid-column:1/-1}}@media(max-width:760px){.tournament-controls{grid-template-columns:1fr}.tournament-controls>fieldset,.tournament-controls>div{grid-column:auto}}
+
+/* Keep Investigation's navigation, conversation, and evidence in separate viewport regions. */
+body.chat-active{overflow:hidden}
+body.chat-active .workspace{height:100vh;height:100dvh;min-height:0;overflow:hidden}
+body.chat-active #chatView{height:calc(100vh - 110px);height:calc(100dvh - 110px);min-height:0;overflow:hidden}
+body.chat-active .chat-layout{height:100%;min-height:0;overflow:hidden}
+body.chat-active .conversation-panel{min-height:0;overflow:hidden}
+body.chat-active .messages{min-height:0;overflow-x:hidden;overflow-y:auto;overscroll-behavior:contain;scrollbar-gutter:stable}
+body.chat-active .evidence-panel{height:100%;min-height:0;overflow-x:hidden;overflow-y:auto;overscroll-behavior:contain;scrollbar-gutter:stable}
+@media(max-width:650px){
+  body.chat-active #chatView{height:calc(100vh - 150px);height:calc(100dvh - 150px)}
+}
