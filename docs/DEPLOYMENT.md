@@ -95,6 +95,32 @@ SIGNALROOM_JIRA_API_TOKEN=…
 SIGNALROOM_SOAR_AUTH_TOKEN=…
 ```
 
+## Dedicated Splunk audit index
+
+Remote audit export is configured under **Discovery → Remote audit authority** and is disabled by default. Create a
+dedicated Splunk index such as `signalroom_audit` and a separate HEC token restricted to that index. Do not reuse the
+read-only MCP token. SignalRoom rejects default and internal index names and includes the configured index in every
+HEC event envelope.
+
+Enter the HEC origin only, such as `https://hec.example.com:8088`; SignalRoom appends
+`/services/collector/event`. TLS verification defaults on and can use a private CA bundle. The explicit
+verification override is intended only for a trusted self-signed internal endpoint. Redirects are not followed.
+
+By default, enabling begins with the next audit event. Select **Backfill the existing verified chain** only when the
+destination should receive retained history. **Require Splunk indexer acknowledgement** provides stronger delivery
+evidence but requires `useACK=true` on the dedicated HEC token. SignalRoom stores one persistent request channel,
+polls the matching acknowledgement endpoint, and does not advance its cursor until confirmation.
+
+Environment-managed deployments can keep both HEC values outside the local encrypted vault:
+
+```text
+SIGNALROOM_AUDIT_HEC_URL=https://hec.example.com:8088
+SIGNALROOM_AUDIT_HEC_TOKEN=…
+```
+
+Grant the token event-ingest access only to the dedicated index. Apply index retention, role access, dashboards,
+alerts, and stable-ID deduplication in Splunk; SignalRoom does not create or administer those destination controls.
+
 ## Windows
 
 ```powershell

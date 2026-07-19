@@ -437,6 +437,30 @@ class WorkloadPolicyUpdate(BaseModel):
     daily_query_cost_units: int = Field(default=1000, ge=50, le=100000)
 
 
+class AuditExportPolicyUpdate(BaseModel):
+    enabled: bool = False
+    index_name: str = Field(
+        default="signalroom_audit",
+        min_length=2,
+        max_length=80,
+        pattern=r"^[A-Za-z][A-Za-z0-9_-]+$",
+    )
+    sourcetype: str = Field(default="signalroom:audit", min_length=1, max_length=160)
+    source: str = Field(default="signalroom:audit", min_length=1, max_length=240)
+    host: str = Field(default="signalroom", min_length=1, max_length=240)
+    verify_tls: bool = True
+    ca_bundle: str | None = Field(default=None, max_length=1000)
+    use_indexer_ack: bool = False
+    batch_size: int = Field(default=25, ge=1, le=100)
+    max_attempts: int = Field(default=5, ge=1, le=12)
+    retry_backoff_seconds: int = Field(default=30, ge=10, le=3600)
+    backfill_existing: bool = False
+    hec_url: str | None = Field(default=None, max_length=4000)
+    hec_token: str | None = Field(default=None, max_length=4000)
+    clear_hec_url: bool = False
+    clear_hec_token: bool = False
+
+
 class AssuranceRunCreate(BaseModel):
     depth: AssuranceDepth | None = None
 

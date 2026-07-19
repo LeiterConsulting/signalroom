@@ -106,6 +106,9 @@ def test_roles_and_connection_assignment_are_independent(tmp_path) -> None:
         True,
         "",
     )
+    assert service.authorize(analyst, "PUT", "/api/audit-export/policy")[0] is False
+    assert service.authorize(admin, "PUT", "/api/audit-export/policy") == (True, "")
+    assert service.authorize(analyst, "POST", "/api/audit-export/run")[0] is False
     assert service.authorize(admin, "PUT", "/api/settings") == (True, "")
 
 

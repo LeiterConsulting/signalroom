@@ -16,6 +16,7 @@ from fastapi.staticfiles import StaticFiles
 from .agents import SecurityAgent
 from .assurance import AssuranceResponseService, AssuranceService, AssuranceStore
 from .audit import AuditStore, bind_audit_actor, reset_audit_actor
+from .audit_export import AuditExportStore, SplunkAuditExportService
 from .auth import AuthService, AuthStore
 from .auth.service import CSRF_COOKIE, SESSION_COOKIE
 from .benchmarks import (
@@ -50,6 +51,7 @@ from .schemas import (
     ArtifactUpdate,
     AssurancePolicyUpdate,
     AssuranceRunCreate,
+    AuditExportPolicyUpdate,
     AuthBootstrapRequest,
     AuthDisableRequest,
     AuthLoginRequest,
@@ -182,6 +184,12 @@ class Services:
         )
         self.case_cockpit = CaseCockpitService(self.cases, self.validation_store, self.evidence)
         self.audit = AuditStore(DATA / "audit.db")
+        self.audit_export_store = AuditExportStore(DATA / "audit_export.db")
+        self.audit_export = SplunkAuditExportService(
+            self.audit_export_store,
+            self.audit,
+            self.config,
+        )
         self.auth_store = AuthStore(DATA / "auth.db")
         self.auth = AuthService(self.auth_store, self.audit)
         self.discovery_job_store = DiscoveryJobStore(DATA / "discovery_jobs.db")
@@ -356,9 +364,11 @@ async def lifespan(app: FastAPI):
     await services.discovery_jobs.start()
     await services.assurance.start()
     await services.delivery.start()
+    await services.audit_export.start()
     try:
         yield
     finally:
+        await services.audit_export.stop()
         await services.delivery.stop()
         await services.assurance.stop()
         await services.discovery_jobs.stop()
@@ -486,6 +496,7 @@ async def health() -> dict[str, Any]:
         "artifacts": len(services.evidence.list()),
         "discovery_worker": services.discovery_jobs.overview()["worker"]["online"],
         "assurance_worker": services.assurance.overview()["worker"]["online"],
+        "audit_export_worker": services.audit_export.overview()["worker"]["online"],
         "connection_ready": bool(latest_diagnostic.get("ready")),
         "access_mode": "rbac" if auth_policy["enabled"] else "local-single-user",
     }
@@ -1437,6 +1448,7 @@ async def assurance_overview() -> dict[str, Any]:
     result = services.assurance.overview()
     result["delivery"] = services.delivery.overview()
     result["audit"] = services.audit.overview(20)
+    result["audit_export"] = services.audit_export.overview()
     return result
 
 
@@ -1597,6 +1609,36 @@ async def reconcile_assurance_delivery(job_id: str) -> dict[str, Any]:
 @app.get("/api/audit")
 async def audit_overview(limit: int = 100) -> dict[str, Any]:
     return services.audit.overview(min(max(limit, 1), 500))
+
+
+@app.get("/api/audit-export")
+async def audit_export_overview() -> dict[str, Any]:
+    return services.audit_export.overview()
+
+
+@app.put("/api/audit-export/policy")
+async def update_audit_export_policy(
+    request: AuditExportPolicyUpdate,
+) -> dict[str, Any]:
+    try:
+        return services.audit_export.update_policy(request)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.post("/api/audit-export/run")
+async def run_audit_export() -> dict[str, Any]:
+    services.audit.record(
+        "audit.export.run.requested",
+        "export",
+        target_type="audit-export-worker",
+        target_id="primary",
+        summary="An administrator requested an immediate dedicated-index audit export.",
+    )
+    try:
+        return await services.audit_export.run_now()
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
 
 
 @app.get("/api/validations")

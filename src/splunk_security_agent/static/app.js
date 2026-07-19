@@ -8,6 +8,7 @@ const state = {
   assurance: null, assurancePolicyDirty: false, connectionDiagnostics: null, queryIntelligence: null,
   workload: null,
   feedbackBenchmarks: null, goldenBenchmarks: null, selectedTournamentId: null, deliveryPolicyDirty: false,
+  auditExportPolicyDirty: false,
   evaluationDraft: null, evaluationScenarioIndex: 0,
   deliveryPreview: null, detections: [], activeDetection: null, detectionGitExport: null,
   repositoryStatus: null, repositoryHandoff: null, auth: null, authUsers: [],
@@ -250,7 +251,8 @@ function applyAccessPermissions() {
   if (canAdminister && state.settings) updateRepositoryControls();
   const mutationSelectors = [
     '#chatInput', '#chatForm .send-button', '#runDiscovery', '#cancelDiscoveryJob', '#runConnectionDiagnostics',
-    '#runAssuranceNow', '#assuranceForm button', '#deliveryForm button', '#scanSplunkModels',
+    '#runAssuranceNow', '#assuranceForm button', '#deliveryForm button', '#auditExportForm button',
+    '#runAuditExport', '#scanSplunkModels',
     '#runModelTournament', '#runGoldenBenchmark', '#addArtifact', '#uploadArtifact',
     '#newCase', '#newDetection'
   ];
@@ -276,6 +278,8 @@ function applyAccessPermissions() {
   const adminSelectors = [
     '#assuranceForm input', '#assuranceForm select', '#assuranceForm button[type="submit"]',
     '#deliveryForm input', '#deliveryForm select', '#deliveryForm button',
+    '#auditExportForm input', '#auditExportForm select', '#auditExportForm button',
+    '#runAuditExport',
     '[data-pull-profile]', '[data-activate-model]', '[data-promote-tournament]',
     '#modelTrustPolicyForm input', '#modelTrustPolicyForm select',
     '#modelTrustPolicyForm button', '[data-approve-model-artifact]',
@@ -2201,6 +2205,91 @@ function renderJiraReconciliation(job) {
   return `<section class="delivery-reconciliation ${escapeHtml(latest.outcome)}"><header><b>${escapeHtml(outcomeLabel)}</b><time>${escapeHtml(assuranceTime(latest.observed_at))}</time></header>${observed}${drift}<small>Explicit read only · minimal correlated issue fields · digest <code>${escapeHtml(latest.snapshot_sha256.slice(0,12))}</code> · no issue mutation</small>${historyMarkup}</section>`;
 }
 
+function hydrateAuditExport(value) {
+  if (!value?.policy || state.auditExportPolicyDirty) return;
+  const policy = value.policy;
+  const destination = value.destination || {};
+  $('#auditExportEnabled').checked = Boolean(policy.enabled);
+  $('#auditIndexName').value = policy.index_name || 'signalroom_audit';
+  $('#auditSourcetype').value = policy.sourcetype || 'signalroom:audit';
+  $('#auditSource').value = policy.source || 'signalroom:audit';
+  $('#auditHost').value = policy.host || 'signalroom';
+  $('#auditBatchSize').value = policy.batch_size ?? 25;
+  $('#auditMaxAttempts').value = policy.max_attempts ?? 5;
+  $('#auditRetryBackoff').value = String(policy.retry_backoff_seconds ?? 30);
+  $('#auditUseAck').checked = Boolean(policy.use_indexer_ack);
+  $('#auditVerifyTls').checked = Boolean(policy.verify_tls);
+  $('#auditCaBundle').value = policy.ca_bundle || '';
+  $('#auditBackfill').checked = false;
+  $('#auditHecUrl').value = '';
+  $('#auditHecToken').value = '';
+  $('#auditClearHecUrl').checked = false;
+  $('#auditClearHecToken').checked = false;
+  $('#auditHecUrl').placeholder = destination.url_configured
+    ? 'Encrypted HEC origin configured · leave blank to keep'
+    : 'https://hec.example.com:8088';
+  $('#auditHecToken').placeholder = destination.token_configured
+    ? 'Encrypted HEC token configured · leave blank to keep'
+    : 'Paste a dedicated HEC token';
+}
+
+function renderAuditExport(value) {
+  hydrateAuditExport(value);
+  const policy = value?.policy || {};
+  const destination = value?.destination || {};
+  const stateValue = value?.state || {};
+  const chain = value?.chain || {};
+  const statusLabels = {
+    disabled:'Disabled',
+    idle:'Current',
+    pending:'Pending',
+    sending:'Sending',
+    retrying:'Retry scheduled',
+    failed:'Needs attention',
+    'chain-invalid':'Chain invalid',
+    'config-error':'Configuration required'
+  };
+  const status = policy.enabled ? (stateValue.status || 'pending') : 'disabled';
+  const statusNode = $('#auditExportStatus');
+  statusNode.textContent = statusLabels[status] || status.replaceAll('-', ' ');
+  statusNode.className = `subtle-pill ${['idle','pending','sending'].includes(status) ? 'ok' : status === 'disabled' ? '' : 'warn'}`;
+  const pending = Number(stateValue.pending_events || 0);
+  const cursor = Number(stateValue.cursor_sequence || 0);
+  const latest = Number(stateValue.latest_sequence || 0);
+  $('#auditExportMetrics').innerHTML = `
+    <article><span>VERIFIED CHAIN</span><b>${chain.valid ? 'Valid' : 'Blocked'}</b><small>${Number(chain.event_count || 0).toLocaleString()} local events</small></article>
+    <article><span>REMOTE CURSOR</span><b>#${cursor.toLocaleString()}</b><small>Latest local #${latest.toLocaleString()}</small></article>
+    <article><span>BACKLOG</span><b>${pending.toLocaleString()}</b><small>event${pending === 1 ? '' : 's'} awaiting export</small></article>
+    <article><span>DELIVERY PROOF</span><b>${policy.use_indexer_ack ? 'Indexer ACK' : 'HEC accepted'}</b><small>At-least-once · stable IDs</small></article>`;
+  $('#auditExportDestinationHint').textContent = destination.configured
+    ? `${destination.origin} → index=${destination.index} · ${destination.transport} · ${destination.delivery_semantics}`
+    : destination.origin
+      ? `${destination.origin} · dedicated HEC token required`
+      : 'No remote audit destination configured';
+  $('#auditExportRuntimeHint').textContent = stateValue.last_error
+    ? stateValue.last_error
+    : policy.enabled
+      ? pending
+        ? `${pending.toLocaleString()} verified event${pending === 1 ? '' : 's'} queued from sequence ${cursor + 1}.`
+        : `Remote cursor is current through sequence ${cursor}.`
+      : 'Local chain remains authoritative while export is disabled.';
+  const runButton = $('#runAuditExport');
+  const lacksAdmin = Boolean(state.auth?.authenticated && !state.auth?.permissions?.can_administer);
+  runButton.disabled = lacksAdmin || !policy.enabled || Boolean(value.worker?.sending);
+  runButton.textContent = value.worker?.sending
+    ? 'Exporting…'
+    : ['failed','chain-invalid','config-error'].includes(status)
+      ? 'Retry export now'
+      : 'Export pending now';
+  const attempts = value?.attempts || [];
+  $('#auditExportAttempts').innerHTML = attempts.length ? attempts.slice(0,12).map(item => {
+    const proof = item.ack_id !== null && item.ack_id !== undefined
+      ? `ACK ${item.ack_id}${item.ack_confirmed ? ' confirmed' : ' unconfirmed'}`
+      : 'HEC response';
+    return `<article class="audit-export-attempt ${escapeHtml(item.outcome)}"><header><span>#${Number(item.first_sequence).toLocaleString()}–#${Number(item.last_sequence).toLocaleString()}</span><b>${escapeHtml(item.outcome)}</b></header><p>${Number(item.event_count).toLocaleString()} events · ${Number(item.payload_bytes).toLocaleString()} bytes · ${escapeHtml(proof)}</p>${item.error ? `<small>${escapeHtml(item.error)}</small>` : ''}<footer><time>${escapeHtml(assuranceTime(item.completed_at))}</time><span>HTTP ${item.http_status || '—'} · <code>${escapeHtml(item.payload_sha256.slice(0,12))}</code></span></footer></article>`;
+  }).join('') : '<div class="empty-inline compact-empty">No remote audit export has been attempted.</div>';
+}
+
 function renderDelivery(value) {
   const delivery = value.delivery || {}; const policy = delivery.policy || {}; const destination = delivery.destination || {};
   hydrateDeliveryPolicy(delivery);
@@ -2234,6 +2323,7 @@ function renderDelivery(value) {
   $('#auditChainStatus').textContent = chain.valid ? `${chain.event_count || 0} events · chain valid` : `Integrity break at event ${chain.broken_sequence || 'unknown'}`;
   $('#auditChainStatus').className = chain.valid ? 'audit-valid' : 'audit-invalid';
   $('#auditEvents').innerHTML = (audit.events || []).length ? audit.events.slice(0,12).map(item => `<article class="audit-event ${escapeHtml(item.outcome)}"><header><span>#${item.sequence} · ${escapeHtml(item.event_type)}</span><b>${escapeHtml(item.outcome)}</b></header><p>${escapeHtml(item.summary || item.action)}</p><footer><time>${escapeHtml(assuranceTime(item.created_at))}</time><code>${escapeHtml(item.event_hash.slice(0,12))}</code></footer></article>`).join('') : '<div class="empty-inline compact-empty">Audit events appear when control-plane decisions are made.</div>';
+  renderAuditExport(value.audit_export || {});
 }
 
 async function saveDeliveryPolicy(event) {
@@ -2326,6 +2416,49 @@ async function testDeliveryDestination() {
     result.textContent = error.message;
   } finally {
     button.disabled = false;
+  }
+}
+
+async function saveAuditExportPolicy(event) {
+  event.preventDefault();
+  const payload = {
+    enabled:$('#auditExportEnabled').checked,
+    index_name:$('#auditIndexName').value.trim(),
+    sourcetype:$('#auditSourcetype').value.trim(),
+    source:$('#auditSource').value.trim(),
+    host:$('#auditHost').value.trim(),
+    verify_tls:$('#auditVerifyTls').checked,
+    ca_bundle:$('#auditCaBundle').value.trim() || null,
+    use_indexer_ack:$('#auditUseAck').checked,
+    batch_size:Number($('#auditBatchSize').value),
+    max_attempts:Number($('#auditMaxAttempts').value),
+    retry_backoff_seconds:Number($('#auditRetryBackoff').value),
+    backfill_existing:$('#auditBackfill').checked,
+    hec_url:$('#auditHecUrl').value.trim() || null,
+    hec_token:$('#auditHecToken').value.trim() || null,
+    clear_hec_url:$('#auditClearHecUrl').checked,
+    clear_hec_token:$('#auditClearHecToken').checked
+  };
+  try {
+    await api('/api/audit-export/policy', {method:'PUT',body:JSON.stringify(payload)});
+    state.auditExportPolicyDirty = false;
+    await loadAssurance();
+    toast(payload.enabled ? 'Dedicated Splunk audit export enabled' : 'Audit export policy saved');
+  } catch (error) { toast(error.message); }
+}
+
+async function runAuditExportNow() {
+  const button = $('#runAuditExport');
+  button.disabled = true;
+  button.textContent = 'Exporting…';
+  try {
+    const result = await api('/api/audit-export/run', {method:'POST'});
+    state.assurance.audit_export = result;
+    renderAuditExport(result);
+    toast(result.ok ? 'Verified audit batch exported' : 'Audit export needs attention');
+  } catch (error) {
+    toast(error.message);
+    await loadAssurance();
   }
 }
 
@@ -3937,10 +4070,12 @@ $('#discoveryJobHistory').addEventListener('click', event => {
 $('#runConnectionDiagnostics').addEventListener('click', runConnectionDiagnostics);
 $('#assuranceForm').addEventListener('submit', saveAssurancePolicy);
 $('#deliveryForm').addEventListener('submit', saveDeliveryPolicy);
+$('#auditExportForm').addEventListener('submit', saveAuditExportPolicy);
 $('#modelTrustPolicyForm').addEventListener('submit', saveModelTrustPolicy);
 $('#approveDelivery').addEventListener('click', approveDeliveryPreview);
 $('#testDeliveryDestination').addEventListener('click', testDeliveryDestination);
 $('#testSoarDeliveryDestination').addEventListener('click', testDeliveryDestination);
+$('#runAuditExport').addEventListener('click', runAuditExportNow);
 $('#runAssuranceNow').addEventListener('click', runAssuranceNow);
 $('#cancelAssuranceRun').addEventListener('click', cancelAssuranceRun);
 $('#assuranceDepth').addEventListener('change', updateAssuranceBudgetHelp);
@@ -3951,6 +4086,7 @@ $('#deliveryKind').addEventListener('change', () => {
 });
 $$('#assuranceForm input,#assuranceForm select').forEach(node => node.addEventListener('change', () => { state.assurancePolicyDirty = true; }));
 $$('#deliveryForm input,#deliveryForm select').forEach(node => node.addEventListener('change', () => { state.deliveryPolicyDirty = true; }));
+$$('#auditExportForm input,#auditExportForm select').forEach(node => node.addEventListener('change', () => { state.auditExportPolicyDirty = true; }));
 $('#scanSplunkModels').addEventListener('click', scanSplunkModels);
 $('#newEvaluationSuite').addEventListener('click', createEvaluationSuite);
 $('#addEvaluationScenario').addEventListener('click', () => {

@@ -26,6 +26,7 @@ ADMIN_MUTATION_PREFIXES = (
     "/api/benchmarks/suites",
     "/api/detection-repository/",
     "/api/workload/",
+    "/api/audit-export/",
 )
 ADMIN_MUTATION_PATHS = {
     "/api/auth/disable",

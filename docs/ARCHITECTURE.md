@@ -317,11 +317,31 @@ with the same source ID; a restart completes a durably correlated create locally
 are redacted before persistence. The UI verifies the chain, but the local database is not a substitute for a remote
 immutable audit sink on a fully compromised host.
 
+## Remote audit export is a separate write authority
+
+`SplunkAuditExportService` owns an independently disabled HEC policy, encrypted HEC origin/token, restart-safe
+worker, and durable cursor in `audit_export.db`. It never receives the MCP token or an MCP client. The configured
+HEC token should be restricted by Splunk to the named dedicated index.
+
+Before every batch, the service verifies the complete local SHA-256 chain. Invalid chains stop without making an
+HTTP request. Valid events are read in ascending sequence and wrapped in Splunk's JSON event envelope with the
+configured index, sourcetype, source, and host. The stored redacted event remains intact inside
+`signalroom.audit.v1`; stable ID, sequence, actor, type, outcome, target type, and event hash are also exposed as
+bounded HEC fields. Requests refuse redirects, verify TLS by default, optionally use one private CA, and use an
+encrypted `Authorization: Splunk …` token only for HEC.
+
+The cursor advances only after a successful HEC response code. When indexer acknowledgement is required, the
+worker sends its persistent channel ID and advances only after `/services/collector/ack` confirms the returned
+`ackId`. Attempts, payload hashes, sequence ranges, HTTP status, ACK state, and bounded exponential retry state are
+durable. A crash before cursor commit can resend a batch, so delivery remains at-least-once; stable event IDs and
+hashes provide a destination deduplication key. Enabling or changing the destination begins with the next event
+unless the administrator explicitly requests verified-chain backfill.
+
 ### MCP exists on both sides
 
 SignalRoom is an MCP client of a Splunk MCP server and an MCP server to agent hosts. That lets another agent call the controlled, domain-specific workflows without receiving raw Splunk credentials.
 
 ## Next production increments
 
-1. Audit events sent to a dedicated Splunk index
-2. OIDC/MFA integration, account recovery, and tenant boundaries beyond local RBAC
+1. OIDC/MFA integration, account recovery, and tenant boundaries beyond local RBAC
+2. Deployment-specific audit retention, dashboards, alerts, and destination-side deduplication policy

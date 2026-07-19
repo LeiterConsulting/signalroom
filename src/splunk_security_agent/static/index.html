@@ -6,7 +6,7 @@
   <meta name="description" content="Local-first Splunk security agent with model routing, discovery, and evidence-backed chat.">
   <title>SignalRoom · Splunk Security Agent</title>
   <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 64 64%22><rect width=%2264%22 height=%2264%22 rx=%2214%22 fill=%22%2314251d%22/><path d=%22M17 40l10-10 8 8 13-15%22 fill=%22none%22 stroke=%22%233ed387%22 stroke-width=%226%22 stroke-linecap=%22round%22 stroke-linejoin=%22round%22/></svg>">
-  <link rel="stylesheet" href="/static/styles.css?v=20260719-independent-scroll">
+  <link rel="stylesheet" href="/static/styles.css?v=20260719-audit-export">
 </head>
 <body class="chat-active">
   <div class="app-shell">
@@ -209,6 +209,42 @@
                   <section><div class="validation-section-heading"><div><span>DELIVERY QUEUE</span><h5>Approved and attempted packages</h5></div></div><div class="delivery-jobs" id="deliveryJobs"></div></section>
                   <section><div class="validation-section-heading"><div><span>HASH-CHAINED LOCAL AUDIT</span><h5>Control-plane decisions</h5></div><small id="auditChainStatus">Checking chain</small></div><div class="audit-events" id="auditEvents"></div></section>
                 </div>
+                <section class="audit-export-workspace" aria-labelledby="auditExportTitle">
+                  <header>
+                    <div><span>REMOTE AUDIT AUTHORITY</span><h4 id="auditExportTitle">Export the verified chain to a dedicated Splunk index</h4><p>This is a separate, opt-in HEC write path. It never reuses the read-only MCP token and cannot search, modify, or delete Splunk data.</p></div>
+                    <span class="subtle-pill" id="auditExportStatus">Disabled</span>
+                  </header>
+                  <details class="audit-export-policy">
+                    <summary>Configure dedicated-index HEC delivery</summary>
+                    <form id="auditExportForm">
+                      <label class="switch-line"><span><b>Enable Splunk audit export</b><small>Disabled by default; saving an enabled policy starts automatic durable delivery</small></span><input type="checkbox" id="auditExportEnabled"><span class="switch-control" aria-hidden="true"></span></label>
+                      <div class="audit-export-grid">
+                        <label class="full"><span>Splunk HEC origin</span><input id="auditHecUrl" type="password" maxlength="4000" autocomplete="off" placeholder="https://hec.example.com:8088"><small>Enter an origin only. SignalRoom appends <code>/services/collector/event</code>.</small></label>
+                        <label class="full secret-revoke"><input id="auditClearHecUrl" type="checkbox"><span>Remove the saved HEC origin when this policy is saved</span></label>
+                        <label class="full"><span>Dedicated HEC token</span><input id="auditHecToken" type="password" maxlength="4000" autocomplete="off" placeholder="Leave blank to keep the encrypted token"><small>Use a token restricted to the dedicated index. It is stored encrypted and never returned.</small></label>
+                        <label class="full secret-revoke"><input id="auditClearHecToken" type="checkbox"><span>Remove the saved HEC token when this policy is saved</span></label>
+                        <label><span>Dedicated index</span><input id="auditIndexName" maxlength="80" value="signalroom_audit"><small>Default and internal Splunk indexes are rejected.</small></label>
+                        <label><span>Sourcetype</span><input id="auditSourcetype" maxlength="160" value="signalroom:audit"></label>
+                        <label><span>Source</span><input id="auditSource" maxlength="240" value="signalroom:audit"></label>
+                        <label><span>Host</span><input id="auditHost" maxlength="240" value="signalroom"></label>
+                        <label><span>Events per batch</span><input id="auditBatchSize" type="number" min="1" max="100" value="25"></label>
+                        <label><span>Maximum consecutive attempts</span><input id="auditMaxAttempts" type="number" min="1" max="12" value="5"></label>
+                        <label><span>Initial retry backoff</span><select id="auditRetryBackoff"><option value="10">10 seconds</option><option value="30" selected>30 seconds</option><option value="60">1 minute</option><option value="300">5 minutes</option></select></label>
+                        <label class="audit-backfill"><input id="auditBackfill" type="checkbox"><span><b>Backfill the existing verified chain</b><small>Applied only when enabling or changing the destination. Otherwise export begins with the next audit event.</small></span></label>
+                        <label class="full switch-line nested-switch"><span><b>Require Splunk indexer acknowledgement</b><small>Stronger evidence of indexing; the dedicated HEC token must have indexer acknowledgement enabled.</small></span><input type="checkbox" id="auditUseAck"><span class="switch-control" aria-hidden="true"></span></label>
+                        <label class="full switch-line nested-switch"><span><b>Verify HEC TLS certificates</b><small>Recommended. Disable only for a trusted self-signed internal endpoint, or supply a private CA.</small></span><input type="checkbox" id="auditVerifyTls" checked><span class="switch-control" aria-hidden="true"></span></label>
+                        <label class="full"><span>Private CA bundle path <em>optional</em></span><input id="auditCaBundle" maxlength="1000" placeholder="C:\certs\organization-ca.pem or /etc/ssl/org-ca.pem"></label>
+                      </div>
+                      <div class="audit-export-contract" role="note"><b>Delivery contract</b><span>Verified chain only · redacted stored events · stable event IDs and hashes · bounded at-least-once batches · no search or administrative authority</span></div>
+                      <footer><span id="auditExportDestinationHint">No remote audit destination configured</span><button class="button primary small" type="submit">Save audit export policy</button></footer>
+                    </form>
+                  </details>
+                  <div class="audit-export-runtime">
+                    <div class="audit-export-metrics" id="auditExportMetrics"></div>
+                    <div class="audit-export-actions"><span id="auditExportRuntimeHint">Local chain remains authoritative while export is disabled.</span><button class="button ghost small" id="runAuditExport" type="button">Export pending now</button></div>
+                    <div class="audit-export-attempts" id="auditExportAttempts"><div class="empty-inline compact-empty">No remote audit export has been attempted.</div></div>
+                  </div>
+                </section>
               </section>
             </section>
             <div class="assurance-results-grid">
@@ -636,6 +672,6 @@
     </aside>
   </div>
   <div class="toast" id="toast" role="status"></div>
-  <script src="/static/app.js?v=20260719-independent-scroll" defer></script>
+  <script src="/static/app.js?v=20260719-audit-export" defer></script>
 </body>
 </html>

@@ -158,6 +158,22 @@ class AuditStore:
             ).fetchall()
         return [self._event(row) for row in rows]
 
+    def events_after(self, sequence: int, limit: int = 100) -> list[dict[str, Any]]:
+        with self.connect() as db:
+            rows = db.execute(
+                """SELECT * FROM audit_events WHERE sequence>?
+                ORDER BY sequence LIMIT ?""",
+                (max(int(sequence), 0), min(max(limit, 1), 500)),
+            ).fetchall()
+        return [self._event(row) for row in rows]
+
+    def latest_sequence(self) -> int:
+        with self.connect() as db:
+            row = db.execute(
+                "SELECT COALESCE(MAX(sequence),0) AS sequence FROM audit_events"
+            ).fetchone()
+        return int(row["sequence"]) if row else 0
+
     def verify(self) -> dict[str, Any]:
         with self.connect() as db:
             rows = db.execute("SELECT * FROM audit_events ORDER BY sequence").fetchall()

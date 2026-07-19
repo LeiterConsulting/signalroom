@@ -123,7 +123,10 @@ def test_investigation_columns_scroll_independently() -> None:
     assert '<body class="chat-active">' in INDEX_HTML
     assert "document.body.classList.toggle('chat-active', name === 'chat')" in APP_JS
     assert "body.chat-active{overflow:hidden}" in STYLES_CSS
-    assert "body.chat-active .workspace{height:100vh;height:100dvh;min-height:0;overflow:hidden}" in STYLES_CSS
+    assert (
+        "body.chat-active .workspace{height:100vh;height:100dvh;"
+        "min-height:0;overflow:hidden}"
+    ) in STYLES_CSS
     assert "body.chat-active .conversation-panel{min-height:0;overflow:hidden}" in STYLES_CSS
     assert (
         "body.chat-active .messages{min-height:0;overflow-x:hidden;overflow-y:auto;"
@@ -134,3 +137,19 @@ def test_investigation_columns_scroll_independently() -> None:
         "overflow-y:auto;overscroll-behavior:contain;scrollbar-gutter:stable}"
     ) in STYLES_CSS
     assert ".rail{position:fixed;" in STYLES_CSS
+
+
+def test_remote_audit_export_is_explicit_and_accessible() -> None:
+    assert 'id="auditExportForm"' in INDEX_HTML
+    assert 'id="auditExportEnabled"' in INDEX_HTML
+    assert 'id="auditVerifyTls"' in INDEX_HTML
+    assert 'id="auditUseAck"' in INDEX_HTML
+    assert 'id="auditBackfill"' in INDEX_HTML
+    assert 'id="runAuditExport"' in INDEX_HTML
+    assert "never reuses the read-only MCP token" in INDEX_HTML
+    assert "Default and internal Splunk indexes are rejected." in INDEX_HTML
+    assert "Verified chain only" in INDEX_HTML
+    assert "async function saveAuditExportPolicy" in APP_JS
+    assert "async function runAuditExportNow" in APP_JS
+    assert "renderAuditExport(value.audit_export || {})" in APP_JS
+    assert ".audit-export-workspace" in STYLES_CSS

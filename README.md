@@ -24,6 +24,7 @@ This is a focused reimplementation inspired by [LeiterConsulting/splunk-discover
 - Versioned local golden investigations with isolated evidence, instrumented tool selection, durable baselines, and explicit promotion gates
 - Audit-first model publisher allowlists and local Ed25519 approvals bound to exact model revisions and content digests
 - Opt-in generic JSON and Slack Incoming Webhook adapters with exact redaction previews, hash-bound approval, guarded routing, and a tamper-evident local audit chain
+- Opt-in export of the verified audit chain to a dedicated Splunk HEC index with a durable cursor, bounded retries, and optional indexer acknowledgement
 - Evidence-bound detection-as-code projects with immutable versions, exact-hash review, case linkage, and disabled-by-default Splunk packages
 - Ollama chat and tool-capable model support
 - Hugging Face chat, embedding, and token-classification adapters
@@ -113,6 +114,8 @@ Environment variables override encrypted stored secrets:
 ```text
 SPLUNK_MCP_TOKEN=...
 HF_TOKEN=...
+SIGNALROOM_AUDIT_HEC_URL=https://hec.example.com:8088
+SIGNALROOM_AUDIT_HEC_TOKEN=...
 ```
 
 ## Connect a detection repository
@@ -572,6 +575,20 @@ append-only SHA-256 hash chain. Audit metadata applies key-based secret redactio
 chain integrity. When RBAC is active, request-scoped audit records carry the named username. This is a
 tamper-evident local record, not an external immutable audit sink.
 
+The Discovery page can promote that record into a separate, opt-in Splunk HEC delivery authority. SignalRoom
+requires a dedicated non-default index and encrypted HEC origin/token, verifies the entire local chain before each
+batch, and advances a durable cursor only after HEC accepts the batch. Optional indexer acknowledgement waits for
+Splunk to confirm indexing before advancing. The HEC token is never reused for MCP, search, or administration;
+use a token restricted to the configured audit index. Existing events are not exported unless the administrator
+explicitly selects backfill while enabling or changing the destination.
+
+Export is at-least-once. Every remote event therefore includes the stable local event ID, sequence,
+`previous_hash`, and `event_hash` for destination-side correlation or deduplication. A restart retries an
+uncommitted cursor; a broken local chain blocks export. See Splunk's
+[JSON HEC event format](https://help.splunk.com/en/splunk-enterprise/get-started/get-data-in/9.2/get-data-with-http-event-collector/format-events-for-http-event-collector)
+and [indexer acknowledgement](https://help.splunk.com/en/splunk-enterprise/get-data-in/get-started-with-getting-data-in/9.1/get-data-with-http-event-collector/about-http-event-collector-indexer-acknowledgment)
+documentation.
+
 Splunk SOAR now has a duplicate-safe, create-container-only adapter with exact-payload approval, automation disabled,
 no artifacts, durable correlation, self-signed/private-CA transport support, and a read-only container-options test.
 Correlated Jira issues retain explicit read-only reconciliation and immutable local drift history. Optional local
@@ -580,8 +597,9 @@ cancellation, restart recovery, and retained results. Model evaluation and promo
 digest bindings through operator-signed local attestations. A shared Splunk admission controller now protects
 Investigate, Discovery, Validation, Assurance, and MLTK traffic with live queue state, relative cost preflight,
 per-instance concurrency, and audit-first risk and UTC-day budget policy. Operator-authored evaluation suites now
-extend the durable golden and tournament authorities. The next roadmap increment is exporting audit events to a
-dedicated Splunk index under an explicit delivery policy.
+extend the durable golden and tournament authorities. Verified audit events can now be exported to a dedicated
+Splunk index under an explicit HEC delivery policy. The next production increment is external identity:
+OIDC/MFA, recovery, and tenant boundaries beyond local RBAC.
 
 ### Operator-authored evaluation suites
 
@@ -645,7 +663,8 @@ open tickets, or change Splunk; external workflow automation remains an explicit
 
 This release is an operator-grade prototype with optional local RBAC, not a complete multi-tenant security product.
 Before external exposure, enable RBAC and add HTTPS, trusted proxy configuration, centralized identity and recovery,
-remote immutable audit export, broader rate limiting, retention controls, and a deployment-specific threat model.
+configure the dedicated audit export with destination-side retention and alerting, add broader rate limiting, and
+complete a deployment-specific threat model.
 Keep local single-user mode bound to localhost.
 
 ## License and attribution

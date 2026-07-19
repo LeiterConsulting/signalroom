@@ -168,6 +168,8 @@ class ConfigStore:
             "delivery_jira_email": "SIGNALROOM_JIRA_EMAIL",
             "delivery_jira_api_token": "SIGNALROOM_JIRA_API_TOKEN",
             "delivery_soar_auth_token": "SIGNALROOM_SOAR_AUTH_TOKEN",
+            "audit_hec_url": "SIGNALROOM_AUDIT_HEC_URL",
+            "audit_hec_token": "SIGNALROOM_AUDIT_HEC_TOKEN",
         }
         env_name = env_names.get(name, "")
         return bool(env_name and os.getenv(env_name, ""))
@@ -181,6 +183,8 @@ class ConfigStore:
             "delivery_jira_email": "SIGNALROOM_JIRA_EMAIL",
             "delivery_jira_api_token": "SIGNALROOM_JIRA_API_TOKEN",
             "delivery_soar_auth_token": "SIGNALROOM_SOAR_AUTH_TOKEN",
+            "audit_hec_url": "SIGNALROOM_AUDIT_HEC_URL",
+            "audit_hec_token": "SIGNALROOM_AUDIT_HEC_TOKEN",
         }
         return os.getenv(env_names.get(name, ""), "") or self.vault.load().get(name, "")
 
@@ -201,5 +205,7 @@ class ConfigStore:
         settings["secrets"] = {
             "splunk_token": bool(self.secret("splunk_token")),
             "huggingface_token": bool(self.secret("huggingface_token")),
+            "audit_hec_url": bool(self.secret("audit_hec_url")),
+            "audit_hec_token": bool(self.secret("audit_hec_token")),
         }
         return settings
