@@ -107,6 +107,7 @@ class TimeSeriesBaselineAcceptRequest(BaseModel):
         pattern=r"^[0-9a-f]{64}$",
     )
     review_note: str = Field(min_length=3, max_length=4000)
+    baseline_scope: Literal["general", "matching-weekday"] = "general"
 
 
 class TimeSeriesAlertCandidateCreate(BaseModel):
@@ -119,6 +120,35 @@ class TimeSeriesAlertCandidateCreate(BaseModel):
     rationale: str = Field(min_length=3, max_length=4000)
     direction: Literal["above", "below"] = "above"
     case_id: str | None = Field(default=None, max_length=120)
+
+
+class TimeSeriesScheduleCreate(BaseModel):
+    title: str = Field(min_length=1, max_length=240)
+    request: TimeSeriesForecastRequest
+    enabled: bool = False
+    interval_minutes: int = Field(default=360, ge=60, le=10_080)
+    max_runs_per_day: int = Field(default=4, ge=1, le=12)
+    seasonal_comparison: bool = True
+
+
+class TimeSeriesScheduleUpdate(BaseModel):
+    expected_updated_at: str = Field(min_length=1, max_length=80)
+    title: str | None = Field(default=None, min_length=1, max_length=240)
+    request: TimeSeriesForecastRequest | None = None
+    enabled: bool | None = None
+    interval_minutes: int | None = Field(default=None, ge=60, le=10_080)
+    max_runs_per_day: int | None = Field(default=None, ge=1, le=12)
+    seasonal_comparison: bool | None = None
+
+
+class TimeSeriesReviewDecision(BaseModel):
+    expected_run_fingerprint: str = Field(
+        min_length=64,
+        max_length=64,
+        pattern=r"^[0-9a-f]{64}$",
+    )
+    decision: Literal["acknowledge", "dismiss"]
+    note: str = Field(min_length=3, max_length=4000)
 
 
 AccessRole = Literal["viewer", "analyst", "admin"]

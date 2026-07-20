@@ -45,7 +45,12 @@ from .detections import (
 )
 from .discovery import DiscoveryJobService, DiscoveryJobStore, DiscoveryPipeline
 from .feedback import AnalystFeedbackStore
-from .forecasting import TimeSeriesExperimentStore, TimeSeriesForecastService
+from .forecasting import (
+    TimeSeriesExperimentStore,
+    TimeSeriesForecastService,
+    TimeSeriesScheduleService,
+    TimeSeriesScheduleStore,
+)
 from .mcp_server import MCPServer
 from .model_setup import ModelSetupService
 from .model_trust import ModelTrustService, ModelTrustStore
@@ -111,7 +116,10 @@ from .schemas import (
     TimeSeriesAlertCandidateCreate,
     TimeSeriesBaselineAcceptRequest,
     TimeSeriesForecastRequest,
+    TimeSeriesReviewDecision,
     TimeSeriesRuntimeUpdate,
+    TimeSeriesScheduleCreate,
+    TimeSeriesScheduleUpdate,
     ValidationTaskCreate,
     ValidationTaskUpdate,
     WorkloadPolicyUpdate,
@@ -227,6 +235,13 @@ class Services:
             self.validation_store,
             self.cases,
         )
+        self.time_series_schedule_store = TimeSeriesScheduleStore(DATA / "time_series_schedules.db")
+        self.time_series_schedules = TimeSeriesScheduleService(
+            self.time_series_schedule_store,
+            self.time_series,
+            self.audit,
+            self._forecast_schedule_authorization,
+        )
         self._fingerprint = ""
         self._splunk: Any = None
         self._agent: SecurityAgent | None = None
@@ -257,6 +272,19 @@ class Services:
             self.discovery_lock,
             self._assurance_preflight,
         )
+
+    def _forecast_schedule_authorization(self, username: str) -> tuple[bool, str]:
+        policy = self.auth_store.policy()
+        if not policy["enabled"]:
+            return True, "Local single-user mode has Primary Splunk access."
+        user = self.auth_store.get_user_by_username(username)
+        if user is None or not user.get("active"):
+            return False, "The schedule owner is no longer an active SignalRoom user."
+        if user.get("role") not in {"analyst", "admin"}:
+            return False, "The schedule owner no longer has analyst execution permission."
+        if "primary" not in (user.get("connection_ids") or []):
+            return False, "The schedule owner no longer has access to the Primary Splunk connection."
+        return True, "The schedule owner retains analyst and Primary Splunk access."
 
     def _assurance_pipeline(self, client: Any) -> DiscoveryPipeline:
         model_inventory = SplunkModelInventoryService(self.config, client)
@@ -386,6 +414,7 @@ async def lifespan(app: FastAPI):
     services.model_setup.schedule_context_index()
     await services.discovery_jobs.start()
     await services.assurance.start()
+    await services.time_series_schedules.start()
     await services.delivery.start()
     await services.audit_export.start()
     try:
@@ -393,6 +422,7 @@ async def lifespan(app: FastAPI):
     finally:
         await services.audit_export.stop()
         await services.delivery.stop()
+        await services.time_series_schedules.stop()
         await services.assurance.stop()
         await services.discovery_jobs.stop()
 
@@ -521,6 +551,7 @@ async def health() -> dict[str, Any]:
         "artifacts": len(services.evidence.list()),
         "discovery_worker": services.discovery_jobs.overview()["worker"]["online"],
         "assurance_worker": services.assurance.overview()["worker"]["online"],
+        "forecast_worker": services.time_series_schedules.overview()["worker"]["online"],
         "audit_export_worker": services.audit_export.overview()["worker"]["online"],
         "connection_ready": bool(latest_diagnostic.get("ready")),
         "access_mode": "rbac" if auth_policy["enabled"] else "local-single-user",
@@ -1070,6 +1101,7 @@ async def accept_time_series_baseline(
             expected_fingerprint=value.expected_run_fingerprint,
             actor=actor,
             review_note=value.review_note,
+            baseline_scope=value.baseline_scope,
         )
     except KeyError as exc:
         raise HTTPException(404, str(exc)) from exc
@@ -1085,6 +1117,7 @@ async def accept_time_series_baseline(
             "series_key": result["series_key"],
             "run_fingerprint": result["run_fingerprint"],
             "model_revision": result["runtime"].get("source_revision", ""),
+            "baseline_slots": result["baseline_slots"],
         },
         actor=actor,
     )
@@ -1130,6 +1163,181 @@ async def create_time_series_alert_candidate(
             "case_id": candidate["case_id"],
             "splunk_executed": False,
             "alert_created": False,
+        },
+        actor=actor,
+    )
+    return result
+
+
+@app.get("/api/model-capabilities/time-series/schedules")
+async def list_time_series_schedules(limit: int = 30) -> dict[str, Any]:
+    return services.time_series_schedules.overview(limit)
+
+
+@app.post("/api/model-capabilities/time-series/schedules", status_code=201)
+async def create_time_series_schedule(
+    value: TimeSeriesScheduleCreate,
+    request: Request,
+) -> dict[str, Any]:
+    principal = getattr(request.state, "principal", {}) or {}
+    actor = str(principal.get("username") or "local-operator")
+    try:
+        services.time_series.validate_contract(value.request)
+        result = services.time_series_schedule_store.create(value, actor=actor)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    services.time_series_schedules.wake()
+    services.audit.record(
+        "model.capability.time-series.schedule-created",
+        "create",
+        target_type="forecast-schedule",
+        target_id=result["id"],
+        summary=(
+            "A local shadow forecast schedule was created "
+            f"{'and explicitly enabled' if result['enabled'] else 'in paused state'}."
+        ),
+        metadata={
+            "enabled": result["enabled"],
+            "interval_minutes": result["interval_minutes"],
+            "max_runs_per_day": result["max_runs_per_day"],
+            "seasonal_comparison": result["seasonal_comparison"],
+            "automatic_alerting": False,
+        },
+        actor=actor,
+    )
+    return result
+
+
+@app.patch("/api/model-capabilities/time-series/schedules/{schedule_id}")
+async def update_time_series_schedule(
+    schedule_id: str,
+    value: TimeSeriesScheduleUpdate,
+    request: Request,
+) -> dict[str, Any]:
+    principal = getattr(request.state, "principal", {}) or {}
+    actor = str(principal.get("username") or "local-operator")
+    try:
+        if value.request is not None:
+            services.time_series.validate_contract(value.request)
+        result = services.time_series_schedule_store.update(schedule_id, value)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    if result is None:
+        raise HTTPException(404, "Shadow forecast schedule not found")
+    services.time_series_schedules.wake()
+    services.audit.record(
+        "model.capability.time-series.schedule-updated",
+        "update",
+        target_type="forecast-schedule",
+        target_id=schedule_id,
+        summary=(
+            f"Shadow forecasting was {'started' if result['enabled'] else 'paused'} "
+            "with an explicit schedule update."
+        ),
+        metadata={
+            "enabled": result["enabled"],
+            "interval_minutes": result["interval_minutes"],
+            "max_runs_per_day": result["max_runs_per_day"],
+            "seasonal_comparison": result["seasonal_comparison"],
+        },
+        actor=actor,
+    )
+    return result
+
+
+@app.delete("/api/model-capabilities/time-series/schedules/{schedule_id}")
+async def archive_time_series_schedule(
+    schedule_id: str,
+    expected_updated_at: str,
+    request: Request,
+) -> dict[str, Any]:
+    principal = getattr(request.state, "principal", {}) or {}
+    actor = str(principal.get("username") or "local-operator")
+    active = services.time_series_schedule_store.active_attempt()
+    if active and active["schedule_id"] == schedule_id:
+        raise HTTPException(409, "Wait for the active shadow forecast to finish before archiving")
+    try:
+        result = services.time_series_schedule_store.archive(
+            schedule_id,
+            expected_updated_at=expected_updated_at,
+        )
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    if result is None:
+        raise HTTPException(404, "Shadow forecast schedule not found")
+    services.audit.record(
+        "model.capability.time-series.schedule-archived",
+        "archive",
+        target_type="forecast-schedule",
+        target_id=schedule_id,
+        summary="A shadow forecast schedule was paused and archived; its history remains retained.",
+        metadata={"history_retained": True},
+        actor=actor,
+    )
+    return result
+
+
+@app.post("/api/model-capabilities/time-series/schedules/{schedule_id}/run/stream")
+async def run_time_series_schedule_now(
+    schedule_id: str,
+    request: Request,
+) -> StreamingResponse:
+    principal = getattr(request.state, "principal", {}) or {}
+    actor = str(principal.get("username") or "local-operator")
+
+    async def run(progress: Any) -> dict[str, Any]:
+        try:
+            result = await services.time_series_schedules.run_now(schedule_id, progress)
+        except (KeyError, PermissionError, RuntimeError, ValueError) as exc:
+            raise RuntimeError(str(exc)) from exc
+        services.audit.record(
+            "model.capability.time-series.schedule-run-requested",
+            "execute",
+            target_type="forecast-schedule",
+            target_id=schedule_id,
+            summary="An analyst explicitly completed a shadow forecast through the scheduled lane.",
+            metadata={
+                "attempt_id": result["attempt"]["id"],
+                "run_id": result["attempt"]["experiment_run_id"],
+                "review_created": bool(result.get("review")),
+                "automatic_alerting": False,
+            },
+            actor=actor,
+        )
+        return result
+
+    return _stream_response(run)
+
+
+@app.post("/api/model-capabilities/time-series/reviews/{review_id}")
+async def decide_time_series_review(
+    review_id: str,
+    value: TimeSeriesReviewDecision,
+    request: Request,
+) -> dict[str, Any]:
+    principal = getattr(request.state, "principal", {}) or {}
+    actor = str(principal.get("username") or "local-operator")
+    try:
+        result = services.time_series_schedule_store.decide_review(
+            review_id,
+            value,
+            actor=actor,
+        )
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    if result is None:
+        raise HTTPException(404, "Shadow forecast review not found")
+    services.audit.record(
+        "model.capability.time-series.shadow-review-decided",
+        value.decision,
+        target_type="forecast-review",
+        target_id=review_id,
+        summary=(f"A shadow forecast review was {result['state']}; no alert or threshold was changed."),
+        metadata={
+            "run_id": result["experiment_run_id"],
+            "run_fingerprint": result["run_fingerprint"],
+            "comparison_decision": result["comparison_decision"],
+            "automatic_alerting": False,
         },
         actor=actor,
     )

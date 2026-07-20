@@ -13,7 +13,7 @@ const state = {
   deliveryPreview: null, detections: [], activeDetection: null, detectionGitExport: null,
   repositoryStatus: null, repositoryHandoff: null, auth: null, authUsers: [],
   codeScreenResult: null, timeSeriesStatus: null, timeSeriesResult: null,
-  timeSeriesExperiments: null,
+  timeSeriesExperiments: null, timeSeriesSchedules: null, timeSeriesScheduleTimer: null,
   workspaceLoaded: false, assuranceTimer: null, discoveryJobs: null,
   activeDiscoveryJob: null, discoveryPollTimer: null, discoveryPollBusy: false,
   discoveryWatchingJobId: null
@@ -262,6 +262,9 @@ function applyAccessPermissions() {
     '#exportAuditOperations', '#scanSplunkModels',
     '#runModelTournament', '#runGoldenBenchmark', '#addArtifact', '#uploadArtifact',
     '#newCase', '#newDetection', '#runTimeSeriesForecast',
+    '#timeSeriesScheduleForm input', '#timeSeriesScheduleForm select',
+    '#timeSeriesScheduleForm button', '#timeSeriesScheduleHistory button',
+    '#timeSeriesReviewQueue form textarea', '#timeSeriesReviewQueue form button',
     '#timeSeriesExperimentHistory form input',
     '#timeSeriesExperimentHistory form select',
     '#timeSeriesExperimentHistory form textarea',
@@ -277,7 +280,8 @@ function applyAccessPermissions() {
   const connectionSelectors = [
     '#chatInput', '#chatForm .send-button', '#runDiscovery', '#cancelDiscoveryJob',
     '#runConnectionDiagnostics', '#runAssuranceNow', '#scanSplunkModels',
-    '#runTimeSeriesForecast'
+    '#runTimeSeriesForecast', '#timeSeriesScheduleForm button',
+    '#timeSeriesScheduleHistory button'
   ];
   $$(connectionSelectors.join(',')).forEach(node => {
     if (authenticated && !canUseConnection) {
@@ -1169,6 +1173,29 @@ function openTimeSeriesWorkbench() {
         <div class="operation-metrics"></div><ol class="operation-steps"></ol>
       </article>
       <div id="timeSeriesOutput" class="forecast-output" aria-live="polite"></div>
+      <section class="forecast-schedules" aria-labelledby="timeSeriesScheduleTitle">
+        <header><div><span>OPT-IN SHADOW FORECASTING</span><h3 id="timeSeriesScheduleTitle">Watch a reviewed series on a hard budget</h3><p>Save the exact contract above, run it only on the cadence you explicitly start, and route meaningful baseline changes to an analyst queue. Missed intervals are coalesced; runs never create alerts or change thresholds.</p></div><button class="button ghost small" id="refreshTimeSeriesSchedules" type="button">Refresh schedules</button></header>
+        <details class="forecast-schedule-create">
+          <summary>Create a shadow schedule from the current contract</summary>
+          <form id="timeSeriesScheduleForm">
+            <label class="full"><span>Schedule title</span><input id="forecastScheduleTitle" value="Splunk event-rate shadow" maxlength="240" required><small>The saved forecast title, SPL, fields, window, horizon, and backtest are copied from the form above.</small></label>
+            <label><span>Cadence</span><select id="forecastScheduleInterval"><option value="60">Every hour</option><option value="360" selected>Every 6 hours</option><option value="720">Every 12 hours</option><option value="1440">Daily</option><option value="10080">Weekly</option></select></label>
+            <label><span>Per-schedule UTC daily ceiling</span><input id="forecastScheduleDailyLimit" type="number" value="4" min="1" max="12" required></label>
+            <label><span>Comparison reference</span><select id="forecastScheduleSeasonal"><option value="true" selected>Matching weekday, then general</option><option value="false">General baseline only</option></select></label>
+            <label><span>Initial state</span><select id="forecastScheduleEnabled"><option value="false" selected>Create paused</option><option value="true">Create and start cadence</option></select></label>
+            <div class="forecast-boundary full"><b>Safety contract</b><span>Single local execution lane · at most 24 shadow runs per UTC day across SignalRoom · owner access rechecked before every run · no catch-up storm after downtime.</span></div>
+            <button class="button primary" type="submit">Save shadow schedule</button>
+          </form>
+        </details>
+        <article class="operation-card forecast-operation" id="timeSeriesScheduleProgress" aria-live="polite" hidden>
+          <header><div><span class="operation-kicker">SHADOW FORECAST RUN</span><h3 class="operation-label">Waiting for the local forecast lane</h3></div><span class="operation-elapsed">0s</span></header>
+          <p class="operation-detail">The owner, runtime, and read-only contract will be checked first.</p>
+          <div class="operation-progress" role="progressbar" aria-label="Shadow forecast progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><i></i></div>
+          <div class="operation-metrics"></div><ol class="operation-steps"></ol>
+        </article>
+        <div id="timeSeriesScheduleHistory" aria-live="polite"><div class="empty-inline compact-empty">Loading shadow schedules…</div></div>
+        <div id="timeSeriesReviewQueue" aria-live="polite"></div>
+      </section>
       <section class="forecast-experiments" aria-labelledby="timeSeriesExperimentTitle">
         <header><div><span>LOCAL EXPERIMENT REGISTRY</span><h3 id="timeSeriesExperimentTitle">Repeat, compare, then review</h3><p>Each run retains its contract, backtest, forecast, model revision, and fingerprints—not the source rows. Baselines and alert candidates require exact-run review.</p></div><button class="button ghost small" id="refreshTimeSeriesExperiments" type="button">Refresh history</button></header>
         <div id="timeSeriesExperimentHistory" aria-live="polite"><div class="empty-inline compact-empty">Loading retained forecast history…</div></div>
@@ -1178,11 +1205,14 @@ function openTimeSeriesWorkbench() {
   });
   $('#timeSeriesRuntimeForm').addEventListener('submit', saveTimeSeriesRuntime);
   $('#timeSeriesForecastForm').addEventListener('submit', runTimeSeriesForecast);
+  $('#timeSeriesScheduleForm').addEventListener('submit', createTimeSeriesSchedule);
   if ($('#startBundledTimeSeries')) {
     $('#startBundledTimeSeries').addEventListener('click', startBundledTimeSeriesRuntime);
   }
   $('#refreshTimeSeriesExperiments').addEventListener('click', loadTimeSeriesExperiments);
+  $('#refreshTimeSeriesSchedules').addEventListener('click', loadTimeSeriesSchedules);
   loadTimeSeriesExperiments();
+  loadTimeSeriesSchedules();
   applyAccessPermissions();
   (runtime.ok ? $('#forecastSpl') : $('#timeSeriesEndpoint')).focus();
 }
@@ -1241,6 +1271,173 @@ async function saveTimeSeriesRuntime(event) {
   }
 }
 
+function timeSeriesRequestFromForm() {
+  return {
+    title:$('#forecastTitle').value.trim(),
+    spl:$('#forecastSpl').value.trim(),
+    earliest_time:$('#forecastEarliest').value,
+    latest_time:'now',
+    row_limit:Number($('#forecastRows').value),
+    timestamp_field:$('#forecastTimestampField').value.trim(),
+    value_field:$('#forecastValueField').value.trim(),
+    interval_seconds:Number($('#forecastInterval').value),
+    horizon:Number($('#forecastHorizon').value),
+    backtest_points:Number($('#forecastBacktest').value)
+  };
+}
+
+async function loadTimeSeriesSchedules(event) {
+  clearTimeout(state.timeSeriesScheduleTimer);
+  const button = event?.currentTarget?.id === 'refreshTimeSeriesSchedules' ? event.currentTarget : null;
+  if (button) { button.disabled = true; button.textContent = 'Refreshing…'; }
+  try {
+    state.timeSeriesSchedules = await api('/api/model-capabilities/time-series/schedules?limit=40');
+    renderTimeSeriesSchedules();
+    const active = (state.timeSeriesSchedules.attempts || []).some(item => ['queued','running'].includes(item.status));
+    if (active && $('#timeSeriesScheduleHistory') && !$('#detailModal').hidden) {
+      state.timeSeriesScheduleTimer = setTimeout(loadTimeSeriesSchedules, 1800);
+    }
+  } catch (error) {
+    const panel = $('#timeSeriesScheduleHistory');
+    if (panel) panel.innerHTML = `<div class="code-screen-error"><b>Shadow schedules unavailable</b><span>${escapeHtml(error.message)}</span></div>`;
+  } finally {
+    if (button) { button.disabled = false; button.textContent = 'Refresh schedules'; }
+  }
+}
+
+function forecastScheduleCadence(minutes) {
+  const value = Number(minutes || 0);
+  if (value >= 10080 && value % 10080 === 0) return `${value / 10080} week`;
+  if (value >= 1440 && value % 1440 === 0) return `${value / 1440} day`;
+  if (value >= 60 && value % 60 === 0) return `${value / 60} hour`;
+  return `${value} minute`;
+}
+
+function forecastScheduleTime(value, empty = 'Not yet run') {
+  return value ? new Date(value).toLocaleString() : empty;
+}
+
+function renderTimeSeriesSchedules() {
+  const panel = $('#timeSeriesScheduleHistory'); const reviewPanel = $('#timeSeriesReviewQueue');
+  if (!panel || !reviewPanel) return;
+  const registry = state.timeSeriesSchedules || {}; const schedules = registry.schedules || [];
+  const attempts = registry.attempts || []; const reviews = registry.reviews || [];
+  const worker = registry.worker || {}; const usage = registry.usage_today || {};
+  const workerState = `<div class="forecast-schedule-contract"><span><b>${worker.online ? 'Online' : 'Offline'}</b>single execution worker</span><span><b>${Number(usage.global_runs || 0)}/${Number(usage.global_limit || 24)}</b>UTC daily global budget</span><span><b>0</b>automatic alerts</span><span><b>Fresh retry</b>after restart</span></div>`;
+  if (!schedules.length) {
+    panel.innerHTML = `${workerState}<div class="empty-inline compact-empty">No shadow schedules yet. Save the current bounded contract above; the safe default is paused.</div>`;
+  } else {
+    panel.innerHTML = `${workerState}<div class="forecast-schedule-list">${schedules.map(schedule => {
+      const latest = attempts.find(item => item.schedule_id === schedule.id);
+      const events = latest?.events || []; const lastEvent = events.at(-1);
+      const usageToday = schedule.usage_today || {};
+      const active = latest && ['queued','running'].includes(latest.status);
+      const eventSteps = active ? `<ol class="forecast-attempt-steps">${events.slice(-5).map(item => `<li class="${escapeHtml(item.status)}"><i></i><span><b>${escapeHtml(item.label)}</b><small>${escapeHtml(item.detail)}</small></span></li>`).join('')}</ol>` : '';
+      return `<article class="forecast-schedule ${schedule.enabled ? 'enabled' : 'paused'}">
+        <header><div><span>${schedule.enabled ? 'CADENCE ACTIVE' : 'PAUSED'} · ${escapeHtml(schedule.created_by)}</span><h4>${escapeHtml(schedule.title)}</h4></div><b>${schedule.enabled ? 'active' : 'paused'}</b></header>
+        <p>${escapeHtml(schedule.request.spl)}</p>
+        <div class="forecast-schedule-metrics"><span><b>${escapeHtml(forecastScheduleCadence(schedule.interval_minutes))}</b>cadence</span><span><b>${Number(usageToday.schedule_runs || 0)}/${Number(schedule.max_runs_per_day)}</b>schedule budget today</span><span><b>${escapeHtml(forecastScheduleTime(schedule.next_run_at, 'Paused'))}</b>next eligible run</span><span><b>${escapeHtml(schedule.seasonal_comparison ? 'weekday → general' : 'general only')}</b>comparison</span></div>
+        ${latest ? `<div class="forecast-attempt ${escapeHtml(latest.status)}"><div><b>${escapeHtml(latest.label)}</b><span>${escapeHtml(latest.trigger)} · ${escapeHtml(forecastScheduleTime(latest.updated_at))}</span></div><p>${escapeHtml(latest.error || latest.detail)}</p>${active ? `<div class="operation-progress" role="progressbar" aria-label="Latest shadow attempt progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${Number(latest.progress)}"><i style="width:${Number(latest.progress)}%"></i></div>` : ''}${eventSteps}${lastEvent?.metrics && Object.keys(lastEvent.metrics).length ? `<div class="operation-metrics">${Object.entries(lastEvent.metrics).slice(0,4).map(([key,value]) => formatMetric(key,value)).join('')}</div>` : ''}</div>` : '<div class="forecast-attempt empty"><p>No attempts yet. Starting the cadence waits until the next interval; Run now remains explicit.</p></div>'}
+        <footer><button class="button ghost small" type="button" data-run-forecast-schedule="${escapeHtml(schedule.id)}" ${active ? 'disabled' : ''}>Run now</button><button class="button ghost small" type="button" data-toggle-forecast-schedule="${escapeHtml(schedule.id)}" data-enable="${schedule.enabled ? 'false' : 'true'}">${schedule.enabled ? 'Pause cadence' : 'Start cadence'}</button><button class="button ghost small danger-action" type="button" data-archive-forecast-schedule="${escapeHtml(schedule.id)}" ${active ? 'disabled' : ''}>Archive</button></footer>
+      </article>`;
+    }).join('')}</div>`;
+  }
+  const pending = reviews.filter(item => item.state === 'pending');
+  reviewPanel.innerHTML = `<section class="forecast-review-queue"><header><div><span>ANALYST REVIEW QUEUE</span><h4>${pending.length} forecast change${pending.length === 1 ? '' : 's'} awaiting interpretation</h4><p>Acknowledging records that the change was reviewed. Dismissing records why it is noise. Neither action creates an alert, validation, or threshold.</p></div></header>${pending.length ? pending.map(item => `<article class="${escapeHtml(item.comparison_decision)}"><header><div><span>${escapeHtml(item.comparison_decision.replaceAll('-', ' '))}</span><h5>${escapeHtml(item.summary)}</h5></div><code>${escapeHtml(shortDigest(item.run_fingerprint))}</code></header><ul>${(item.reasons || []).map(reason => `<li>${escapeHtml(reason)}</li>`).join('')}</ul><form data-time-series-review-form="${escapeHtml(item.id)}" data-run-fingerprint="${escapeHtml(item.run_fingerprint)}"><label><span>Analyst disposition note</span><textarea name="note" rows="2" minlength="3" maxlength="4000" required placeholder="Explain the operating change, seasonality, collection issue, or reason this needs follow-up…"></textarea></label><div><button class="button primary small" type="submit" data-review-decision="acknowledge">Acknowledge review</button><button class="button ghost small" type="submit" data-review-decision="dismiss">Dismiss as noise</button></div></form></article>`).join('') : '<div class="empty-inline compact-empty">No forecast changes need review. Stable shadow runs remain in attempt history without creating queue noise.</div>'}</section>`;
+  reviewPanel.querySelectorAll('[data-time-series-review-form]').forEach(form => form.addEventListener('submit', decideTimeSeriesReview));
+  applyAccessPermissions();
+}
+
+async function createTimeSeriesSchedule(event) {
+  event.preventDefault();
+  const button = event.currentTarget.querySelector('button[type="submit"]');
+  button.disabled = true; button.textContent = 'Saving bounded schedule…';
+  try {
+    await api('/api/model-capabilities/time-series/schedules', {
+      method:'POST',
+      body:JSON.stringify({
+        title:$('#forecastScheduleTitle').value.trim(),
+        request:timeSeriesRequestFromForm(),
+        enabled:$('#forecastScheduleEnabled').value === 'true',
+        interval_minutes:Number($('#forecastScheduleInterval').value),
+        max_runs_per_day:Number($('#forecastScheduleDailyLimit').value),
+        seasonal_comparison:$('#forecastScheduleSeasonal').value === 'true'
+      })
+    });
+    await loadTimeSeriesSchedules();
+    toast($('#forecastScheduleEnabled').value === 'true' ? 'Shadow cadence started; first run waits for the next interval' : 'Shadow schedule saved paused');
+  } catch (error) {
+    toast(error.message);
+  } finally {
+    button.disabled = false; button.textContent = 'Save shadow schedule';
+  }
+}
+
+async function toggleTimeSeriesSchedule(button) {
+  const schedule = (state.timeSeriesSchedules?.schedules || []).find(item => item.id === button.dataset.toggleForecastSchedule);
+  if (!schedule) return;
+  button.disabled = true;
+  try {
+    await api(`/api/model-capabilities/time-series/schedules/${encodeURIComponent(schedule.id)}`, {
+      method:'PATCH',
+      body:JSON.stringify({
+        expected_updated_at:schedule.updated_at,
+        enabled:button.dataset.enable === 'true'
+      })
+    });
+    await loadTimeSeriesSchedules();
+    toast(button.dataset.enable === 'true' ? 'Shadow cadence started; no immediate query was run' : 'Shadow cadence paused');
+  } catch (error) { button.disabled = false; toast(error.message); }
+}
+
+async function archiveTimeSeriesSchedule(button) {
+  const schedule = (state.timeSeriesSchedules?.schedules || []).find(item => item.id === button.dataset.archiveForecastSchedule);
+  if (!schedule || !confirm(`Archive "${schedule.title}"? Its attempt and review history will remain retained.`)) return;
+  button.disabled = true;
+  try {
+    await api(`/api/model-capabilities/time-series/schedules/${encodeURIComponent(schedule.id)}?expected_updated_at=${encodeURIComponent(schedule.updated_at)}`, {method:'DELETE'});
+    await loadTimeSeriesSchedules(); toast('Shadow schedule archived; history retained');
+  } catch (error) { button.disabled = false; toast(error.message); }
+}
+
+async function runTimeSeriesSchedule(button) {
+  const scheduleId = button.dataset.runForecastSchedule; const progress = $('#timeSeriesScheduleProgress');
+  button.disabled = true; button.textContent = 'Running…'; progress.hidden = false;
+  progress.querySelector('.operation-steps').innerHTML = ''; progress.querySelector('.operation-metrics').innerHTML = '';
+  progress.querySelector('.operation-progress i').style.width = '0%';
+  try {
+    const result = await streamApi(`/api/model-capabilities/time-series/schedules/${encodeURIComponent(scheduleId)}/run/stream`, {}, event => updateOperation(progress, event));
+    await Promise.all([loadTimeSeriesSchedules(), loadTimeSeriesExperiments()]);
+    toast(result.review ? 'Shadow forecast retained and routed to analyst review' : 'Stable shadow forecast retained without review noise');
+  } catch (error) {
+    toast(error.message); await loadTimeSeriesSchedules();
+  } finally {
+    button.disabled = false; button.textContent = 'Run now';
+  }
+}
+
+async function decideTimeSeriesReview(event) {
+  event.preventDefault();
+  const form = event.currentTarget; const button = event.submitter;
+  if (!button) return;
+  const note = new FormData(form).get('note');
+  form.querySelectorAll('button').forEach(item => item.disabled = true);
+  try {
+    await api(`/api/model-capabilities/time-series/reviews/${encodeURIComponent(form.dataset.timeSeriesReviewForm)}`, {
+      method:'POST',
+      body:JSON.stringify({
+        expected_run_fingerprint:form.dataset.runFingerprint,
+        decision:button.dataset.reviewDecision,
+        note
+      })
+    });
+    await loadTimeSeriesSchedules();
+    toast('Forecast disposition recorded; no alert or threshold changed');
+  } catch (error) {
+    form.querySelectorAll('button').forEach(item => item.disabled = false); toast(error.message);
+  }
+}
+
 async function loadTimeSeriesExperiments(event) {
   const button = event?.currentTarget?.id === 'refreshTimeSeriesExperiments' ? event.currentTarget : null;
   if (button) { button.disabled = true; button.textContent = 'Refreshing…'; }
@@ -1283,13 +1480,15 @@ function renderTimeSeriesExperiments() {
     const created = run.created_at ? new Date(run.created_at).toLocaleString() : 'unknown time';
     const mase = backtest.mase_vs_last_value == null ? 'undefined' : Number(backtest.mase_vs_last_value).toFixed(3);
     const decision = comparison.decision || 'no-baseline';
-    const baselineAction = run.promotion_ready && !run.is_baseline ? `<details class="forecast-review-action"><summary>Accept as comparison baseline</summary>
+    const baselineSlots = run.baseline_slots || []; const isReference = baselineSlots.length > 0;
+    const baselineAction = run.promotion_ready ? `<details class="forecast-review-action"><summary>Accept as a reviewed comparison baseline</summary>
       <form data-time-series-baseline-form="${escapeHtml(run.id)}" data-run-fingerprint="${escapeHtml(run.run_fingerprint)}">
+        <label><span>Reference scope</span><select name="baseline_scope"><option value="matching-weekday">Matching weekday (${escapeHtml(comparison.seasonal_slot?.replace('weekday-', 'weekday ') || 'observed day')})</option><option value="general">General fallback</option></select></label>
         <label><span>Why this run is representative</span><textarea name="review_note" rows="2" minlength="3" maxlength="4000" required placeholder="Record data quality, operating period, and why this is a defensible reference…"></textarea></label>
         <button class="button primary small" type="submit">Accept exact run</button>
-        <small>This supersedes the prior baseline for this logical series. It does not change Splunk.</small>
+        <small>This replaces only the selected reference slot for this logical series. It does not change Splunk.</small>
       </form></details>` : '';
-    const candidateAction = run.is_baseline ? `<details class="forecast-review-action"><summary>Stage an alert validation candidate</summary>
+    const candidateAction = isReference ? `<details class="forecast-review-action"><summary>Stage an alert validation candidate</summary>
       <form data-time-series-candidate-form="${escapeHtml(run.id)}" data-run-fingerprint="${escapeHtml(run.run_fingerprint)}">
         <label><span>Candidate title</span><input name="title" value="${escapeHtml(`Validate ${run.title}`)}" maxlength="240" required></label>
         <label><span>Boundary direction</span><select name="direction"><option value="above">Above forecast p90</option><option value="below">Below forecast p10</option></select></label>
@@ -1298,10 +1497,11 @@ function renderTimeSeriesExperiments() {
         <button class="button primary small" type="submit">Create review-only candidate</button>
         <small>Creates an editable validation draft. No search runs and no alert is created.</small>
       </form></details>` : '';
-    return `<article class="forecast-experiment ${escapeHtml(decision)} ${run.is_baseline ? 'baseline' : ''}">
-      <header><div><span>${escapeHtml(run.is_baseline ? 'ACCEPTED BASELINE' : 'RETAINED RUN')} · ${escapeHtml(created)}</span><h4>${escapeHtml(run.title)}</h4></div><b>${escapeHtml(run.is_baseline ? 'baseline' : decision.replaceAll('-', ' '))}</b></header>
+    const referenceLabel = baselineSlots.length ? baselineSlots.map(slot => slot === 'general' ? 'general' : `weekday ${Number(slot.split('-')[1]) + 1}`).join(' + ') : '';
+    return `<article class="forecast-experiment ${escapeHtml(decision)} ${isReference ? 'baseline' : ''}">
+      <header><div><span>${escapeHtml(isReference ? `REVIEWED REFERENCE · ${referenceLabel}` : 'RETAINED RUN')} · ${escapeHtml(created)}</span><h4>${escapeHtml(run.title)}</h4></div><b>${escapeHtml(isReference ? 'reference' : decision.replaceAll('-', ' '))}</b></header>
       <div class="forecast-experiment-metrics"><span><b>${mase}</b>MASE</span><span><b>${Math.round(Number(series.imputation_ratio || 0) * 100)}%</b>imputed</span><span><b>${escapeHtml(forecastIntervalLabel(source.interval_seconds))}</b>span</span><span><b>${escapeHtml(source.earliest_time || 'unknown')}</b>window</span></div>
-      <p>${escapeHtml((comparison.reasons || ['No comparison detail recorded.']).join(' '))}</p>
+      <p>${escapeHtml(comparison.selection_reason || '')} ${escapeHtml((comparison.reasons || ['No comparison detail recorded.']).join(' '))}</p>
       ${comparison.baseline_run_id ? `<dl class="forecast-drift"><div><dt>Series mean</dt><dd>${escapeHtml(forecastDriftMetric(metrics.series_mean_change_percent))}</dd></div><div><dt>Forecast center</dt><dd>${escapeHtml(forecastDriftMetric(metrics.forecast_center_change_percent))}</dd></div><div><dt>MASE delta</dt><dd>${escapeHtml(forecastDriftMetric(metrics.mase_delta, ''))}</dd></div><div><dt>Imputation delta</dt><dd>${escapeHtml(forecastDriftMetric(Number(metrics.imputation_delta_points || 0) * 100, ' pts'))}</dd></div></dl>` : ''}
       <details><summary>Exact retained contract</summary><dl><div><dt>Run fingerprint</dt><dd><code>${escapeHtml(run.run_fingerprint)}</code></dd></div><div><dt>Series key</dt><dd><code>${escapeHtml(run.series_key)}</code></dd></div><div><dt>Model revision</dt><dd><code>${escapeHtml(run.runtime?.source_revision || 'not attested')}</code></dd></div><div><dt>Source rows</dt><dd>${Number(series.source_rows || 0).toLocaleString()} counted · not retained</dd></div></dl></details>
       <footer><button class="button ghost small" type="button" data-rerun-time-series="${escapeHtml(run.id)}">Load exact contract</button></footer>
@@ -1351,7 +1551,8 @@ async function acceptTimeSeriesBaseline(event) {
       method:'POST',
       body:JSON.stringify({
         expected_run_fingerprint:form.dataset.runFingerprint,
-        review_note:new FormData(form).get('review_note')
+        review_note:new FormData(form).get('review_note'),
+        baseline_scope:new FormData(form).get('baseline_scope')
       })
     });
     await loadTimeSeriesExperiments();
@@ -1447,18 +1648,11 @@ async function runTimeSeriesForecast(event) {
   progress.querySelector('.operation-progress i').style.width = '0%';
   $('#timeSeriesOutput').innerHTML = '';
   try {
-    state.timeSeriesResult = await streamApi('/api/model-capabilities/time-series/forecast/stream', {
-      title:$('#forecastTitle').value.trim(),
-      spl:$('#forecastSpl').value.trim(),
-      earliest_time:$('#forecastEarliest').value,
-      latest_time:'now',
-      row_limit:Number($('#forecastRows').value),
-      timestamp_field:$('#forecastTimestampField').value.trim(),
-      value_field:$('#forecastValueField').value.trim(),
-      interval_seconds:Number($('#forecastInterval').value),
-      horizon:Number($('#forecastHorizon').value),
-      backtest_points:Number($('#forecastBacktest').value)
-    }, event => updateOperation(progress, event));
+    state.timeSeriesResult = await streamApi(
+      '/api/model-capabilities/time-series/forecast/stream',
+      timeSeriesRequestFromForm(),
+      event => updateOperation(progress, event)
+    );
     renderTimeSeriesResult(state.timeSeriesResult);
     await loadTimeSeriesExperiments();
   } catch (error) {
@@ -4376,6 +4570,8 @@ function updateTlsControls() {
 }
 
 function closeDetail() {
+  clearTimeout(state.timeSeriesScheduleTimer);
+  state.timeSeriesScheduleTimer = null;
   $('#detailModal').hidden = true;
   $('#detailModal').dataset.permalink = '';
   if (location.hash.startsWith('#context/artifact/')) history.replaceState(null, '', `${location.pathname}#context`);
@@ -4676,6 +4872,12 @@ document.addEventListener('click', async event => {
   if (test) { const dot = $(`#status-${CSS.escape(test.dataset.testModel)}`); dot.classList.remove('ok'); const holder = document.createElement('span'); const result = await testConnection('model', test.dataset.testModel, holder); dot.classList.toggle('ok', result.ok); toast(holder.textContent); }
   if (event.target.closest('[data-open-code-screen]')) openCodeScreening();
   if (event.target.closest('[data-open-time-series]')) openTimeSeriesWorkbench();
+  const runForecastSchedule = event.target.closest('[data-run-forecast-schedule]');
+  if (runForecastSchedule) { await runTimeSeriesSchedule(runForecastSchedule); return; }
+  const toggleForecastSchedule = event.target.closest('[data-toggle-forecast-schedule]');
+  if (toggleForecastSchedule) { await toggleTimeSeriesSchedule(toggleForecastSchedule); return; }
+  const archiveForecastSchedule = event.target.closest('[data-archive-forecast-schedule]');
+  if (archiveForecastSchedule) { await archiveTimeSeriesSchedule(archiveForecastSchedule); return; }
   if (event.target.closest('[data-review-model-trust]')) {
     if (!$('#detailModal').hidden) closeDetail();
     $('#modelTrustPanel').scrollIntoView({behavior:'smooth', block:'start'});

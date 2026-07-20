@@ -138,8 +138,8 @@ EVALUATED_MODEL_CANDIDATES: tuple[dict[str, Any], ...] = (
                 "name": "Durable experiment and alert-draft boundary",
                 "status": "pass",
                 "detail": (
-                    "Immutable run fingerprints · reviewed per-series baseline and drift · "
-                    "alert handoff creates only an unapproved validation draft"
+                    "Immutable run fingerprints · reviewed general/weekday baselines · "
+                    "hard-budget shadow schedules · analyst-only drift dispositions"
                 ),
             },
         ],

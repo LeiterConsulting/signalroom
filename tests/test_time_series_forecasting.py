@@ -244,6 +244,51 @@ async def test_forecast_registry_accepts_exact_baseline_and_tracks_drift(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_forecast_prefers_matching_weekday_baseline_and_retains_general_reference(
+    tmp_path,
+):
+    splunk = FakeSplunk(rows(96))
+    model = FakeProvider()
+    experiments = TimeSeriesExperimentStore(tmp_path / "experiments.db")
+    service = TimeSeriesForecastService(
+        ConfigStore(tmp_path / "config"),
+        lambda: splunk,
+        experiment_store=experiments,
+    )
+    service.provider = lambda: model
+
+    general = await service.run(request(), actor="forecast-analyst")
+    service.accept_baseline(
+        general["run_id"],
+        expected_fingerprint=general["experiment"]["run_fingerprint"],
+        actor="forecast-analyst",
+        review_note="Representative cross-week reference",
+    )
+    weekday = await service.run(request(), actor="forecast-analyst")
+    accepted = service.accept_baseline(
+        weekday["run_id"],
+        expected_fingerprint=weekday["experiment"]["run_fingerprint"],
+        actor="forecast-analyst",
+        review_note="Representative matching weekday",
+        baseline_scope="matching-weekday",
+    )
+    seasonal_slot = experiments.seasonal_slot(accepted["result"])
+    assert accepted["baseline_slots"] == [seasonal_slot]
+
+    compared = await service.run(request(), actor="forecast-analyst")
+    comparison = compared["experiment"]["comparison"]
+
+    assert comparison["selected_slot"] == seasonal_slot
+    assert comparison["seasonal_comparison"] is True
+    assert {item["slot"] for item in comparison["references"]} == {
+        "general",
+        seasonal_slot,
+    }
+    assert "matching-weekday" not in comparison["selection_reason"]
+    assert experiments.baseline(general["experiment"]["series_key"])["id"] == general["run_id"]
+
+
+@pytest.mark.asyncio
 async def test_reviewed_forecast_handoff_creates_draft_not_alert(tmp_path):
     splunk = FakeSplunk(rows(96))
     model = FakeProvider()

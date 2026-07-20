@@ -44,6 +44,7 @@ CONNECTION_MUTATION_PREFIXES = (
     "/api/connection/diagnostics",
     "/api/splunk-models/scan",
     "/api/model-capabilities/time-series/forecast",
+    "/api/model-capabilities/time-series/schedules",
     "/api/assurance/runs",
 )
 
@@ -55,9 +56,7 @@ class AuthService:
         self.store = store
         self.audit = audit
 
-    def status(
-        self, token: str = "", *, include_users: bool = False
-    ) -> dict[str, Any]:
+    def status(self, token: str = "", *, include_users: bool = False) -> dict[str, Any]:
         policy = self.store.policy()
         identity_count = self.store.user_count()
         if not policy["enabled"]:
@@ -106,16 +105,12 @@ class AuthService:
             "reenable_required": False,
             "identity_count": identity_count,
             "principal": self._public_user(user),
-            "permissions": self._permissions(
-                user["role"], user["connection_ids"]
-            ),
+            "permissions": self._permissions(user["role"], user["connection_ids"]),
             "session": {
                 "expires_at": session["expires_at"],
             },
             "users": self.store.users() if include_users and is_admin else [],
-            "available_connections": (
-                [{"id": "primary", "label": "Primary Splunk"}] if is_admin else []
-            ),
+            "available_connections": ([{"id": "primary", "label": "Primary Splunk"}] if is_admin else []),
         }
 
     def bootstrap(
@@ -156,9 +151,7 @@ class AuthService:
             "enable",
             target_type="access-policy",
             target_id="primary",
-            summary=(
-                "Named-user RBAC was enabled. Local single-user mode is no longer active."
-            ),
+            summary=("Named-user RBAC was enabled. Local single-user mode is no longer active."),
             metadata={
                 "admin_user_id": user["id"],
                 "admin_username": user["username"],
@@ -172,9 +165,7 @@ class AuthService:
         user = self.store.get_user(user_id)
         if not user or user["role"] != "admin" or not user["active"]:
             raise PermissionError("An active admin is required to disable RBAC")
-        if not self._password_matches(
-            password, user["password_salt"], user["password_hash"]
-        ):
+        if not self._password_matches(password, user["password_salt"], user["password_hash"]):
             raise PermissionError("The admin password was not accepted")
         self.store.set_enabled(False)
         self.audit.record(
@@ -183,10 +174,7 @@ class AuthService:
             target_type="access-policy",
             target_id="primary",
             outcome="warning",
-            summary=(
-                "Named-user RBAC was disabled; SignalRoom returned to local "
-                "single-user mode."
-            ),
+            summary=("Named-user RBAC was disabled; SignalRoom returned to local single-user mode."),
             actor=user["username"],
         )
 
@@ -214,9 +202,7 @@ class AuthService:
             raise PermissionError("The enterprise identity is not active")
         return self._new_session(user)
 
-    def recover_local_password(
-        self, username: str, password: str
-    ) -> dict[str, Any]:
+    def recover_local_password(self, username: str, password: str) -> dict[str, Any]:
         username = self._username(username)
         self._validate_password(password)
         user = self.store.get_user_by_username(username)
@@ -263,16 +249,12 @@ class AuthService:
     def verify_csrf(self, session: dict[str, Any], csrf_token: str) -> bool:
         if not csrf_token:
             return False
-        return hmac.compare_digest(
-            session["csrf_sha256"], self._digest(csrf_token)
-        )
+        return hmac.compare_digest(session["csrf_sha256"], self._digest(csrf_token))
 
     def users(self) -> list[dict[str, Any]]:
         return self.store.users()
 
-    def create_user(
-        self, value: AuthUserCreate, *, actor: dict[str, Any]
-    ) -> dict[str, Any]:
+    def create_user(self, value: AuthUserCreate, *, actor: dict[str, Any]) -> dict[str, Any]:
         username = self._username(value.username)
         display_name = self._display_name(value.display_name)
         connections = self._connections(value.connection_ids)
@@ -304,9 +286,7 @@ class AuthService:
         )
         return self._public_user(user)
 
-    def update_user(
-        self, user_id: str, value: AuthUserUpdate, *, actor: dict[str, Any]
-    ) -> dict[str, Any]:
+    def update_user(self, user_id: str, value: AuthUserUpdate, *, actor: dict[str, Any]) -> dict[str, Any]:
         current = self.store.get_user(user_id)
         if not current:
             raise KeyError(user_id)
@@ -322,9 +302,7 @@ class AuthService:
             if value.connection_ids is not None
             else current["connection_ids"]
         )
-        losing_admin = current["role"] == "admin" and (
-            role != "admin" or not active
-        )
+        losing_admin = current["role"] == "admin" and (role != "admin" or not active)
         if losing_admin and self.store.active_admin_count() <= 1:
             raise ValueError("SignalRoom must retain at least one active admin")
         if (
@@ -336,9 +314,7 @@ class AuthService:
         if current.get("auth_source") == "oidc" and any(
             item is not None for item in (value.role, value.password, value.connection_ids)
         ):
-            raise ValueError(
-                "OIDC role and connection access are managed by enterprise group policy"
-            )
+            raise ValueError("OIDC role and connection access are managed by enterprise group policy")
         password_salt: str | None = None
         password_hash: str | None = None
         if value.password is not None:
@@ -372,9 +348,7 @@ class AuthService:
         )
         return self._public_user(updated)
 
-    def authorize(
-        self, user: dict[str, Any], method: str, path: str
-    ) -> tuple[bool, str]:
+    def authorize(self, user: dict[str, Any], method: str, path: str) -> tuple[bool, str]:
         role = str(user.get("role") or "")
         method = method.upper()
         if role not in ROLES:
@@ -389,9 +363,7 @@ class AuthService:
             return False, "Viewer access is read only"
         if self._admin_required(method, path) and role != "admin":
             return False, "Admin access is required for this operation"
-        if self._connection_required(method, path) and "primary" not in set(
-            user.get("connection_ids") or []
-        ):
+        if self._connection_required(method, path) and "primary" not in set(user.get("connection_ids") or []):
             return False, "This user is not assigned to the Primary Splunk connection"
         return True, ""
 
@@ -403,9 +375,8 @@ class AuthService:
             return True
         if any(path.startswith(prefix) for prefix in ADMIN_MUTATION_PREFIXES):
             return True
-        if (
-            path.startswith("/api/benchmarks/")
-            and any(part in path for part in ("/baseline", "/promote", "/rollback"))
+        if path.startswith("/api/benchmarks/") and any(
+            part in path for part in ("/baseline", "/promote", "/rollback")
         ):
             return True
         if path.startswith("/api/detections/") and any(
@@ -427,12 +398,10 @@ class AuthService:
         if any(path.startswith(prefix) for prefix in CONNECTION_MUTATION_PREFIXES):
             return True
         return (
-            path.startswith("/api/validations/")
-            and path.endswith("/run/stream")
-        ) or (
-            path.startswith("/api/detections/")
-            and "/deployment-verification/refresh" in path
-        ) or path in {"/api/test-connection", "/mcp"}
+            (path.startswith("/api/validations/") and path.endswith("/run/stream"))
+            or (path.startswith("/api/detections/") and "/deployment-verification/refresh" in path)
+            or path in {"/api/test-connection", "/mcp"}
+        )
 
     @staticmethod
     def _permissions(role: str, connections: list[str]) -> dict[str, bool]:
@@ -443,21 +412,15 @@ class AuthService:
             "can_use_primary_connection": "primary" in connections,
         }
 
-    def _verify_credentials(
-        self, username: str, password: str, source: str
-    ) -> dict[str, Any]:
+    def _verify_credentials(self, username: str, password: str, source: str) -> dict[str, Any]:
         if self.store.login_blocked(username, source):
-            raise RuntimeError(
-                "Too many failed login attempts. Wait 15 minutes before retrying."
-            )
+            raise RuntimeError("Too many failed login attempts. Wait 15 minutes before retrying.")
         user = self.store.get_user_by_username(username)
         accepted = bool(
             user
             and user["active"]
             and user.get("auth_source") == "local"
-            and self._password_matches(
-                password, user["password_salt"], user["password_hash"]
-            )
+            and self._password_matches(password, user["password_salt"], user["password_hash"])
         )
         self.store.record_login_attempt(username, source, succeeded=accepted)
         if not accepted or not user:
@@ -522,8 +485,7 @@ class AuthService:
         normalized = str(value).strip().casefold()
         if not USERNAME_PATTERN.fullmatch(normalized):
             raise ValueError(
-                "Usernames must be 3-64 lowercase letters, numbers, dots, "
-                "underscores, or hyphens"
+                "Usernames must be 3-64 lowercase letters, numbers, dots, underscores, or hyphens"
             )
         return normalized
 

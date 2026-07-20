@@ -235,9 +235,18 @@ a bounded review to a case.
 Completed and data-quality-blocked runs are also retained in `data/time_series_experiments.db` as immutable local
 experiments. The registry stores the exact run contract, aggregate series statistics, backtest and forecast
 output, model identity, and fingerprints—not raw Splunk result rows. A logical series key normalizes the
-`timechart` span so analysts can compare windows and bucket sizes. Accepting a baseline requires the exact
-promotion-eligible run fingerprint and a review note. Later runs report deterministic performance, imputation,
-series-mean, forecast-center, span, window, and model-revision drift.
+`timechart` span so analysts can compare windows and bucket sizes. Accepting a general or matching-weekday
+baseline requires the exact promotion-eligible run fingerprint and a review note. Later runs prefer their
+reviewed weekday reference, fall back to the general reference, and retain both comparisons for deterministic
+performance, imputation, series-mean, forecast-center, span, window, and model-revision drift.
+
+The same workbench can save the current contract as a paused-by-default shadow schedule. Starting its cadence is
+explicit and never runs an immediate query. One durable worker executes at most one local forecast at a time,
+enforces per-schedule and 24-run global UTC daily ceilings, coalesces missed intervals, rechecks the owner's
+Primary Splunk authority, and restarts an interrupted attempt as a fresh read-only run. Each attempt streams and
+retains its phases. Stable results remain in history; no-baseline, review, and material-drift results enter a
+fingerprint-bound analyst disposition queue. A disposition records review only—it never creates an alert,
+threshold, validation, case, or Splunk write.
 
 An accepted baseline can explicitly stage an upper-p90 or lower-p10 alert candidate. SignalRoom computes the
 fixed boundary server-side from the reviewed forecast and creates an editable, single-execution validation draft

@@ -254,6 +254,7 @@ All lifecycle files stay inside the repository:
 | `data/discovery_jobs.db` | Durable manual discovery queue, progress, cancellation, recovery, and compact results |
 | `data/model_trust.db` | Model publisher policy and exact artifact approval history |
 | `data/time_series_experiments.db` | Immutable forecast runs, accepted baselines, drift comparisons, and review-only alert candidates |
+| `data/time_series_schedules.db` | Shadow schedules, hard-budget attempt history, progress events, restart recovery, and analyst dispositions |
 | `data/model_trust_signing.key` | Local Ed25519 private key for operator artifact attestations |
 | `data/model_attestations/` | Portable canonical approval payloads, signatures, and public key |
 
@@ -343,6 +344,12 @@ Forecast history, baseline review notes, and alert-candidate handoffs are local 
 aggregate time-series statistics, backtest/forecast arrays, model revisions, and fingerprints, but not the raw
 Splunk result rows. Treat it as security-sensitive investigation metadata. A restore does not start the Cisco
 sidecar or execute any retained validation draft.
+
+Shadow cadence, attempts, progress, and review dispositions are stored separately in
+`data/time_series_schedules.db` and require the same backup protection. Restoring an enabled schedule makes it
+eligible for its next recorded interval after SignalRoom starts; an interrupted running attempt is retried as a
+fresh read-only forecast. Missed intervals are not replayed. Schedules remain bounded to one concurrent run, a
+per-schedule UTC daily ceiling, and a 24-run global UTC daily ceiling.
 
 ## Manual development setup
 

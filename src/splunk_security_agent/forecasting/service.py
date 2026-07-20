@@ -106,14 +106,24 @@ class TimeSeriesForecastService:
         expected_fingerprint: str,
         actor: str,
         review_note: str,
+        baseline_scope: str = "general",
     ) -> dict[str, Any]:
         if self.experiment_store is None:
             raise RuntimeError("The time-series experiment registry is unavailable")
+        run = self.experiment_store.get(run_id)
+        if run is None:
+            raise KeyError(f"Unknown time-series run: {run_id}")
+        slot = (
+            self.experiment_store.seasonal_slot(run["result"])
+            if baseline_scope == "matching-weekday"
+            else "general"
+        )
         return self.experiment_store.accept_baseline(
             run_id,
             expected_fingerprint=expected_fingerprint,
             actor=actor,
             review_note=review_note,
+            slot=slot,
         )
 
     def create_alert_candidate(
@@ -130,7 +140,7 @@ class TimeSeriesForecastService:
             raise KeyError(f"Unknown time-series run: {run_id}")
         if run["run_fingerprint"] != value.expected_run_fingerprint:
             raise ValueError("The forecast run changed or the reviewed fingerprint does not match")
-        if not run["is_baseline"] or not run["promotion_ready"]:
+        if not run["baseline_slots"] or not run["promotion_ready"]:
             raise ValueError("Alert candidates require the exact current accepted baseline")
         existing = self.experiment_store.alert_candidate(run_id, value.direction)
         if existing is not None:
@@ -556,6 +566,7 @@ class TimeSeriesForecastService:
         progress: ProgressCallback | None = None,
         *,
         actor: str = "local-operator",
+        seasonal_comparison: bool = True,
     ) -> dict[str, Any]:
         self.validate_contract(request)
         run_id = f"forecast-{uuid4().hex[:16]}"
@@ -674,6 +685,7 @@ class TimeSeriesForecastService:
                     },
                 },
                 actor,
+                seasonal_comparison,
             )
         holdout = request.backtest_points
         training = prepared["values"][:-holdout]
@@ -774,6 +786,7 @@ class TimeSeriesForecastService:
                 },
             },
             actor,
+            seasonal_comparison,
         )
 
     def _retain(
@@ -781,6 +794,7 @@ class TimeSeriesForecastService:
         request: TimeSeriesForecastRequest,
         result: dict[str, Any],
         actor: str,
+        seasonal_comparison: bool = True,
     ) -> dict[str, Any]:
         if self.experiment_store is None:
             return result
@@ -789,12 +803,14 @@ class TimeSeriesForecastService:
             request.model_dump(mode="json"),
             result,
             actor=actor,
+            seasonal_comparison=seasonal_comparison,
         )
         result["experiment"] = {
             "series_key": recorded["series_key"],
             "run_fingerprint": recorded["run_fingerprint"],
             "comparison": recorded["comparison"],
             "is_baseline": recorded["is_baseline"],
+            "baseline_slots": recorded["baseline_slots"],
             "created_by": recorded["created_by"],
             "created_at": recorded["created_at"],
         }

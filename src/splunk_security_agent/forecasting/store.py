@@ -71,6 +71,16 @@ class TimeSeriesExperimentStore:
                     created_at TEXT NOT NULL,
                     FOREIGN KEY(run_id) REFERENCES time_series_runs(id)
                 );
+                CREATE TABLE IF NOT EXISTS time_series_baselines (
+                    series_key TEXT NOT NULL,
+                    slot TEXT NOT NULL,
+                    run_id TEXT NOT NULL,
+                    accepted_by TEXT NOT NULL,
+                    review_note TEXT NOT NULL,
+                    accepted_at TEXT NOT NULL,
+                    PRIMARY KEY(series_key, slot),
+                    FOREIGN KEY(run_id) REFERENCES time_series_runs(id)
+                );
                 CREATE INDEX IF NOT EXISTS idx_time_series_runs_created
                     ON time_series_runs(created_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_time_series_runs_series
@@ -82,6 +92,13 @@ class TimeSeriesExperimentStore:
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_time_series_candidate_direction
                     ON time_series_alert_candidates(run_id, direction);
                 """
+            )
+            db.execute(
+                """INSERT OR IGNORE INTO time_series_baselines
+                (series_key,slot,run_id,accepted_by,review_note,accepted_at)
+                SELECT series_key,'general',id,baseline_accepted_by,
+                    baseline_review_note,COALESCE(baseline_accepted_at,created_at)
+                FROM time_series_runs WHERE is_baseline=1"""
             )
 
     def connect(self) -> sqlite3.Connection:
@@ -118,11 +135,21 @@ class TimeSeriesExperimentStore:
         result: dict[str, Any],
         *,
         actor: str,
+        seasonal_comparison: bool = True,
     ) -> dict[str, Any]:
         series_key = self.series_key(request)
         fingerprint = self.run_fingerprint(request, result)
-        baseline = self.baseline(series_key)
-        comparison = self._comparison(result, baseline)
+        seasonal_slot = self.seasonal_slot(result)
+        references = self.baselines(
+            series_key,
+            slots=[seasonal_slot, "general"] if seasonal_comparison else ["general"],
+        )
+        comparison = self._comparison_set(
+            result,
+            references,
+            seasonal_slot=seasonal_slot,
+        )
+        comparison["seasonal_comparison"] = seasonal_comparison
         with self._lock, self.connect() as db:
             db.execute(
                 """INSERT INTO time_series_runs
@@ -179,13 +206,53 @@ class TimeSeriesExperimentStore:
         return [self._run(row, full=False) for row in rows]
 
     def baseline(self, series_key: str) -> dict[str, Any] | None:
+        return self.baseline_for_slot(series_key, "general")
+
+    def baseline_for_slot(
+        self,
+        series_key: str,
+        slot: str,
+    ) -> dict[str, Any] | None:
         with self.connect() as db:
             row = db.execute(
-                """SELECT * FROM time_series_runs
-                WHERE series_key=? AND is_baseline=1 LIMIT 1""",
-                (series_key,),
+                """SELECT runs.* FROM time_series_baselines AS baselines
+                JOIN time_series_runs AS runs ON runs.id=baselines.run_id
+                WHERE baselines.series_key=? AND baselines.slot=? LIMIT 1""",
+                (series_key, slot),
             ).fetchone()
         return self._run(row, full=True) if row else None
+
+    def baselines(
+        self,
+        series_key: str,
+        *,
+        slots: list[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        selected = list(dict.fromkeys(slots or []))
+        with self.connect() as db:
+            if selected:
+                rows = db.execute(
+                    f"""SELECT baselines.slot,runs.* FROM time_series_baselines AS baselines
+                    JOIN time_series_runs AS runs ON runs.id=baselines.run_id
+                    WHERE baselines.series_key=?
+                    AND baselines.slot IN ({",".join("?" for _ in selected)})
+                    ORDER BY CASE WHEN baselines.slot=? THEN 0 ELSE 1 END""",
+                    (series_key, *selected, selected[0]),
+                ).fetchall()
+            else:
+                rows = db.execute(
+                    """SELECT baselines.slot,runs.* FROM time_series_baselines AS baselines
+                    JOIN time_series_runs AS runs ON runs.id=baselines.run_id
+                    WHERE baselines.series_key=? ORDER BY baselines.slot""",
+                    (series_key,),
+                ).fetchall()
+        return [
+            {
+                **self._run(row, full=True),
+                "baseline_slot": row["slot"],
+            }
+            for row in rows
+        ]
 
     def accept_baseline(
         self,
@@ -194,6 +261,7 @@ class TimeSeriesExperimentStore:
         expected_fingerprint: str,
         actor: str,
         review_note: str,
+        slot: str = "general",
     ) -> dict[str, Any]:
         current = self.get(run_id)
         if current is None:
@@ -205,19 +273,27 @@ class TimeSeriesExperimentStore:
         note = review_note.strip()
         if len(note) < 3:
             raise ValueError("Record why this run is acceptable as the comparison baseline")
+        if slot not in {"general", *(f"weekday-{index}" for index in range(7))}:
+            raise ValueError("Baseline slot must be general or a matching weekday")
+        natural_slot = self.seasonal_slot(current["result"])
+        if slot != "general" and slot != natural_slot:
+            raise ValueError(f"This run belongs to {natural_slot}; it cannot populate {slot}")
         accepted_at = _now()
         with self._lock, self.connect() as db:
-            db.execute(
-                """UPDATE time_series_runs SET is_baseline=0
-                WHERE series_key=? AND is_baseline=1""",
-                (current["series_key"],),
-            )
+            if slot == "general":
+                db.execute(
+                    """UPDATE time_series_runs SET is_baseline=0
+                    WHERE series_key=? AND is_baseline=1""",
+                    (current["series_key"],),
+                )
             cursor = db.execute(
                 """UPDATE time_series_runs
-                SET is_baseline=1,baseline_accepted_by=?,
+                SET is_baseline=CASE WHEN ?='general' THEN 1 ELSE is_baseline END,
+                    baseline_accepted_by=?,
                     baseline_review_note=?,baseline_accepted_at=?
                 WHERE id=? AND run_fingerprint=? AND promotion_ready=1""",
                 (
+                    slot,
                     actor[:160] or "local-operator",
                     note[:4000],
                     accepted_at,
@@ -227,6 +303,24 @@ class TimeSeriesExperimentStore:
             )
             if cursor.rowcount != 1:
                 raise ValueError("The exact eligible run could not be accepted")
+            db.execute(
+                """INSERT INTO time_series_baselines
+                (series_key,slot,run_id,accepted_by,review_note,accepted_at)
+                VALUES (?,?,?,?,?,?)
+                ON CONFLICT(series_key,slot) DO UPDATE SET
+                    run_id=excluded.run_id,
+                    accepted_by=excluded.accepted_by,
+                    review_note=excluded.review_note,
+                    accepted_at=excluded.accepted_at""",
+                (
+                    current["series_key"],
+                    slot,
+                    run_id,
+                    actor[:160] or "local-operator",
+                    note[:4000],
+                    accepted_at,
+                ),
+            )
         accepted = self.get(run_id)
         assert accepted is not None
         return accepted
@@ -255,8 +349,11 @@ class TimeSeriesExperimentStore:
                 status,created_by,created_at)
                 SELECT ?,id,series_key,run_fingerprint,?,?,?,?,?,?,?,?,?,?,?
                 FROM time_series_runs
-                WHERE id=? AND run_fingerprint=? AND is_baseline=1
-                    AND promotion_ready=1""",
+                WHERE id=? AND run_fingerprint=? AND promotion_ready=1
+                    AND EXISTS (
+                        SELECT 1 FROM time_series_baselines
+                        WHERE time_series_baselines.run_id=time_series_runs.id
+                    )""",
                 (
                     candidate_id,
                     title[:240],
@@ -316,6 +413,7 @@ class TimeSeriesExperimentStore:
                     "title": run["title"],
                     "runs": 0,
                     "baseline_run_id": "",
+                    "baseline_slots": {},
                     "latest_run_id": run["id"],
                     "latest_at": run["created_at"],
                 },
@@ -323,6 +421,8 @@ class TimeSeriesExperimentStore:
             item["runs"] += 1
             if run["is_baseline"]:
                 item["baseline_run_id"] = run["id"]
+            for slot in run["baseline_slots"]:
+                item["baseline_slots"][slot] = run["id"]
         return {
             "runs": runs,
             "series": list(series.values()),
@@ -334,6 +434,75 @@ class TimeSeriesExperimentStore:
                 "alert_candidate_executes_spl": False,
                 "alert_candidate_creates_validation_draft": True,
             },
+        }
+
+    @staticmethod
+    def seasonal_slot(result: dict[str, Any]) -> str:
+        series = result.get("series") or {}
+        value = str(series.get("end") or result.get("executed_at") or "")
+        try:
+            observed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            observed = datetime.now(UTC)
+        return f"weekday-{observed.weekday()}"
+
+    @staticmethod
+    def slot_label(slot: str) -> str:
+        weekdays = (
+            "Monday",
+            "Tuesday",
+            "Wednesday",
+            "Thursday",
+            "Friday",
+            "Saturday",
+            "Sunday",
+        )
+        if slot.startswith("weekday-"):
+            try:
+                return weekdays[int(slot.split("-", 1)[1])]
+            except (IndexError, ValueError):
+                pass
+        return "General"
+
+    @classmethod
+    def _comparison_set(
+        cls,
+        result: dict[str, Any],
+        references: list[dict[str, Any]],
+        *,
+        seasonal_slot: str,
+    ) -> dict[str, Any]:
+        if not references:
+            comparison = cls._comparison(result, None)
+            comparison.update(
+                {
+                    "seasonal_slot": seasonal_slot,
+                    "selected_slot": "",
+                    "selection_reason": ("No reviewed general or matching-weekday baseline exists."),
+                    "references": [],
+                }
+            )
+            return comparison
+        comparisons: list[dict[str, Any]] = []
+        for baseline in references:
+            item = cls._comparison(result, baseline)
+            item["slot"] = baseline["baseline_slot"]
+            item["slot_label"] = cls.slot_label(baseline["baseline_slot"])
+            comparisons.append(item)
+        selected = next(
+            (item for item in comparisons if item["slot"] == seasonal_slot),
+            comparisons[0],
+        )
+        return {
+            **selected,
+            "seasonal_slot": seasonal_slot,
+            "selected_slot": selected["slot"],
+            "selection_reason": (
+                f"Used the reviewed {selected['slot_label']} baseline."
+                if selected["slot"] == seasonal_slot
+                else "No matching-weekday baseline exists; used the reviewed general baseline."
+            ),
+            "references": comparisons,
         }
 
     @classmethod
@@ -460,8 +629,7 @@ class TimeSeriesExperimentStore:
             return None
         return (current - baseline) / abs(baseline) * 100
 
-    @staticmethod
-    def _run(row: sqlite3.Row, *, full: bool) -> dict[str, Any]:
+    def _run(self, row: sqlite3.Row, *, full: bool) -> dict[str, Any]:
         result = json.loads(row["result_json"])
         forecast = result.get("forecast") or {}
         backtest = result.get("backtest") or {}
@@ -489,12 +657,22 @@ class TimeSeriesExperimentStore:
             "comparison": json.loads(row["comparison_json"]),
             "promotion_ready": bool(row["promotion_ready"]),
             "is_baseline": bool(row["is_baseline"]),
+            "baseline_slots": self._baseline_slots(str(row["id"])),
             "created_by": row["created_by"],
             "created_at": row["created_at"],
             "baseline_accepted_by": row["baseline_accepted_by"],
             "baseline_review_note": row["baseline_review_note"],
             "baseline_accepted_at": row["baseline_accepted_at"],
         }
+
+    def _baseline_slots(self, run_id: str) -> list[str]:
+        with self.connect() as db:
+            rows = db.execute(
+                """SELECT slot FROM time_series_baselines
+                WHERE run_id=? ORDER BY slot""",
+                (run_id,),
+            ).fetchall()
+        return [str(row["slot"]) for row in rows]
 
     @staticmethod
     def _candidate(row: sqlite3.Row) -> dict[str, Any]:
