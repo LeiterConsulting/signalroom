@@ -157,15 +157,20 @@ receives only that side's observations so cross-tenant facts are not copied into
 
 For deployments evaluating stronger data boundaries, **Setup → Physical tenant isolation readiness**
 builds a review-only plan for an admitted tenant and immutable Splunk revision. The planner reads SQLite
-schema, row counts, and artifact filenames only. It does not read evidence payload content, copy data,
-create a tenant database, or change runtime routing. Its blockers identify stores that still need a direct
-tenant key, verified parent relationship, or filesystem router. This is a migration engineering gate—not
-an isolation switch—and the shared source files remain authoritative.
+schema and row counts and streams manifested files through SHA-256 without parsing or exposing them. It does
+not copy data, create a tenant database, or change runtime routing. Its blockers identify stores that still
+need a direct tenant key, verified parent relationship, or intact ownership manifest. This is a migration
+engineering gate—not an isolation switch—and the shared source files remain authoritative.
 
-After reviewing a current plan, an administrator can stage all eight tenant-owned workflow stores into
-a generation beneath the tenant root. This step locally reads and copies payload rows, verifies canonical
-source/target digests, and leaves routing unchanged. Cutover rechecks both the shared source and staged
-generation before activating the isolated route. The shared rows remain sealed as a rollback source;
+Upgraded workspaces can explicitly **Reconcile exact legacy ownership**. That admin action parses only embedded
+discovery/case-export ownership envelopes and manifests exact tenant plus Splunk-revision matches. It never infers
+ownership from a filename, moves, or deletes a file; ambiguous legacy files remain visible blockers.
+
+After reviewing a current plan, an administrator can stage eight tenant-owned workflow databases plus
+manifested discovery and case-export files into a generation beneath the tenant root. This step locally reads
+and copies payload rows/files, verifies canonical source/target digests, and leaves routing unchanged. Cutover
+rechecks both the current source and staged generation before activating the isolated route. Shared copies
+remain sealed as a rollback source;
 rollback is allowed only before the isolated generation accepts a write. SignalRoom therefore labels this
 state **isolated routing · source retained**, not complete physical isolation. Shared-source purge and a
 verified reverse-migration path remain future finalization gates.

@@ -179,9 +179,11 @@ class Services:
     def __init__(self):
         self.config = ConfigStore(DATA)
         self.connection_registry = ConnectionRegistryStore(DATA / "connection_registry.db")
-        self.tenant_isolation_store = TenantIsolationStore(DATA / "tenant_isolation.db")
-        self.tenant_isolation = TenantIsolationPlanner(DATA, self.tenant_isolation_store)
         self.tenant_data_registry = TenantDataPlaneRegistry(DATA / "tenant_isolation.db", DATA)
+        self.tenant_isolation_store = TenantIsolationStore(DATA / "tenant_isolation.db")
+        self.tenant_isolation = TenantIsolationPlanner(
+            DATA, self.tenant_isolation_store, self.tenant_data_registry
+        )
         self.tenant_data_plane = TenantDataMigrationService(self.tenant_data_registry)
         initial_settings = self.config.load()
         self._connection_binding = self.connection_registry.sync_primary(
@@ -529,6 +531,7 @@ class Services:
             self.config,
             model_inventory,
             self.current_connection_binding(),
+            self.tenant_data_registry,
         )
 
     async def _assurance_complete(self, run_id: str, result: dict[str, Any]) -> None:
@@ -588,6 +591,7 @@ class Services:
             self.config,
             self._splunk_models,
             self._connection_binding,
+            self.tenant_data_registry,
         )
         self._validations = ValidationService(
             self.validation_store,
@@ -628,6 +632,7 @@ class Services:
             self.config,
             SplunkModelInventoryService(self.config, client),
             scope,
+            self.tenant_data_registry,
         )
 
     def splunk_for_scope(self, scope: dict[str, Any]) -> Any:
@@ -1267,7 +1272,8 @@ async def stage_tenant_data_migration(
         target_type="tenant-scope",
         target_id=scope["tenant_scope_id"],
         summary=(
-            "Copied eight tenant-owned workflow stores into a staged generation and verified exact digests; "
+            "Copied ten tenant-owned database and filesystem components into a staged generation "
+            "and verified exact digests; "
             "runtime routing remained shared."
         ),
         metadata={
@@ -1278,6 +1284,41 @@ async def stage_tenant_data_migration(
             "target_digest": result["target_digest"],
             "status": result["status"],
             "routing_changed": False,
+        },
+        actor=actor,
+    )
+    return result
+
+
+@app.post("/api/tenant-isolation/file-manifests/reconcile")
+async def reconcile_tenant_file_manifests(
+    value: TenantDataMigrationActionRequest,
+    request: Request,
+) -> dict[str, Any]:
+    actor = _admin_actor(request)
+    scope = _request_scope(
+        value.connection_alias,
+        value.connection_fingerprint,
+        value.tenant_scope_id,
+    )
+    try:
+        result = services.tenant_data_registry.reconcile_legacy_files(scope)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    services.audit.record(
+        "tenant.file-manifests.reconciled",
+        "reconcile",
+        target_type="tenant-scope",
+        target_id=scope["tenant_scope_id"],
+        summary=(
+            "Parsed legacy ownership envelopes and manifested only exact tenant and Splunk "
+            "revision matches; ambiguous files remained blocked."
+        ),
+        metadata={
+            "adopted_files": result["adopted_files"],
+            "adopted_total": result["adopted_total"],
+            "unbound_remaining": result["unbound_remaining"],
+            "files_moved_or_deleted": False,
         },
         actor=actor,
     )
@@ -4792,7 +4833,9 @@ async def download_case_export(
     scope = _request_scope(connection_alias, connection_fingerprint, tenant_scope_id)
     if Path(filename).name != filename or Path(filename).suffix not in {".md", ".json"}:
         raise HTTPException(404, "Case export not found")
-    root = (DATA / "case_exports").resolve()
+    root = services.tenant_data_registry.directory_for(
+        "case-exports", scope["tenant_scope_id"]
+    ).resolve()
     path = (root / filename).resolve()
     if path.parent != root or not path.exists():
         raise HTTPException(404, "Case export not found")

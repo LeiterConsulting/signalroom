@@ -86,11 +86,12 @@ class DiscoveryPipeline:
         config: ConfigStore | None = None,
         model_inventory: Any | None = None,
         connection_binding: dict[str, Any] | None = None,
+        data_registry: Any | None = None,
     ):
         self.client = client
         self.evidence = evidence
-        self.output_dir = Path(output_dir)
-        self.output_dir.mkdir(parents=True, exist_ok=True)
+        self.shared_output_dir = Path(output_dir)
+        self.data_registry = data_registry
         self.config = config
         self.router = ModelRouter(config) if config else None
         self.model_inventory = model_inventory
@@ -107,6 +108,26 @@ class DiscoveryPipeline:
         self.connection_alias = str(binding.get("alias") or "primary")
         self.connection_fingerprint = str(binding.get("fingerprint") or "")
         self.tenant_scope_id = str(binding.get("tenant_scope_id") or "workspace-primary")
+        self.output_dir = (
+            self.data_registry.directory_for("discovery-files", self.tenant_scope_id)
+            if self.data_registry
+            else self.shared_output_dir
+        )
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+
+    def _register_output(self, path: Path, run_id: str) -> None:
+        if not self.data_registry:
+            return
+        self.data_registry.register_file(
+            "discovery-files",
+            path,
+            {
+                "alias": self.connection_alias,
+                "fingerprint": self.connection_fingerprint,
+                "tenant_scope_id": self.tenant_scope_id,
+            },
+            source_id=run_id,
+        )
 
     def _latest_path(self) -> Path:
         safe_scope = re.sub(r"[^a-zA-Z0-9_.-]+", "-", self.tenant_scope_id).strip("-")
@@ -414,6 +435,8 @@ class DiscoveryPipeline:
         latest_path.write_text(json.dumps(blueprint, indent=2, default=str), encoding="utf-8")
         brief = self._markdown(blueprint)
         brief_path.write_text(brief, encoding="utf-8")
+        for output in (json_path, latest_path, brief_path):
+            self._register_output(output, run_id)
         self.evidence.add(
             ArtifactCreate(
                 title=f"Splunk security discovery {stamp}",

@@ -27,41 +27,46 @@ complete multi-tenant isolation.
 
 ## Physical-isolation readiness contract
 
-Administrators can create a content-free readiness plan in Setup for any admitted tenant and exact
-connection revision. The plan inventories schemas, root-row counts, and filenames. It never reads a
-payload column, moves a database row or file, creates runtime routing, or grants migration authority.
+Administrators can create a payload-opaque readiness plan in Setup for any admitted tenant and exact
+connection revision. The plan inventories schemas and root-row counts and streams manifest-admitted files
+through SHA-256 without parsing or exposing them. It never moves a database row or file, creates runtime
+routing, or grants migration authority.
 The resulting deterministic plan ID changes when the observed topology or counts change and is retained
 in the global control plane with its actor and audit event.
+
+For an upgraded data directory, the administrator may run a separate audited legacy reconciliation. It parses
+embedded discovery and case-export ownership envelopes, adopts only exact alias/revision/tenant matches, and records
+their current SHA-256 digests. It does not use filename inference, move, delete, or silently admit ambiguous files.
 
 The current component map distinguishes four states:
 
 - **Copy contract ready:** the root record has a direct tenant key and dependent records can follow a defined parent.
 - **Relationship map required:** some children or singleton policy records need explicit ownership before copying.
 - **Direct tenant key required:** application logic currently infers scope, but the durable root record cannot prove it.
-- **Filesystem router required:** scope-aware names or reads exist, but files still share an artifact root.
+- **Ownership manifest required:** a file lacks an intact tenant, immutable Splunk revision, path, and SHA-256 contract.
 
 Authentication, encrypted secrets, connection identity, the tamper-evident audit authority, model trust,
 and global workload/outbound policy deliberately remain shared control-plane services.
 
 ## Staged tenant data routing
 
-Evidence, Cases, Manual Discovery, Validations, Detections, Forecast Experiments, Assurance Responses, and Delivery History have direct or verified inherited scope contracts and can now enter
-a staged migration. Staging is materially different from readiness planning: it reads and locally copies
-the selected tenant's payload rows into a new generation under `data/tenants/<scope>/generations/`. It copies
-no other tenant rows, sends nothing externally, and leaves shared routing authoritative while it computes
-canonical source and target digests.
+Evidence, Cases, Manual Discovery, Validations, Detections, Forecast Experiments, Assurance Responses, Delivery
+History, Discovery Files, and Case Exports have direct, inherited, or immutable manifest scope contracts and can
+enter a staged migration. Staging is materially different from readiness planning: it reads and locally copies
+the selected tenant's payload rows and manifested files into a new generation under
+`data/tenants/<scope>/generations/`. It copies no other tenant data, sends nothing externally, and leaves current
+routing authoritative while it computes canonical source and target digests.
 
 Cutover requires the same admitted alias, immutable connection fingerprint, tenant scope, and current source
 digest. It also re-verifies the staged generation and refuses to run while a tenant discovery job is queued or
-running. The runtime store facades then route only that tenant's eight workflow stores
+running. The runtime facades then route only that tenant's ten data components
 to the verified generation. A missing active generation fails closed instead of recreating an empty database.
 
 The shared tenant rows remain sealed as a rollback source. Zero-write rollback can restore shared routing;
 the first isolated-generation mutation increments a durable write epoch and blocks direct rollback because it
 would hide newer data. A future reverse migration is required to preserve those writes. SignalRoom deliberately
-calls this state **isolated routing with source retained**, not complete physical isolation. Shared-source purge,
-filesystem routing, and migration of the currently blocking stores must be completed before hard isolation can
-be claimed.
+calls this state **isolated routing with source retained**, not complete physical isolation. Verified reverse
+migration and shared-source finalization must be completed before hard isolation can be claimed.
 
 Administrators can add live Splunk aliases such as `production-us`, `production-eu`, or `security-lab`
 in Settings. Each alias has its own encrypted MCP token, tenant scope, endpoint/TLS identity, diagnostic

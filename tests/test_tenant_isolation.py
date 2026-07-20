@@ -6,7 +6,11 @@ import pytest
 from splunk_security_agent.assurance import AssuranceStore
 from splunk_security_agent.delivery import DeliveryStore
 from splunk_security_agent.forecasting import TimeSeriesExperimentStore
-from splunk_security_agent.tenancy import TenantIsolationPlanner, TenantIsolationStore
+from splunk_security_agent.tenancy import (
+    TenantDataPlaneRegistry,
+    TenantIsolationPlanner,
+    TenantIsolationStore,
+)
 
 
 def create_scoped_evidence_database(path) -> None:
@@ -64,9 +68,17 @@ def test_readiness_plan_counts_scope_without_reading_payload_content(tmp_path) -
         "other sensitive discovery content", encoding="utf-8"
     )
 
+    registry = TenantDataPlaneRegistry(tmp_path / "tenant_isolation.db", tmp_path)
+    registry.register_file("discovery-files", artifacts / "discovery-tenant-east.json", binding())
+    registry.register_file(
+        "discovery-files",
+        artifacts / "discovery-tenant-west.json",
+        {"alias": "west-prod", "fingerprint": "b" * 64, "tenant_scope_id": "tenant-west"},
+    )
     planner = TenantIsolationPlanner(
         tmp_path,
         TenantIsolationStore(tmp_path / "tenant_isolation.db"),
+        registry,
     )
     first = planner.preview(binding())
     second = planner.preview(binding())
@@ -95,7 +107,8 @@ def test_readiness_plan_counts_scope_without_reading_payload_content(tmp_path) -
 
 def test_created_plan_is_review_only_and_retained_in_global_control_plane(tmp_path) -> None:
     store = TenantIsolationStore(tmp_path / "tenant_isolation.db")
-    planner = TenantIsolationPlanner(tmp_path, store)
+    registry = TenantDataPlaneRegistry(tmp_path / "tenant_isolation.db", tmp_path)
+    planner = TenantIsolationPlanner(tmp_path, store, registry)
 
     plan = planner.create_plan(binding(), "security-admin")
     overview = planner.overview()
@@ -106,11 +119,12 @@ def test_created_plan_is_review_only_and_retained_in_global_control_plane(tmp_pa
         "physical_isolation_enforced": False,
         "activation_available": True,
         "detail": (
-            "Tenant predicates are enforced. Eight workflow stores can enter a verified "
-            "isolated generation; filesystem artifacts and sealed rollback rows remain shared."
+            "Tenant predicates are enforced. Eight workflow databases and two manifested "
+            "file roots can enter one digest-verified isolated generation."
         ),
     }
-    assert overview["contract"]["plan_reads_payload_content"] is False
+    assert overview["contract"]["plan_parses_payload_content"] is False
+    assert overview["contract"]["plan_hashes_manifested_files"] is True
     assert overview["contract"]["plan_moves_data"] is False
     assert overview["contract"]["plan_changes_runtime_routing"] is False
     assert overview["latest_plans"][0]["plan_id"] == plan["plan_id"]

@@ -9,6 +9,7 @@ from splunk_security_agent.discovery.pipeline import (
 from splunk_security_agent.rag import EvidenceStore
 from splunk_security_agent.schemas import ArtifactCreate
 from splunk_security_agent.splunk import DemoSplunkClient
+from splunk_security_agent.tenancy import TenantDataPlaneRegistry
 
 
 class RecordingDemoSplunkClient(DemoSplunkClient):
@@ -33,6 +34,34 @@ async def test_demo_discovery_emits_and_indexes_artifacts(tmp_path):
     assert len(result["knowledge_artifacts"]) == 3
     assert result["security_posture"]["detections"]["total"] == 0
     assert {item.kind for item in evidence.list()} == {"discovery", "discovery-knowledge"}
+
+
+async def test_discovery_registers_immutable_file_manifests(tmp_path):
+    binding = {
+        "alias": "east-prod",
+        "fingerprint": "a" * 64,
+        "tenant_scope_id": "tenant-east",
+    }
+    registry = TenantDataPlaneRegistry(tmp_path / "tenant_isolation.db", tmp_path)
+    evidence = EvidenceStore(tmp_path / "evidence.db")
+    pipeline = DiscoveryPipeline(
+        DemoSplunkClient(),
+        evidence,
+        tmp_path / "artifacts",
+        connection_binding=binding,
+        data_registry=registry,
+    )
+
+    result = await pipeline.run("quick")
+    manifests = registry.manifested_files("discovery-files", binding)
+
+    assert len(manifests) == 3
+    assert {item["relative_path"] for item in manifests} == {
+        *result["artifacts"],
+        pipeline._latest_path().name,
+    }
+    assert all(item["source_id"] == result["run_id"] for item in manifests)
+    assert registry.inspect_files("discovery-files", binding)["unbound_records"] == 0
 
 
 async def test_standard_discovery_indexes_splunk_mltk_models_as_rag_context(tmp_path):

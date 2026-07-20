@@ -10,7 +10,10 @@ from pathlib import Path
 from threading import RLock
 from typing import Any, Literal
 
-from .data_plane import TENANT_STORE_FILENAMES
+from .data_plane import (
+    TENANT_DATA_COMPONENTS,
+    TenantDataPlaneRegistry,
+)
 
 
 def _now() -> str:
@@ -36,6 +39,7 @@ class TenantDataComponent:
         "scope-key-required",
         "relationship-map-required",
         "filesystem-router-required",
+        "ownership-manifest-required",
     ] = "copy-contract-ready"
     detail: str = ""
     sequence: int = 1
@@ -199,10 +203,10 @@ TENANT_COMPONENTS = (
         "Discovery blueprints and briefs",
         "filesystem",
         "artifacts",
-        readiness="filesystem-router-required",
+        readiness="copy-contract-ready",
         detail=(
-            "Filenames include scope and connection revision, but retained files still share one "
-            "artifact directory."
+            "Blueprints and briefs are routed by generation and admitted only through an immutable "
+            "tenant, Splunk revision, relative-path, and SHA-256 manifest."
         ),
         sequence=4,
     ),
@@ -211,8 +215,11 @@ TENANT_COMPONENTS = (
         "Case handoff exports",
         "filesystem",
         "case_exports",
-        readiness="filesystem-router-required",
-        detail="Export content is scope-checked, but files still share one export directory.",
+        readiness="copy-contract-ready",
+        detail=(
+            "Case handoff packages are routed beside their tenant generation and admitted only "
+            "through an immutable ownership and SHA-256 manifest."
+        ),
         sequence=4,
     ),
 )
@@ -293,9 +300,15 @@ class TenantIsolationPlanner:
 
     SCHEMA_VERSION = "signalroom.tenant-isolation-plan.v1"
 
-    def __init__(self, data_root: Path | str, store: TenantIsolationStore):
+    def __init__(
+        self,
+        data_root: Path | str,
+        store: TenantIsolationStore,
+        data_registry: TenantDataPlaneRegistry | None = None,
+    ):
         self.data_root = Path(data_root).resolve()
         self.store = store
+        self.data_registry = data_registry
 
     def overview(self) -> dict[str, Any]:
         return {
@@ -305,12 +318,13 @@ class TenantIsolationPlanner:
                 "physical_isolation_enforced": False,
                 "activation_available": True,
                 "detail": (
-                    "Tenant predicates are enforced. Eight workflow stores can enter a verified "
-                    "isolated generation; filesystem artifacts and sealed rollback rows remain shared."
+                    "Tenant predicates are enforced. Eight workflow databases and two manifested "
+                    "file roots can enter one digest-verified isolated generation."
                 ),
             },
             "contract": {
-                "plan_reads_payload_content": False,
+                "plan_parses_payload_content": False,
+                "plan_hashes_manifested_files": True,
                 "plan_moves_data": False,
                 "plan_changes_runtime_routing": False,
                 "activation_fails_closed": True,
@@ -338,14 +352,14 @@ class TenantIsolationPlanner:
             for item in components
             if item["readiness"] != "copy-contract-ready"
         ]
-        routed_components = [item for item in components if item["id"] in TENANT_STORE_FILENAMES]
+        routed_components = [item for item in components if item["id"] in TENANT_DATA_COMPONENTS]
         migration_executable = all(
             item["readiness"] == "copy-contract-ready"
             and item["source_exists"]
             and item.get("schema_observed", False)
             and not item["unbound_records"]
             for item in routed_components
-        ) and len(routed_components) == len(TENANT_STORE_FILENAMES)
+        ) and len(routed_components) == len(TENANT_DATA_COMPONENTS)
         identity = {
             "schema_version": self.SCHEMA_VERSION,
             "connection_alias": scope["alias"],
@@ -367,18 +381,19 @@ class TenantIsolationPlanner:
             "blocker_count": len(blockers),
             "safety_contract": [
                 "No database row, artifact, export, or credential is copied by this plan.",
-                "No payload content is read; inspection is limited to schemas, counts, and filenames.",
+                "Manifested files are streamed through SHA-256 for integrity; payloads are not "
+                "parsed or exposed.",
                 "The immutable Splunk binding must still match when a future migration begins.",
                 "Workers and writes must be quiesced before any future copy-and-verify phase.",
                 "Source data remains authoritative until digest verification and explicit cutover.",
                 "The global audit chain records planning, migration, verification, and rollback.",
             ],
             "next_step": (
-                "Stage and digest-verify the eight routed stores, then explicitly activate the "
-                "generation. Filesystem routing, reverse migration, and source purge remain next."
+                "Stage and digest-verify all ten routed components, then explicitly activate the "
+                "generation. Verified reverse migration and source finalization remain next."
                 if migration_executable
-                else "Resolve missing schemas or unbound ownership in the eight routed stores; "
-                "filesystem and full-policy isolation remain later phases."
+                else "Resolve missing schemas, unbound rows, or unmanifested files across the ten "
+                "routed components before staging."
             ),
         }
 
@@ -403,7 +418,24 @@ class TenantIsolationPlanner:
         path = (self.data_root / component.source).resolve()
         self._assert_contained(path)
         if component.kind == "filesystem":
-            return {**base, **self._inspect_directory(path, scope["tenant_scope_id"])}
+            if not self.data_registry:
+                return {
+                    **base,
+                    "readiness": "filesystem-router-required",
+                    "detail": "The tenant filesystem routing registry is unavailable.",
+                }
+            result = self.data_registry.inspect_files(component.id, scope)
+            if result.get("unbound_records"):
+                result.update(
+                    {
+                        "readiness": "ownership-manifest-required",
+                        "detail": (
+                            f"{result['unbound_records']} file(s) are missing an intact ownership "
+                            "manifest. They will not be guessed from filenames or copied."
+                        ),
+                    }
+                )
+            return {**base, **result}
         return {**base, **self._inspect_database(path, component, scope["tenant_scope_id"])}
 
     def _inspect_database(

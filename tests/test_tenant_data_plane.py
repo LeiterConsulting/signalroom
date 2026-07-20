@@ -57,6 +57,8 @@ def readiness_plan() -> dict:
                 "forecast-experiments",
                 "assurance-responses",
                 "outbound-delivery",
+                "discovery-files",
+                "case-exports",
             )
         ],
     }
@@ -173,6 +175,8 @@ def test_stage_verifies_exact_tenant_rows_without_changing_routing(tmp_path) -> 
         "forecast-experiments",
         "assurance-responses",
         "outbound-delivery",
+        "discovery-files",
+        "case-exports",
     }
     assert all(item["verified"] for item in migration["components"])
     root = registry.generation_root(EAST["tenant_scope_id"], migration["generation_id"])
@@ -232,6 +236,15 @@ def test_cutover_routes_each_store_and_blocks_lossy_rollback_after_a_write(
     )
     assert cases.get(isolated_case.id, EAST["tenant_scope_id"]).status == "investigating"
     assert CaseStore(tmp_path / "cases.db", tmp_path / "case_exports").get(isolated_case.id) is None
+    exported = cases.export(isolated_case.id, ["markdown", "json"], EAST["tenant_scope_id"])
+    root = registry.generation_root(EAST["tenant_scope_id"], migration["generation_id"])
+    assert {path.parent for path in exported} == {root / "case_exports"}
+    export_manifests = registry.manifested_files(
+        "case-exports", EAST, storage_generation_id=migration["generation_id"]
+    )
+    assert {item["relative_path"] for item in export_manifests} == {
+        path.name for path in exported
+    }
 
     isolated_job = jobs.create_job("quick", "east-analyst", 8, EAST)
     jobs.mark_running(isolated_job.id)
@@ -462,15 +475,31 @@ def test_legacy_three_component_generation_keeps_new_workflows_on_shared_source(
 
     assert registry.component_isolated("evidence", EAST["tenant_scope_id"]) is True
     assert registry.component_isolated("validations", EAST["tenant_scope_id"]) is False
+    generation_root = registry.generation_root(
+        EAST["tenant_scope_id"], migration["generation_id"]
+    )
+    assert registry.directory_for("discovery-files", EAST["tenant_scope_id"]) == tmp_path / "artifacts"
+    assert registry.directory_for("case-exports", EAST["tenant_scope_id"]) == (
+        generation_root / "case_exports"
+    )
     assert ValidationStore(tmp_path / "validations.db").get(task.id) is not None
     assert registry.route(EAST["tenant_scope_id"])["writes_since_cutover"] == 0
     RoutedEvidenceStore(registry).add(artifact(EAST, "Legacy generation write"))
+    discovery_file = tmp_path / "artifacts" / "legacy-expanded.json"
+    discovery_file.write_text("legacy shared discovery file", encoding="utf-8")
+    registry.register_file("discovery-files", discovery_file, EAST, source_id="legacy-run")
+    case_export = generation_root / "case_exports" / "legacy-case.md"
+    case_export.write_text("legacy isolated case export", encoding="utf-8")
+    registry.register_file("case-exports", case_export, EAST, source_id="legacy-case")
     prior_writes = registry.route(EAST["tenant_scope_id"])["writes_since_cutover"]
-    assert prior_writes == 1
+    assert prior_writes == 2
 
     expanded = service.stage(EAST, readiness_plan(), "security-admin")
     assert expanded["source_generation_id"] == migration["generation_id"]
     assert expanded["source_writes_since_cutover"] == prior_writes
+    expanded_root = registry.generation_root(EAST["tenant_scope_id"], expanded["generation_id"])
+    assert (expanded_root / "artifacts" / discovery_file.name).is_file()
+    assert (expanded_root / "case_exports" / case_export.name).is_file()
     service.cutover(expanded["id"], EAST)
     assert registry.component_isolated("validations", EAST["tenant_scope_id"]) is True
     assert validations.get(task.id, EAST["tenant_scope_id"]) is not None
@@ -497,3 +526,96 @@ def test_registry_does_not_expose_payloads_or_absolute_paths(tmp_path) -> None:
     assert str(tmp_path) not in serialized
     with sqlite3.connect(tmp_path / "tenant_isolation.db") as database:
         assert database.execute("SELECT COUNT(*) FROM tenant_data_migrations").fetchone()[0] == 1
+
+
+def test_manifested_files_are_digest_verified_and_routed_with_the_generation(tmp_path) -> None:
+    seed_shared_stores(tmp_path)
+    registry, service = data_plane(tmp_path)
+    artifact_root = registry.directory_for("discovery-files", EAST["tenant_scope_id"])
+    export_root = registry.directory_for("case-exports", EAST["tenant_scope_id"])
+    blueprint = artifact_root / "east-blueprint.json"
+    handoff = export_root / "east-case.md"
+    blueprint.write_text("tenant east discovery payload", encoding="utf-8")
+    handoff.write_text("tenant east case handoff", encoding="utf-8")
+    registry.register_file("discovery-files", blueprint, EAST, source_id="run-east")
+    registry.register_file("case-exports", handoff, EAST, source_id="case-east")
+
+    migration = service.stage(EAST, readiness_plan(), "security-admin")
+    root = registry.generation_root(EAST["tenant_scope_id"], migration["generation_id"])
+
+    assert (root / "artifacts" / blueprint.name).read_text(encoding="utf-8") == blueprint.read_text(
+        encoding="utf-8"
+    )
+    assert (root / "case_exports" / handoff.name).is_file()
+    assert next(item for item in migration["components"] if item["id"] == "discovery-files")[
+        "verified"
+    ]
+
+    service.cutover(migration["id"], EAST)
+    assert registry.directory_for("discovery-files", EAST["tenant_scope_id"]) == root / "artifacts"
+    assert registry.directory_for("case-exports", EAST["tenant_scope_id"]) == root / "case_exports"
+
+
+def test_manifested_file_change_blocks_cutover(tmp_path) -> None:
+    seed_shared_stores(tmp_path)
+    registry, service = data_plane(tmp_path)
+    artifact_root = registry.directory_for("discovery-files", EAST["tenant_scope_id"])
+    blueprint = artifact_root / "east-blueprint.json"
+    blueprint.write_text("verified discovery payload", encoding="utf-8")
+    registry.register_file("discovery-files", blueprint, EAST, source_id="run-east")
+    migration = service.stage(EAST, readiness_plan(), "security-admin")
+    blueprint.write_text("changed after staging", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="Shared tenant data changed"):
+        service.cutover(migration["id"], EAST)
+
+
+def test_legacy_reconciliation_adopts_only_exact_embedded_ownership(tmp_path) -> None:
+    registry, _ = data_plane(tmp_path)
+    artifact_root = registry.directory_for("discovery-files", EAST["tenant_scope_id"])
+    export_root = registry.directory_for("case-exports", EAST["tenant_scope_id"])
+    brief = artifact_root / "east-brief.md"
+    brief.write_text("legacy east brief", encoding="utf-8")
+    (artifact_root / "east-blueprint.json").write_text(
+        json.dumps(
+            {
+                "run_id": "east-run",
+                "provenance": {
+                    "connection_alias": EAST["alias"],
+                    "connection_fingerprint": EAST["fingerprint"],
+                    "tenant_scope_id": EAST["tenant_scope_id"],
+                },
+                "artifacts": ["east-blueprint.json", brief.name],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (artifact_root / "ambiguous.json").write_text(
+        json.dumps({"run_id": "unknown"}), encoding="utf-8"
+    )
+    case_json = export_root / "east-case.json"
+    case_json.write_text(
+        json.dumps(
+            {
+                "id": "case-east",
+                "connection_alias": EAST["alias"],
+                "connection_fingerprint": EAST["fingerprint"],
+                "tenant_scope_id": EAST["tenant_scope_id"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    case_json.with_suffix(".md").write_text(
+        f"- Splunk connection: {EAST['alias']}\n"
+        f"- Tenant scope: `{EAST['tenant_scope_id']}`\n"
+        f"- Connection revision: `{EAST['fingerprint']}`\n",
+        encoding="utf-8",
+    )
+
+    result = registry.reconcile_legacy_files(EAST)
+
+    assert result["adopted_total"] == 4
+    assert result["unbound_remaining"] == 1
+    assert result["contract"]["files_moved_or_deleted"] is False
+    assert registry.reconcile_legacy_files(EAST)["adopted_total"] == 0
+    assert registry.inspect_files("discovery-files", EAST)["unbound_records"] == 1

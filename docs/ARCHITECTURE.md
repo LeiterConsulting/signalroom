@@ -429,7 +429,7 @@ there is deliberately no remote recovery route.
 
 ## Next production increments
 
-1. Add tenant filesystem routing plus verified reverse migration and shared-source purge/finalization
+1. Add verified reverse migration and shared-source purge/finalization for routed generations
 2. Add OIDC group-to-alias assignment policy and encrypted credential backup/restore controls
 3. Add time-aligned durable multi-estate review packets without cross-tenant fact copying
 4. Add read-only deployment reconciliation for the audit operations pack when the Splunk MCP contract exposes the
@@ -440,7 +440,7 @@ there is deliberately no remote recovery route.
 
 `TenantIsolationPlanner` maintains a declared inventory of tenant-owned databases and artifact roots.
 It opens SQLite sources read-only and inspects table existence, columns, and counts; filesystem inspection
-uses filenames only. An admin binds planning to an admitted alias, tenant scope, and immutable connection
+streams only manifest-admitted files through SHA-256 and never parses or exposes their payload. An admin binds planning to an admitted alias, tenant scope, and immutable connection
 fingerprint. The resulting plan identifies direct, inherited, missing, and filesystem scope contracts and
 is recorded in the shared audit authority. It cannot execute migration or change runtime routing. This
 prevents an incomplete toggle from falsely claiming isolation while unscoped durable records still exist.
@@ -458,11 +458,13 @@ assurance-run binding into direct columns, while delivery jobs copy the package 
 again before an outbound request. These roots now resolve through the active tenant generation. Singleton
 assurance and delivery policies remain global control-plane state while response and delivery history is isolated.
 
-`TenantDataPlaneRegistry` is the runtime authority for all eight routed workflow stores. A generation copy holds the
-process-wide store-operation lock, refuses active tenant work, streams rows selected through the tenant root,
-and hashes the same canonical table order on both sides. Verification does not change routing. Cutover repeats the
-source and target digests before atomically recording the generation route. Routed store facades resolve the tenant
-on every operation and fail closed when an active generation is missing. The route records a durable write epoch;
+`TenantDataPlaneRegistry` is the runtime authority for eight routed workflow databases and two routed file roots.
+App-created discovery and case-export files receive immutable tenant, Splunk revision, relative-path, source-ID,
+and SHA-256 manifest entries; unmanifested or changed files cannot enter a generation. A generation copy holds the
+process-wide store-operation lock, refuses active tenant work, streams rows/files selected through the tenant root,
+and hashes the same canonical identities on both sides. Verification does not change routing. Cutover repeats the
+source and target digests before atomically recording the generation route. Routed facades resolve the tenant on
+every operation and fail closed when an active generation is missing. The route records a durable write epoch;
 rollback to the retained shared source is legal only while that epoch remains zero. The shared duplicate is not yet
 purged, so this is routing isolation and a safe migration checkpoint—not final physical separation.
 

@@ -32,6 +32,13 @@ TENANT_STORE_FILENAMES = {
     "outbound-delivery": "delivery_history.db",
 }
 
+TENANT_DIRECTORY_NAMES = {
+    "discovery-files": "artifacts",
+    "case-exports": "case_exports",
+}
+
+TENANT_DATA_COMPONENTS = (*TENANT_STORE_FILENAMES, *TENANT_DIRECTORY_NAMES)
+
 
 def _now() -> str:
     return datetime.now(UTC).isoformat()
@@ -94,6 +101,24 @@ class TenantDataPlaneRegistry:
                 );
                 CREATE INDEX IF NOT EXISTS idx_tenant_data_migrations_scope_created
                     ON tenant_data_migrations(tenant_scope_id,created_at DESC);
+                CREATE TABLE IF NOT EXISTS tenant_file_manifests (
+                    component TEXT NOT NULL,
+                    storage_generation_id TEXT NOT NULL DEFAULT '',
+                    relative_path TEXT NOT NULL,
+                    tenant_scope_id TEXT NOT NULL,
+                    connection_alias TEXT NOT NULL,
+                    connection_fingerprint TEXT NOT NULL,
+                    content_sha256 TEXT NOT NULL,
+                    source_id TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY(component,storage_generation_id,relative_path)
+                );
+                CREATE INDEX IF NOT EXISTS idx_tenant_file_manifest_scope
+                    ON tenant_file_manifests(
+                        tenant_scope_id,connection_alias,connection_fingerprint,
+                        storage_generation_id,component
+                    );
                 """
             )
             columns = {
@@ -151,6 +176,357 @@ class TenantDataPlaneRegistry:
         if not path.is_file():
             raise RuntimeError(f"The active isolated {component} store is missing; routing failed closed.")
         return path
+
+    def directory_for(self, component: str, tenant_scope_id: str) -> Path:
+        """Resolve a tenant-owned file root through the active generation manifest."""
+        if component not in TENANT_DIRECTORY_NAMES:
+            raise ValueError(f"Unsupported tenant directory component: {component}")
+        route = self.route(tenant_scope_id)
+        generation = self.directory_generation(component, tenant_scope_id, route=route)
+        if not generation:
+            path = (self.data_root / TENANT_DIRECTORY_NAMES[component]).resolve()
+        else:
+            path = (
+                self.generation_root(tenant_scope_id, generation)
+                / TENANT_DIRECTORY_NAMES[component]
+            ).resolve()
+        self.assert_contained(path)
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    def directory_generation(
+        self,
+        component: str,
+        tenant_scope_id: str,
+        *,
+        route: dict[str, Any] | None = None,
+    ) -> str:
+        """Return the storage generation for one file component, including legacy case routing."""
+        if component not in TENANT_DIRECTORY_NAMES:
+            raise ValueError(f"Unsupported tenant directory component: {component}")
+        route = route or self.route(tenant_scope_id)
+        if route.get("mode") != "isolated-routing":
+            return ""
+        if self.component_isolated(component, tenant_scope_id, route=route):
+            return str(route.get("generation_id") or "")
+        # The original eight-store route already placed case exports beside cases. Preserve
+        # that location while an administrator stages an expanded filesystem generation.
+        if component == "case-exports" and self.component_isolated(
+            "cases", tenant_scope_id, route=route
+        ):
+            return str(route.get("generation_id") or "")
+        return ""
+
+    def register_file(
+        self,
+        component: str,
+        path: Path | str,
+        binding: dict[str, Any],
+        *,
+        source_id: str = "",
+        storage_generation_id: str | None = None,
+        count_write: bool = True,
+    ) -> dict[str, Any]:
+        """Bind an app-created file to an immutable tenant/Splunk identity and digest."""
+        tenant = _safe_scope(str(binding.get("tenant_scope_id") or ""))
+        if component not in TENANT_DIRECTORY_NAMES:
+            raise ValueError(f"Unsupported tenant directory component: {component}")
+        route = self.route(tenant)
+        generation = (
+            str(storage_generation_id)
+            if storage_generation_id is not None
+            else self.directory_generation(component, tenant, route=route)
+        )
+        root = (
+            self.generation_root(tenant, generation) / TENANT_DIRECTORY_NAMES[component]
+            if generation
+            else self.data_root / TENANT_DIRECTORY_NAMES[component]
+        ).resolve()
+        candidate = Path(path).resolve()
+        self.assert_contained(candidate)
+        if candidate == root or root not in candidate.parents or not candidate.is_file():
+            raise ValueError("Tenant file is missing or outside its routed component root.")
+        relative = candidate.relative_to(root).as_posix()
+        digest = self._file_sha256(candidate)
+        now = _now()
+        with self.connect() as database:
+            existing = database.execute(
+                """SELECT tenant_scope_id,connection_alias,connection_fingerprint
+                FROM tenant_file_manifests
+                WHERE component=? AND storage_generation_id=? AND relative_path=?""",
+                (component, generation, relative),
+            ).fetchone()
+            expected_identity = (
+                tenant,
+                str(binding.get("alias") or "primary"),
+                str(binding.get("fingerprint") or ""),
+            )
+            if existing and tuple(existing) != expected_identity:
+                raise ValueError("A tenant file manifest cannot be reassigned to another scope.")
+            database.execute(
+                """INSERT INTO tenant_file_manifests
+                (component,storage_generation_id,relative_path,tenant_scope_id,
+                connection_alias,connection_fingerprint,content_sha256,source_id,
+                created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(component,storage_generation_id,relative_path) DO UPDATE SET
+                tenant_scope_id=excluded.tenant_scope_id,
+                connection_alias=excluded.connection_alias,
+                connection_fingerprint=excluded.connection_fingerprint,
+                content_sha256=excluded.content_sha256,source_id=excluded.source_id,
+                updated_at=excluded.updated_at""",
+                (
+                    component,
+                    generation,
+                    relative,
+                    tenant,
+                    str(binding.get("alias") or "primary"),
+                    str(binding.get("fingerprint") or ""),
+                    digest,
+                    str(source_id or ""),
+                    now,
+                    now,
+                ),
+            )
+        if count_write and route.get("mode") == "isolated-routing" and generation == str(
+            route.get("generation_id") or ""
+        ):
+            self.note_write(tenant)
+        return {
+            "component": component,
+            "storage_generation_id": generation,
+            "relative_path": relative,
+            "content_sha256": digest,
+            "source_id": str(source_id or ""),
+        }
+
+    def manifested_files(
+        self,
+        component: str,
+        binding: dict[str, Any],
+        *,
+        storage_generation_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        tenant = _safe_scope(str(binding.get("tenant_scope_id") or ""))
+        if component not in TENANT_DIRECTORY_NAMES:
+            raise ValueError(f"Unsupported tenant directory component: {component}")
+        if storage_generation_id is None:
+            route = self.route(tenant)
+            generation = self.directory_generation(component, tenant, route=route)
+        else:
+            generation = str(storage_generation_id)
+        with self.connect() as database:
+            rows = database.execute(
+                """SELECT * FROM tenant_file_manifests
+                WHERE component=? AND storage_generation_id=? AND tenant_scope_id=?
+                AND connection_alias=? AND connection_fingerprint=?
+                ORDER BY relative_path""",
+                (
+                    component,
+                    generation,
+                    tenant,
+                    str(binding.get("alias") or "primary"),
+                    str(binding.get("fingerprint") or ""),
+                ),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def inspect_files(self, component: str, binding: dict[str, Any]) -> dict[str, Any]:
+        tenant = _safe_scope(str(binding.get("tenant_scope_id") or ""))
+        route = self.route(tenant)
+        generation = self.directory_generation(component, tenant, route=route)
+        root = self.directory_for(component, tenant)
+        files = [
+            item
+            for item in root.rglob("*")
+            if item.is_file() and item.name != ".gitkeep"
+        ]
+        manifests = self.manifested_files(
+            component, binding, storage_generation_id=generation
+        )
+        by_path = {str(item["relative_path"]): item for item in manifests}
+        with self.connect() as database:
+            all_rows = database.execute(
+                """SELECT relative_path,tenant_scope_id,connection_alias,connection_fingerprint,
+                content_sha256 FROM tenant_file_manifests
+                WHERE component=? AND storage_generation_id=?""",
+                (component, generation),
+            ).fetchall()
+        all_by_path = {str(item["relative_path"]): dict(item) for item in all_rows}
+        tracked = 0
+        mismatched = 0
+        observed: set[str] = set()
+        observed_any: set[str] = set()
+        for item in files:
+            relative = item.relative_to(root).as_posix()
+            if relative in all_by_path:
+                observed_any.add(relative)
+            manifest = by_path.get(relative)
+            if not manifest:
+                continue
+            observed.add(relative)
+            if self._file_sha256(item) == str(manifest["content_sha256"]):
+                tracked += 1
+            else:
+                mismatched += 1
+        missing = len(set(by_path) - observed)
+        other = len(all_by_path) - len(by_path)
+        unbound = max(0, len(files) - len(observed_any)) + missing + mismatched
+        return {
+            "source_exists": root.is_dir(),
+            "schema_observed": True,
+            "scope_records": tracked,
+            "other_scope_records": other,
+            "unbound_records": unbound,
+            "integrity_mismatches": mismatched + missing,
+            "total_records": len(files),
+        }
+
+    def remove_generation_manifests(self, generation_id: str) -> None:
+        with self.connect() as database:
+            database.execute(
+                "DELETE FROM tenant_file_manifests WHERE storage_generation_id=?",
+                (generation_id,),
+            )
+
+    def reconcile_legacy_files(self, binding: dict[str, Any]) -> dict[str, Any]:
+        """Adopt only legacy files whose embedded ownership exactly matches the binding."""
+        tenant = _safe_scope(str(binding.get("tenant_scope_id") or ""))
+        expected = (
+            str(binding.get("alias") or "primary"),
+            str(binding.get("fingerprint") or ""),
+            tenant,
+        )
+        adopted = {component: 0 for component in TENANT_DIRECTORY_NAMES}
+        examined = {component: 0 for component in TENANT_DIRECTORY_NAMES}
+
+        discovery_root = self.directory_for("discovery-files", tenant)
+        known_discovery = self._manifested_relative_paths("discovery-files", tenant)
+        for candidate in sorted(discovery_root.glob("*.json")):
+            relative = candidate.relative_to(discovery_root).as_posix()
+            if relative in known_discovery:
+                continue
+            examined["discovery-files"] += 1
+            payload = self._read_json_object(candidate)
+            provenance = payload.get("provenance") if payload else None
+            observed = (
+                str((provenance or {}).get("connection_alias") or ""),
+                str((provenance or {}).get("connection_fingerprint") or ""),
+                str((provenance or {}).get("tenant_scope_id") or ""),
+            )
+            if observed != expected:
+                continue
+            run_id = str(payload.get("run_id") or "")
+            self.register_file("discovery-files", candidate, binding, source_id=run_id)
+            known_discovery.add(relative)
+            adopted["discovery-files"] += 1
+            for name in payload.get("artifacts") or []:
+                if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9_.-]+", name):
+                    continue
+                related = (discovery_root / name).resolve()
+                if discovery_root not in related.parents or not related.is_file():
+                    continue
+                related_relative = related.relative_to(discovery_root).as_posix()
+                if related_relative in known_discovery:
+                    continue
+                self.register_file("discovery-files", related, binding, source_id=run_id)
+                known_discovery.add(related_relative)
+                adopted["discovery-files"] += 1
+
+        export_root = self.directory_for("case-exports", tenant)
+        known_exports = self._manifested_relative_paths("case-exports", tenant)
+        for candidate in sorted(export_root.glob("*.json")):
+            relative = candidate.relative_to(export_root).as_posix()
+            if relative in known_exports:
+                continue
+            examined["case-exports"] += 1
+            payload = self._read_json_object(candidate)
+            observed = (
+                str(payload.get("connection_alias") or "") if payload else "",
+                str(payload.get("connection_fingerprint") or "") if payload else "",
+                str(payload.get("tenant_scope_id") or "") if payload else "",
+            )
+            if observed != expected:
+                continue
+            case_id = str(payload.get("id") or "")
+            self.register_file("case-exports", candidate, binding, source_id=case_id)
+            known_exports.add(relative)
+            adopted["case-exports"] += 1
+            markdown = candidate.with_suffix(".md")
+            markdown_relative = markdown.relative_to(export_root).as_posix()
+            if (
+                markdown.is_file()
+                and markdown_relative not in known_exports
+                and self._case_markdown_matches(markdown, expected)
+            ):
+                self.register_file("case-exports", markdown, binding, source_id=case_id)
+                known_exports.add(markdown_relative)
+                adopted["case-exports"] += 1
+
+        status = {
+            component: self.inspect_files(component, binding)
+            for component in TENANT_DIRECTORY_NAMES
+        }
+        return {
+            "tenant_scope_id": tenant,
+            "connection_alias": expected[0],
+            "connection_fingerprint": expected[1],
+            "examined_json_files": examined,
+            "adopted_files": adopted,
+            "adopted_total": sum(adopted.values()),
+            "unbound_remaining": sum(
+                int(item.get("unbound_records") or 0) for item in status.values()
+            ),
+            "components": status,
+            "contract": {
+                "payload_ownership_envelopes_parsed": True,
+                "filename_inference_allowed": False,
+                "files_moved_or_deleted": False,
+                "ambiguous_files_remain_blocked": True,
+            },
+        }
+
+    def _manifested_relative_paths(self, component: str, tenant_scope_id: str) -> set[str]:
+        route = self.route(tenant_scope_id)
+        generation = self.directory_generation(component, tenant_scope_id, route=route)
+        with self.connect() as database:
+            rows = database.execute(
+                """SELECT relative_path FROM tenant_file_manifests
+                WHERE component=? AND storage_generation_id=?""",
+                (component, generation),
+            ).fetchall()
+        return {str(row["relative_path"]) for row in rows}
+
+    @staticmethod
+    def _read_json_object(path: Path) -> dict[str, Any]:
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            return {}
+        return payload if isinstance(payload, dict) else {}
+
+    @staticmethod
+    def _case_markdown_matches(path: Path, expected: tuple[str, str, str]) -> bool:
+        try:
+            content = path.read_text(encoding="utf-8", errors="strict")
+        except (OSError, UnicodeError):
+            return False
+        alias, fingerprint, tenant = expected
+        return all(
+            marker in content
+            for marker in (
+                f"- Splunk connection: {alias}",
+                f"- Tenant scope: `{tenant}`",
+                f"- Connection revision: `{fingerprint}`",
+            )
+        )
+
+    @staticmethod
+    def _file_sha256(path: Path) -> str:
+        hasher = hashlib.sha256()
+        with path.open("rb") as stream:
+            while chunk := stream.read(1024 * 1024):
+                hasher.update(chunk)
+        return hasher.hexdigest()
 
     def component_isolated(
         self,
@@ -421,7 +797,7 @@ class TenantDataPlaneRegistry:
             "routes": routes,
             "migrations": self.migrations(),
             "contract": {
-                "components": list(TENANT_STORE_FILENAMES),
+                "components": list(TENANT_DATA_COMPONENTS),
                 "cutover_requires_exact_source_digest": True,
                 "rollback_requires_zero_post_cutover_writes": True,
                 "source_retained_until_future_finalization": True,
@@ -441,7 +817,7 @@ class TenantDataPlaneRegistry:
 class TenantDataMigrationService:
     """Copy and verify tenant data before changing the runtime route."""
 
-    COMPONENTS = tuple(TENANT_STORE_FILENAMES)
+    COMPONENTS = TENANT_DATA_COMPONENTS
 
     def __init__(self, registry: TenantDataPlaneRegistry):
         self.registry = registry
@@ -471,10 +847,7 @@ class TenantDataMigrationService:
                 if root.exists():
                     raise ValueError("The new tenant generation path already exists.")
                 root.mkdir(parents=True)
-                results = [
-                    self._copy_component(component, binding["tenant_scope_id"], root)
-                    for component in self.COMPONENTS
-                ]
+                results = [self._copy_component(component, binding, root) for component in self.COMPONENTS]
                 source_digest = self._aggregate_digest(results, "source_digest")
                 target_digest = self._aggregate_digest(results, "target_digest")
                 if source_digest != target_digest:
@@ -482,6 +855,7 @@ class TenantDataMigrationService:
                 return self.registry.verified(migration["id"], source_digest, target_digest, results)
             except Exception as exc:
                 self.registry.failed(migration["id"], str(exc))
+                self.registry.remove_generation_manifests(migration["generation_id"])
                 if root.exists():
                     shutil.rmtree(root)
                 raise
@@ -492,11 +866,11 @@ class TenantDataMigrationService:
             self._assert_no_active_discovery(binding["tenant_scope_id"])
             root = self.registry.generation_root(binding["tenant_scope_id"], migration["generation_id"])
             current = [
-                self._component_digest(component, binding["tenant_scope_id"], root=None)
+                self._component_digest(component, binding, root=None)
                 for component in self.COMPONENTS
             ]
             target = [
-                self._component_digest(component, binding["tenant_scope_id"], root=root)
+                self._component_digest(component, binding, root=root)
                 for component in self.COMPONENTS
             ]
             if self._aggregate_digest(current, "digest") != migration["source_digest"]:
@@ -575,7 +949,12 @@ class TenantDataMigrationService:
             if row:
                 raise ValueError(f"{label} {row[0]} must finish or be cancelled before migration.")
 
-    def _copy_component(self, component: str, tenant_scope_id: str, root: Path) -> dict[str, Any]:
+    def _copy_component(
+        self, component: str, binding: dict[str, str], root: Path
+    ) -> dict[str, Any]:
+        if component in TENANT_DIRECTORY_NAMES:
+            return self._copy_directory(component, binding, root)
+        tenant_scope_id = binding["tenant_scope_id"]
         source = self.registry.path_for(component, tenant_scope_id)
         target = root / TENANT_STORE_FILENAMES[component]
         self._initialize_target(component, target, root)
@@ -624,7 +1003,16 @@ class TenantDataMigrationService:
         else:
             raise ValueError(f"Unsupported tenant store component: {component}")
 
-    def _component_digest(self, component: str, tenant_scope_id: str, root: Path | None) -> dict[str, Any]:
+    def _component_digest(
+        self, component: str, binding: dict[str, str], root: Path | None
+    ) -> dict[str, Any]:
+        if component in TENANT_DIRECTORY_NAMES:
+            generation = root.name if root else None
+            return {
+                "id": component,
+                "digest": self._directory_digest(component, binding, root, generation),
+            }
+        tenant_scope_id = binding["tenant_scope_id"]
         path = (
             root / TENANT_STORE_FILENAMES[component]
             if root
@@ -634,6 +1022,98 @@ class TenantDataMigrationService:
             "id": component,
             "digest": self._digest_path(path, self._queries(component, tenant_scope_id)),
         }
+
+    def _copy_directory(
+        self, component: str, binding: dict[str, str], root: Path
+    ) -> dict[str, Any]:
+        tenant = binding["tenant_scope_id"]
+        route = self.registry.route(tenant)
+        source_generation = self.registry.directory_generation(
+            component, tenant, route=route
+        )
+        source_root = self.registry.directory_for(component, tenant)
+        target_root = root / TENANT_DIRECTORY_NAMES[component]
+        target_root.mkdir(parents=True, exist_ok=True)
+        if any(item.is_file() for item in target_root.rglob("*")):
+            raise ValueError(f"Target {component} directory is not empty.")
+        manifests = self.registry.manifested_files(
+            component, binding, storage_generation_id=source_generation
+        )
+        source_identity: list[dict[str, str]] = []
+        for manifest in manifests:
+            relative = Path(str(manifest["relative_path"]))
+            source = (source_root / relative).resolve()
+            target = (target_root / relative).resolve()
+            if source_root not in source.parents or target_root not in target.parents:
+                raise ValueError(f"Unsafe {component} manifest path: {relative.as_posix()}")
+            if not source.is_file() or self.registry._file_sha256(source) != manifest["content_sha256"]:
+                raise ValueError(f"The manifested {component} file changed: {relative.as_posix()}")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, target)
+            entry = self.registry.register_file(
+                component,
+                target,
+                binding,
+                source_id=str(manifest.get("source_id") or ""),
+                storage_generation_id=root.name,
+                count_write=False,
+            )
+            source_identity.append(
+                {"path": str(manifest["relative_path"]), "sha256": str(manifest["content_sha256"])}
+            )
+            if entry["content_sha256"] != manifest["content_sha256"]:
+                raise ValueError(f"The copied {component} digest changed: {relative.as_posix()}")
+        digest = self._digest_file_identity(source_identity)
+        target_digest = self._directory_digest(component, binding, root, root.name)
+        return {
+            "id": component,
+            "source_records": len(manifests),
+            "target_records": len(manifests),
+            "files": source_identity,
+            "source_digest": digest,
+            "target_digest": target_digest,
+            "verified": digest == target_digest,
+        }
+
+    def _directory_digest(
+        self,
+        component: str,
+        binding: dict[str, str],
+        root: Path | None,
+        generation: str | None,
+    ) -> str:
+        tenant = binding["tenant_scope_id"]
+        route = self.registry.route(tenant)
+        storage_generation = (
+            str(generation)
+            if generation is not None
+            else self.registry.directory_generation(component, tenant, route=route)
+        )
+        directory = (
+            root / TENANT_DIRECTORY_NAMES[component]
+            if root
+            else self.registry.directory_for(component, tenant)
+        ).resolve()
+        identity: list[dict[str, str]] = []
+        for manifest in self.registry.manifested_files(
+            component, binding, storage_generation_id=storage_generation
+        ):
+            candidate = (directory / str(manifest["relative_path"])).resolve()
+            if directory not in candidate.parents or not candidate.is_file():
+                raise ValueError(f"A manifested {component} file is missing.")
+            identity.append(
+                {
+                    "path": str(manifest["relative_path"]),
+                    "sha256": self.registry._file_sha256(candidate),
+                }
+            )
+        return self._digest_file_identity(identity)
+
+    @staticmethod
+    def _digest_file_identity(identity: list[dict[str, str]]) -> str:
+        return hashlib.sha256(
+            json.dumps(sorted(identity, key=lambda item: item["path"]), separators=(",", ":")).encode()
+        ).hexdigest()
 
     @staticmethod
     def _queries(component: str, tenant_scope_id: str) -> list[tuple[str, str, tuple[Any, ...]]]:
@@ -1078,7 +1558,22 @@ class RoutedCaseStore:
 
     def export(self, case_id: str, formats: list[str], tenant_scope_id: str | None = None) -> list[Path]:
         tenant = tenant_scope_id or self._tenant_for_case(case_id)
-        return self._store(tenant).export(case_id, formats, tenant) if tenant else []
+        if not tenant:
+            return []
+        with self.registry.operation_lock:
+            paths = self._store(tenant).export(case_id, formats, tenant)
+            case = self._store(tenant).get(case_id, tenant)
+            if case:
+                binding = {
+                    "alias": case.connection_alias,
+                    "fingerprint": case.connection_fingerprint,
+                    "tenant_scope_id": case.tenant_scope_id,
+                }
+                for path in paths:
+                    self.registry.register_file(
+                        "case-exports", path, binding, source_id=case_id
+                    )
+            return paths
 
     def _mutate(self, method: str, case_id: str, *args: Any, tenant_scope_id: str | None = None) -> Any:
         tenant = tenant_scope_id or self._tenant_for_case(case_id)

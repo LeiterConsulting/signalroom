@@ -184,7 +184,7 @@ def test_durable_analytics_expose_explicit_splunk_targets_and_provenance() -> No
 def test_tenant_isolation_is_readiness_only_and_keyboard_accessible() -> None:
     assert 'id="tenantIsolationTarget"' in INDEX_HTML
     assert 'id="buildTenantIsolationPlan"' in INDEX_HTML
-    assert "Planning reads schemas, counts, and filenames only" in INDEX_HTML
+    assert "verifies manifested files by streaming SHA-256" in INDEX_HTML
     assert "No unsafe isolation toggle" in INDEX_HTML
     assert "function renderTenantIsolationPlan(plan)" in APP_JS
     assert "async function buildTenantIsolationPlan()" in APP_JS
@@ -193,7 +193,9 @@ def test_tenant_isolation_is_readiness_only_and_keyboard_accessible() -> None:
     assert ".tenant-isolation-controls select:focus-visible" in STYLES_CSS
     assert ".tenant-isolation-controls button:focus-visible" in STYLES_CSS
     assert 'id="tenantDataPlaneSummary"' in INDEX_HTML
-    assert "Stage and verify eight stores" in APP_JS
+    assert "Stage and verify ten components" in APP_JS
+    assert "Reconcile exact legacy ownership" in APP_JS
+    assert "ambiguous files will remain blocked" in APP_JS
     assert "Activate verified route" in APP_JS
     assert "Rollback active generation" in APP_JS
     assert "physical cleanup is not final" in APP_JS

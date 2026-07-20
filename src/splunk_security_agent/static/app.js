@@ -924,7 +924,8 @@ function tenantIsolationStatus(value = '') {
     'copy-contract-ready':'Copy contract ready',
     'relationship-map-required':'Relationship map required',
     'scope-key-required':'Direct tenant key required',
-    'filesystem-router-required':'Filesystem router required'
+    'filesystem-router-required':'Filesystem router required',
+    'ownership-manifest-required':'Ownership manifest required'
   };
   return labels[value] || 'Readiness unknown';
 }
@@ -944,7 +945,7 @@ function renderTenantIsolationPlan(plan) {
       const ready = item.readiness === 'copy-contract-ready';
       return `<article class="tenant-component ${ready ? 'ready' : 'blocked'}"><header><div><b>${escapeHtml(item.label)}</b><small>${escapeHtml(item.kind)} · ${escapeHtml(item.source)}</small></div><span>${escapeHtml(tenantIsolationStatus(item.readiness))}</span></header><p>${escapeHtml(item.detail || '')}</p><footer><span>${Number(item.scope_records || 0)} attributed</span><span>${Number(item.other_scope_records || 0)} other-scope</span><span>${Number(item.unbound_records || 0)} unbound</span><code>phase ${Number(item.sequence || 0)}</code></footer></article>`;
     }).join('')}</div>
-    ${blockers.length ? `<details class="tenant-isolation-blockers" ${plan.migration_executable ? '' : 'open'}><summary>${blockerSummary}</summary><ul>${blockers.map(item => `<li><b>${escapeHtml(item.label)}</b><span>${escapeHtml(item.reason)}</span></li>`).join('')}</ul></details>` : '<div class="tenant-isolation-ready"><b>Schema prerequisites are satisfied.</b><span>The eight-store route is eligible for staged copy and digest verification.</span></div>'}
+    ${blockers.length ? `<details class="tenant-isolation-blockers" ${plan.migration_executable ? '' : 'open'}><summary>${blockerSummary}</summary><ul>${blockers.map(item => `<li><b>${escapeHtml(item.label)}</b><span>${escapeHtml(item.reason)}</span></li>`).join('')}</ul></details>` : '<div class="tenant-isolation-ready"><b>Schema and manifest prerequisites are satisfied.</b><span>All ten routed components are eligible for staged copy and digest verification.</span></div>'}
     <details class="tenant-safety-contract"><summary>Review the fail-closed migration contract</summary><ol>${(plan.safety_contract || []).map(item => `<li>${escapeHtml(item)}</li>`).join('')}</ol><p><b>Next engineering step:</b> ${escapeHtml(plan.next_step || '')}</p></details>
   </article>`;
 }
@@ -981,6 +982,7 @@ function renderTenantDataPlane(scope, plan) {
   const requiredComponents = dataPlane.contract?.components || [];
   const activeComponents = new Set((activeMigration?.components || []).map(item => item.id));
   const expansionRequired = route.mode === 'isolated-routing' && requiredComponents.some(id => !activeComponents.has(id));
+  const manifestBlocked = (plan?.blockers || []).some(item => item.required_change === 'ownership-manifest-required');
   const status = route.mode === 'isolated-routing' ? 'isolated-routing' : migration?.status || 'shared';
   const labels = {
     shared:'Shared source authoritative',
@@ -997,10 +999,13 @@ function renderTenantDataPlane(scope, plan) {
   } else if (route.mode === 'isolated-routing' && activeMigration?.status === 'cutover') {
     action = `<button class="button ghost small" type="button" data-rollback-tenant="${escapeHtml(activeMigration.id)}" ${Number(route.writes_since_cutover || 0) ? 'disabled' : ''}>Rollback active generation</button>`;
     if (expansionRequired && plan?.migration_executable) {
-      action += '<button class="button primary small" type="button" id="stageTenantMigration">Stage expanded eight-store generation</button>';
+      action += '<button class="button primary small" type="button" id="stageTenantMigration">Stage expanded ten-component generation</button>';
     }
   } else if (plan?.migration_executable && !['copying','verified','cutover'].includes(migration?.status || '')) {
-    action = '<button class="button primary small" type="button" id="stageTenantMigration">Stage and verify eight stores</button>';
+    action = '<button class="button primary small" type="button" id="stageTenantMigration">Stage and verify ten components</button>';
+  }
+  if (manifestBlocked) {
+    action += '<button class="button ghost small" type="button" id="reconcileTenantFileManifests">Reconcile exact legacy ownership</button>';
   }
   const components = migration?.components || [];
   const writeBoundary = route.mode === 'isolated-routing'
@@ -1010,9 +1015,9 @@ function renderTenantDataPlane(scope, plan) {
     : 'Shared source remains authoritative; routing has not changed';
   holder.innerHTML = `<article class="tenant-data-plane ${escapeHtml(status)}">
     <header><div><span>DATA-PLANE ROUTING</span><h5>${escapeHtml(labels[status] || status)}</h5><p>${escapeHtml(writeBoundary)}</p></div>${action}</header>
-    <div class="tenant-copy-boundary"><b>Staging authority</b><span>Unlike readiness planning, staging locally copies the selected tenant's Evidence, Cases, Manual Discovery, Validation, Detection, Forecast, Assurance Response, and Delivery History rows. Global policies stay in the control plane. Nothing is sent externally, and no runtime route changes until a separate cutover.</span></div>
+    <div class="tenant-copy-boundary"><b>Staging authority</b><span>Unlike readiness planning, staging locally copies the selected tenant's eight workflow databases plus manifested discovery and case-export files. Global policies stay in the control plane. Nothing is sent externally, and no runtime route changes until a separate cutover.</span></div>
     ${migration ? `<div class="tenant-migration-identity"><span><b>Migration</b><code>${escapeHtml(migration.id.slice(0,12))}</code></span><span><b>Generation</b><code>${escapeHtml(migration.generation_id.slice(0,12))}</code></span><span><b>Source digest</b><code>${escapeHtml((migration.source_digest || 'pending').slice(0,12))}</code></span><span><b>Target digest</b><code>${escapeHtml((migration.target_digest || 'pending').slice(0,12))}</code></span></div>` : ''}
-    ${components.length ? `<div class="tenant-copy-components">${components.map(item => `<span class="${item.verified ? 'verified' : 'failed'}"><b>${escapeHtml(item.id.replaceAll('-', ' '))}</b>${Number(item.source_records || 0)} source rows · ${Number(item.target_records || 0)} target rows</span>`).join('')}</div>` : ''}
+    ${components.length ? `<div class="tenant-copy-components">${components.map(item => `<span class="${item.verified ? 'verified' : 'failed'}"><b>${escapeHtml(item.id.replaceAll('-', ' '))}</b>${Number(item.source_records || 0)} source records · ${Number(item.target_records || 0)} target records</span>`).join('')}</div>` : ''}
     ${migration?.error ? `<div class="tenant-migration-error"><b>Migration stopped</b><span>${escapeHtml(migration.error)}</span></div>` : ''}
     ${route.mode === 'isolated-routing' ? '<div class="tenant-source-retained"><b>Routing isolation is active; physical cleanup is not final.</b><span>The original shared rows are sealed as the rollback source. A future purge/finalization gate must verify a reverse-migration path before claiming complete physical separation.</span></div>' : ''}
   </article>`;
@@ -1086,7 +1091,7 @@ async function stageTenantMigration() {
   const button = $('#stageTenantMigration');
   const original = button.textContent;
   button.disabled = true;
-  button.textContent = 'Copying eight stores and verifying digests…';
+  button.textContent = 'Copying ten components and verifying digests…';
   try {
     await api('/api/tenant-isolation/migrations', {method:'POST',body:JSON.stringify({...bindingPayload(scope),plan_id:plan.plan_id})});
     await loadTenantIsolation();
@@ -1098,9 +1103,26 @@ async function stageTenantMigration() {
   }
 }
 
+async function reconcileTenantFileManifests() {
+  const scope = selectedTenantIsolationScope(); if (!scope) return;
+  if (!confirm('Parse legacy discovery and case-export ownership envelopes for this exact tenant and Splunk revision? Only exact embedded matches will receive SHA-256 manifests. No file will be moved or deleted, and ambiguous files will remain blocked.')) return;
+  const button = $('#reconcileTenantFileManifests');
+  if (button) { button.disabled = true; button.textContent = 'Reconciling exact ownership…'; }
+  try {
+    const result = await api('/api/tenant-isolation/file-manifests/reconcile', {method:'POST',body:JSON.stringify(bindingPayload(scope))});
+    await api('/api/tenant-isolation/plans', {method:'POST',body:JSON.stringify(bindingPayload(scope))});
+    await loadTenantIsolation();
+    toast(`${Number(result.adopted_total || 0)} legacy file${Number(result.adopted_total || 0) === 1 ? '' : 's'} manifested · ${Number(result.unbound_remaining || 0)} remain blocked`);
+  } catch (error) { toast(error.message); }
+  finally {
+    const current = $('#reconcileTenantFileManifests');
+    if (current) { current.disabled = false; current.textContent = 'Reconcile exact legacy ownership'; }
+  }
+}
+
 async function cutoverTenantMigration(migrationId) {
   const scope = selectedTenantIsolationScope(); if (!scope) return;
-  if (!confirm('Activate the verified isolated route for all eight tenant-owned workflow stores? Global policies remain shared. The sealed shared source remains available only until the isolated generation accepts a write.')) return;
+  if (!confirm('Activate the verified isolated route for all ten tenant-owned data components? Global policies remain shared. The sealed shared source remains available only until the isolated generation accepts a write.')) return;
   try {
     await api(`/api/tenant-isolation/migrations/${encodeURIComponent(migrationId)}/cutover`, {method:'POST',body:JSON.stringify(bindingPayload(scope))});
     await loadTenantIsolation();
@@ -5582,6 +5604,7 @@ document.addEventListener('click', async event => {
   if (event.target.closest('#openSettings,#configureModels,[data-open-settings]')) { $('#settingsModal').hidden = false; loadWorkload(); await loadConnections(); await loadTenantIsolation(); }
   if (event.target.closest('#closeSettings')) $('#settingsModal').hidden = true;
   if (event.target.closest('#stageTenantMigration')) await stageTenantMigration();
+  if (event.target.closest('#reconcileTenantFileManifests')) await reconcileTenantFileManifests();
   const cutoverTenant = event.target.closest('[data-cutover-tenant]');
   if (cutoverTenant) await cutoverTenantMigration(cutoverTenant.dataset.cutoverTenant);
   const rollbackTenant = event.target.closest('[data-rollback-tenant]');
