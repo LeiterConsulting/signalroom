@@ -45,7 +45,7 @@ and global workload/outbound policy deliberately remain shared control-plane ser
 
 ## Staged tenant data routing
 
-Evidence, Cases, and Manual Discovery have direct or verified inherited scope contracts and can now enter
+Evidence, Cases, Manual Discovery, Validations, Detections, Forecast Experiments, Assurance Responses, and Delivery History have direct or verified inherited scope contracts and can now enter
 a staged migration. Staging is materially different from readiness planning: it reads and locally copies
 the selected tenant's payload rows into a new generation under `data/tenants/<scope>/generations/`. It copies
 no other tenant rows, sends nothing externally, and leaves shared routing authoritative while it computes
@@ -53,7 +53,7 @@ canonical source and target digests.
 
 Cutover requires the same admitted alias, immutable connection fingerprint, tenant scope, and current source
 digest. It also re-verifies the staged generation and refuses to run while a tenant discovery job is queued or
-running. The runtime store facades then route only that tenant's Evidence, Cases, and Manual Discovery traffic
+running. The runtime store facades then route only that tenant's eight workflow stores
 to the verified generation. A missing active generation fails closed instead of recreating an empty database.
 
 The shared tenant rows remain sealed as a rollback source. Zero-write rollback can restore shared routing;

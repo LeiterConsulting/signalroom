@@ -104,10 +104,10 @@ def test_created_plan_is_review_only_and_retained_in_global_control_plane(tmp_pa
     assert overview["runtime"] == {
         "mode": "shared-row-filtered",
         "physical_isolation_enforced": False,
-        "activation_available": False,
+        "activation_available": True,
         "detail": (
-            "Tenant predicates are enforced, but tenant data still resides in shared "
-            "database and artifact files."
+            "Tenant predicates are enforced. Eight workflow stores can enter a verified "
+            "isolated generation; filesystem artifacts and sealed rollback rows remain shared."
         ),
     }
     assert overview["contract"]["plan_reads_payload_content"] is False

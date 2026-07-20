@@ -189,13 +189,13 @@ def test_tenant_isolation_is_readiness_only_and_keyboard_accessible() -> None:
     assert "function renderTenantIsolationPlan(plan)" in APP_JS
     assert "async function buildTenantIsolationPlan()" in APP_JS
     assert "READINESS ONLY · NO DATA MOVED" in APP_JS
-    assert "migration authority can exist" in APP_JS
+    assert "before final physical isolation" in APP_JS
     assert ".tenant-isolation-controls select:focus-visible" in STYLES_CSS
     assert ".tenant-isolation-controls button:focus-visible" in STYLES_CSS
     assert 'id="tenantDataPlaneSummary"' in INDEX_HTML
-    assert "Stage and verify three stores" in APP_JS
+    assert "Stage and verify eight stores" in APP_JS
     assert "Activate verified route" in APP_JS
-    assert "Rollback to sealed shared source" in APP_JS
+    assert "Rollback active generation" in APP_JS
     assert "physical cleanup is not final" in APP_JS
     assert "data-cutover-tenant" in APP_JS
     assert ".tenant-data-plane button:focus-visible" in STYLES_CSS

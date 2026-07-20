@@ -429,13 +429,12 @@ there is deliberately no remote recovery route.
 
 ## Next production increments
 
-1. Expand digest-verified generation routing to validation, detection, forecast-experiment,
-   assurance-response, and delivery roots; keep singleton assurance/delivery policy in the global control plane
-2. Add tenant filesystem routing plus verified reverse migration and shared-source purge/finalization
-3. Add OIDC group-to-alias assignment policy and encrypted credential backup/restore controls
-4. Add time-aligned durable multi-estate review packets without cross-tenant fact copying
-5. Add read-only deployment reconciliation for the audit operations pack when the Splunk MCP contract exposes the
+1. Add tenant filesystem routing plus verified reverse migration and shared-source purge/finalization
+2. Add OIDC group-to-alias assignment policy and encrypted credential backup/restore controls
+3. Add time-aligned durable multi-estate review packets without cross-tenant fact copying
+4. Add read-only deployment reconciliation for the audit operations pack when the Splunk MCP contract exposes the
    required index and knowledge-object configuration fields
+5. Complete release-candidate upgrade, installer, recovery, multi-instance, and security acceptance testing
 
 ### Physical isolation begins with a non-mutating plan
 
@@ -446,21 +445,21 @@ fingerprint. The resulting plan identifies direct, inherited, missing, and files
 is recorded in the shared audit authority. It cannot execute migration or change runtime routing. This
 prevents an incomplete toggle from falsely claiming isolation while unscoped durable records still exist.
 
-Validation tasks now retain an immutable alias, connection revision, and tenant key as root columns. Reuse and
+Validation tasks retain an immutable alias, connection revision, and tenant key as root columns. Reuse and
 query-intelligence lookups include the tenant boundary, execution revalidates the saved identity before selecting
 an MCP client, and preserved evidence/case entries inherit the same scope. Detection roots inherit that exact
 binding from their completed validation; versioning, gates, runtime validation drafts, repository handoffs, and
 API mutations first resolve through the detection tenant. Both roots now expose deterministic parent-copy
-contracts, although generation routing for them is not active yet.
+contracts and now resolve through the active tenant generation on every operation.
 
 Forecast experiments now promote the retained source binding from result JSON into indexed root columns; baseline
 and alert-candidate relationships inherit that run boundary. Assurance signals and response packages copy the exact
 assurance-run binding into direct columns, while delivery jobs copy the package binding at approval and compare it
-again before an outbound request. These roots are copy-contract-ready, but runtime generation routing remains the
-next increment because singleton assurance and delivery policy must remain global control-plane state.
+again before an outbound request. These roots now resolve through the active tenant generation. Singleton
+assurance and delivery policies remain global control-plane state while response and delivery history is isolated.
 
-`TenantDataPlaneRegistry` is the runtime authority for the three currently routed stores. A generation copy holds the
-process-wide store-operation lock, refuses active manual discovery, streams rows selected through the tenant root,
+`TenantDataPlaneRegistry` is the runtime authority for all eight routed workflow stores. A generation copy holds the
+process-wide store-operation lock, refuses active tenant work, streams rows selected through the tenant root,
 and hashes the same canonical table order on both sides. Verification does not change routing. Cutover repeats the
 source and target digests before atomically recording the generation route. Routed store facades resolve the tenant
 on every operation and fail closed when an active generation is missing. The route records a durable write epoch;

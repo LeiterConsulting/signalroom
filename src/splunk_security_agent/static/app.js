@@ -933,14 +933,18 @@ function renderTenantIsolationPlan(plan) {
   if (!plan) return '<div class="empty-inline compact-empty">No isolation readiness plan has been created. The current shared files remain authoritative.</div>';
   const components = plan.components || [];
   const blockers = plan.blockers || [];
+  const gapLabel = plan.migration_executable ? `later gap${blockers.length === 1 ? '' : 's'}` : `blocker${blockers.length === 1 ? '' : 's'}`;
+  const blockerSummary = plan.migration_executable
+    ? `${blockers.length} later prerequisite${blockers.length === 1 ? '' : 's'} before final physical isolation`
+    : `${blockers.length} prerequisite${blockers.length === 1 ? '' : 's'} before migration authority can exist`;
   return `<article class="tenant-isolation-plan">
-    <header><div><span>READINESS ONLY · NO DATA MOVED</span><h5>${escapeHtml(plan.tenant_scope_id)}</h5><p>${escapeHtml(plan.connection_alias)} · immutable revision <code>${escapeHtml(shortFingerprint(plan.connection_fingerprint))}</code></p></div><b>${blockers.length} blocker${blockers.length === 1 ? '' : 's'}</b></header>
+    <header><div><span>READINESS ONLY · NO DATA MOVED</span><h5>${escapeHtml(plan.tenant_scope_id)}</h5><p>${escapeHtml(plan.connection_alias)} · immutable revision <code>${escapeHtml(shortFingerprint(plan.connection_fingerprint))}</code></p></div><b>${blockers.length} ${gapLabel}</b></header>
     <div class="tenant-isolation-metrics"><span><b>${Number(plan.records_attributed || 0)}</b>Rows/files attributed</span><span><b>${Number(plan.unbound_records || 0)}</b>Unbound rows</span><span><b>${components.length}</b>Tenant components</span><span><b>${escapeHtml(String(plan.plan_id || '').slice(0, 12))}</b>Deterministic plan</span></div>
     <div class="tenant-component-list">${components.map(item => {
       const ready = item.readiness === 'copy-contract-ready';
       return `<article class="tenant-component ${ready ? 'ready' : 'blocked'}"><header><div><b>${escapeHtml(item.label)}</b><small>${escapeHtml(item.kind)} · ${escapeHtml(item.source)}</small></div><span>${escapeHtml(tenantIsolationStatus(item.readiness))}</span></header><p>${escapeHtml(item.detail || '')}</p><footer><span>${Number(item.scope_records || 0)} attributed</span><span>${Number(item.other_scope_records || 0)} other-scope</span><span>${Number(item.unbound_records || 0)} unbound</span><code>phase ${Number(item.sequence || 0)}</code></footer></article>`;
     }).join('')}</div>
-    ${blockers.length ? `<details class="tenant-isolation-blockers" open><summary>${blockers.length} prerequisite${blockers.length === 1 ? '' : 's'} before migration authority can exist</summary><ul>${blockers.map(item => `<li><b>${escapeHtml(item.label)}</b><span>${escapeHtml(item.reason)}</span></li>`).join('')}</ul></details>` : '<div class="tenant-isolation-ready"><b>Schema prerequisites are satisfied.</b><span>Copy, digest, rollback, and worker-quiescence tests are still required before activation can exist.</span></div>'}
+    ${blockers.length ? `<details class="tenant-isolation-blockers" ${plan.migration_executable ? '' : 'open'}><summary>${blockerSummary}</summary><ul>${blockers.map(item => `<li><b>${escapeHtml(item.label)}</b><span>${escapeHtml(item.reason)}</span></li>`).join('')}</ul></details>` : '<div class="tenant-isolation-ready"><b>Schema prerequisites are satisfied.</b><span>The eight-store route is eligible for staged copy and digest verification.</span></div>'}
     <details class="tenant-safety-contract"><summary>Review the fail-closed migration contract</summary><ol>${(plan.safety_contract || []).map(item => `<li>${escapeHtml(item)}</li>`).join('')}</ol><p><b>Next engineering step:</b> ${escapeHtml(plan.next_step || '')}</p></details>
   </article>`;
 }
@@ -971,6 +975,12 @@ function renderTenantDataPlane(scope, plan) {
     item.tenant_scope_id === scope.tenant_scope_id && item.connection_alias === scope.alias
   );
   const migration = migrations[0] || null;
+  const activeMigration = route.generation_id
+    ? migrations.find(item => item.generation_id === route.generation_id) || null
+    : null;
+  const requiredComponents = dataPlane.contract?.components || [];
+  const activeComponents = new Set((activeMigration?.components || []).map(item => item.id));
+  const expansionRequired = route.mode === 'isolated-routing' && requiredComponents.some(id => !activeComponents.has(id));
   const status = route.mode === 'isolated-routing' ? 'isolated-routing' : migration?.status || 'shared';
   const labels = {
     shared:'Shared source authoritative',
@@ -984,10 +994,13 @@ function renderTenantDataPlane(scope, plan) {
   let action = '';
   if (status === 'verified' && migration) {
     action = `<button class="button primary small" type="button" data-cutover-tenant="${escapeHtml(migration.id)}">Activate verified route</button>`;
-  } else if (route.mode === 'isolated-routing' && migration?.status === 'cutover') {
-    action = `<button class="button ghost small" type="button" data-rollback-tenant="${escapeHtml(migration.id)}" ${Number(route.writes_since_cutover || 0) ? 'disabled' : ''}>Rollback to sealed shared source</button>`;
-  } else if (plan && !['copying','verified','cutover'].includes(migration?.status || '')) {
-    action = '<button class="button primary small" type="button" id="stageTenantMigration">Stage and verify three stores</button>';
+  } else if (route.mode === 'isolated-routing' && activeMigration?.status === 'cutover') {
+    action = `<button class="button ghost small" type="button" data-rollback-tenant="${escapeHtml(activeMigration.id)}" ${Number(route.writes_since_cutover || 0) ? 'disabled' : ''}>Rollback active generation</button>`;
+    if (expansionRequired && plan?.migration_executable) {
+      action += '<button class="button primary small" type="button" id="stageTenantMigration">Stage expanded eight-store generation</button>';
+    }
+  } else if (plan?.migration_executable && !['copying','verified','cutover'].includes(migration?.status || '')) {
+    action = '<button class="button primary small" type="button" id="stageTenantMigration">Stage and verify eight stores</button>';
   }
   const components = migration?.components || [];
   const writeBoundary = route.mode === 'isolated-routing'
@@ -997,7 +1010,7 @@ function renderTenantDataPlane(scope, plan) {
     : 'Shared source remains authoritative; routing has not changed';
   holder.innerHTML = `<article class="tenant-data-plane ${escapeHtml(status)}">
     <header><div><span>DATA-PLANE ROUTING</span><h5>${escapeHtml(labels[status] || status)}</h5><p>${escapeHtml(writeBoundary)}</p></div>${action}</header>
-    <div class="tenant-copy-boundary"><b>Staging authority</b><span>Unlike readiness planning, staging reads and locally copies tenant payload rows for Evidence, Cases, and Manual Discovery. It sends nothing externally and changes no runtime route until a separate cutover.</span></div>
+    <div class="tenant-copy-boundary"><b>Staging authority</b><span>Unlike readiness planning, staging locally copies the selected tenant's Evidence, Cases, Manual Discovery, Validation, Detection, Forecast, Assurance Response, and Delivery History rows. Global policies stay in the control plane. Nothing is sent externally, and no runtime route changes until a separate cutover.</span></div>
     ${migration ? `<div class="tenant-migration-identity"><span><b>Migration</b><code>${escapeHtml(migration.id.slice(0,12))}</code></span><span><b>Generation</b><code>${escapeHtml(migration.generation_id.slice(0,12))}</code></span><span><b>Source digest</b><code>${escapeHtml((migration.source_digest || 'pending').slice(0,12))}</code></span><span><b>Target digest</b><code>${escapeHtml((migration.target_digest || 'pending').slice(0,12))}</code></span></div>` : ''}
     ${components.length ? `<div class="tenant-copy-components">${components.map(item => `<span class="${item.verified ? 'verified' : 'failed'}"><b>${escapeHtml(item.id.replaceAll('-', ' '))}</b>${Number(item.source_records || 0)} source rows · ${Number(item.target_records || 0)} target rows</span>`).join('')}</div>` : ''}
     ${migration?.error ? `<div class="tenant-migration-error"><b>Migration stopped</b><span>${escapeHtml(migration.error)}</span></div>` : ''}
@@ -1073,7 +1086,7 @@ async function stageTenantMigration() {
   const button = $('#stageTenantMigration');
   const original = button.textContent;
   button.disabled = true;
-  button.textContent = 'Copying three stores and verifying digests…';
+  button.textContent = 'Copying eight stores and verifying digests…';
   try {
     await api('/api/tenant-isolation/migrations', {method:'POST',body:JSON.stringify({...bindingPayload(scope),plan_id:plan.plan_id})});
     await loadTenantIsolation();
@@ -1087,7 +1100,7 @@ async function stageTenantMigration() {
 
 async function cutoverTenantMigration(migrationId) {
   const scope = selectedTenantIsolationScope(); if (!scope) return;
-  if (!confirm('Activate the verified isolated route for Evidence, Cases, and Manual Discovery? The sealed shared source remains available only until the isolated generation accepts a write.')) return;
+  if (!confirm('Activate the verified isolated route for all eight tenant-owned workflow stores? Global policies remain shared. The sealed shared source remains available only until the isolated generation accepts a write.')) return;
   try {
     await api(`/api/tenant-isolation/migrations/${encodeURIComponent(migrationId)}/cutover`, {method:'POST',body:JSON.stringify(bindingPayload(scope))});
     await loadTenantIsolation();
@@ -1097,11 +1110,13 @@ async function cutoverTenantMigration(migrationId) {
 
 async function rollbackTenantMigration(migrationId) {
   const scope = selectedTenantIsolationScope(); if (!scope) return;
-  if (!confirm('Return this tenant to the sealed shared source? This is allowed only before any isolated-generation write.')) return;
+  const migration = (state.tenantIsolation?.data_plane?.migrations || []).find(item => item.id === migrationId);
+  const target = migration?.source_generation_id ? 'the prior isolated generation' : 'the sealed shared source';
+  if (!confirm(`Return this tenant to ${target}? This is allowed only before any new-generation write.`)) return;
   try {
     await api(`/api/tenant-isolation/migrations/${encodeURIComponent(migrationId)}/rollback`, {method:'POST',body:JSON.stringify(bindingPayload(scope))});
     await loadTenantIsolation();
-    toast('Tenant routing returned to the sealed shared source');
+    toast(`Tenant routing returned to ${target}`);
   } catch (error) { toast(error.message); }
 }
 

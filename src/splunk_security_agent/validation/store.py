@@ -55,26 +55,22 @@ class ValidationStore:
                 """
             )
             columns = {
-                str(row["name"])
-                for row in db.execute("PRAGMA table_info(validation_tasks)").fetchall()
+                str(row["name"]) for row in db.execute("PRAGMA table_info(validation_tasks)").fetchall()
             }
             migrations = {
                 "expires_at": "ALTER TABLE validation_tasks ADD COLUMN expires_at TEXT",
                 "assurance_package_id": (
-                    "ALTER TABLE validation_tasks ADD COLUMN assurance_package_id "
-                    "TEXT NOT NULL DEFAULT ''"
+                    "ALTER TABLE validation_tasks ADD COLUMN assurance_package_id TEXT NOT NULL DEFAULT ''"
                 ),
                 "approval_scope": (
                     "ALTER TABLE validation_tasks ADD COLUMN approval_scope "
                     "TEXT NOT NULL DEFAULT 'single-execution'"
                 ),
                 "connection_alias": (
-                    "ALTER TABLE validation_tasks ADD COLUMN connection_alias "
-                    "TEXT NOT NULL DEFAULT 'primary'"
+                    "ALTER TABLE validation_tasks ADD COLUMN connection_alias TEXT NOT NULL DEFAULT 'primary'"
                 ),
                 "connection_fingerprint": (
-                    "ALTER TABLE validation_tasks ADD COLUMN connection_fingerprint "
-                    "TEXT NOT NULL DEFAULT ''"
+                    "ALTER TABLE validation_tasks ADD COLUMN connection_fingerprint TEXT NOT NULL DEFAULT ''"
                 ),
                 "tenant_scope_id": (
                     "ALTER TABLE validation_tasks ADD COLUMN tenant_scope_id "
@@ -108,14 +104,20 @@ class ValidationStore:
             )
         return int(result.rowcount)
 
-    def recover_interrupted(self) -> int:
+    def recover_interrupted(self, excluded_tenant_scope_ids: set[str] | None = None) -> int:
         now = datetime.now(UTC).isoformat()
+        excluded = sorted(excluded_tenant_scope_ids or set())
+        tenant_clause = f" AND tenant_scope_id NOT IN ({','.join('?' for _ in excluded)})" if excluded else ""
         with self._lock, self.connect() as db:
             result = db.execute(
-                """UPDATE validation_tasks
+                f"""UPDATE validation_tasks
                 SET status = 'approved', error = ?, started_at = NULL, updated_at = ?
-                WHERE status = 'running'""",
-                ("Execution was interrupted by a SignalRoom restart; approval was preserved.", now),
+                WHERE status = 'running'{tenant_clause}""",
+                (
+                    "Execution was interrupted by a SignalRoom restart; approval was preserved.",
+                    now,
+                    *excluded,
+                ),
             )
         return int(result.rowcount)
 
@@ -167,9 +169,7 @@ class ValidationStore:
         assert result is not None
         return result
 
-    def list(
-        self, limit: int = 100, tenant_scope_id: str | None = None
-    ) -> list[ValidationTaskRecord]:
+    def list(self, limit: int = 100, tenant_scope_id: str | None = None) -> list[ValidationTaskRecord]:
         self.expire_due()
         with self.connect() as db:
             query = """SELECT * FROM validation_tasks"""
@@ -186,15 +186,11 @@ class ValidationStore:
             rows = db.execute(query, arguments).fetchall()
         return [self._record(row) for row in rows]
 
-    def get(
-        self, task_id: str, tenant_scope_id: str | None = None
-    ) -> ValidationTaskRecord | None:
+    def get(self, task_id: str, tenant_scope_id: str | None = None) -> ValidationTaskRecord | None:
         self.expire_due()
         with self.connect() as db:
             if tenant_scope_id is None:
-                row = db.execute(
-                    "SELECT * FROM validation_tasks WHERE id = ?", (task_id,)
-                ).fetchone()
+                row = db.execute("SELECT * FROM validation_tasks WHERE id = ?", (task_id,)).fetchone()
             else:
                 row = db.execute(
                     "SELECT * FROM validation_tasks WHERE id=? AND tenant_scope_id=?",
@@ -318,16 +314,18 @@ class ValidationStore:
             )
         return bool(result.rowcount)
 
-    def expire_due(self) -> int:
+    def expire_due(self, excluded_tenant_scope_ids: set[str] | None = None) -> int:
         """Expire unexecuted assurance drafts without changing completed evidence."""
         now = datetime.now(UTC).isoformat()
+        excluded = sorted(excluded_tenant_scope_ids or set())
+        tenant_clause = f" AND tenant_scope_id NOT IN ({','.join('?' for _ in excluded)})" if excluded else ""
         with self._lock, self.connect() as db:
             result = db.execute(
-                """UPDATE validation_tasks SET status='expired',
+                f"""UPDATE validation_tasks SET status='expired',
                 error='The assurance response window expired before execution.', updated_at=?
                 WHERE expires_at IS NOT NULL AND expires_at<=?
-                AND status IN ('draft','approved','error')""",
-                (now, now),
+                AND status IN ('draft','approved','error'){tenant_clause}""",
+                (now, now, *excluded),
             )
         return int(result.rowcount)
 
@@ -339,9 +337,7 @@ class ValidationStore:
         with self.connect() as db:
             tenant_clause = " AND tenant_scope_id=?" if tenant_scope_id is not None else ""
             arguments: tuple[Any, ...] = (
-                (query_fingerprint, tenant_scope_id)
-                if tenant_scope_id is not None
-                else (query_fingerprint,)
+                (query_fingerprint, tenant_scope_id) if tenant_scope_id is not None else (query_fingerprint,)
             )
             row = db.execute(
                 f"""SELECT * FROM validation_tasks WHERE query_fingerprint=?

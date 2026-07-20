@@ -10,6 +10,8 @@ from pathlib import Path
 from threading import RLock
 from typing import Any, Literal
 
+from .data_plane import TENANT_STORE_FILENAMES
+
 
 def _now() -> str:
     return datetime.now(UTC).isoformat()
@@ -301,10 +303,10 @@ class TenantIsolationPlanner:
             "runtime": {
                 "mode": "shared-row-filtered",
                 "physical_isolation_enforced": False,
-                "activation_available": False,
+                "activation_available": True,
                 "detail": (
-                    "Tenant predicates are enforced, but tenant data still resides in shared "
-                    "database and artifact files."
+                    "Tenant predicates are enforced. Eight workflow stores can enter a verified "
+                    "isolated generation; filesystem artifacts and sealed rollback rows remain shared."
                 ),
             },
             "contract": {
@@ -336,6 +338,14 @@ class TenantIsolationPlanner:
             for item in components
             if item["readiness"] != "copy-contract-ready"
         ]
+        routed_components = [item for item in components if item["id"] in TENANT_STORE_FILENAMES]
+        migration_executable = all(
+            item["readiness"] == "copy-contract-ready"
+            and item["source_exists"]
+            and item.get("schema_observed", False)
+            and not item["unbound_records"]
+            for item in routed_components
+        ) and len(routed_components) == len(TENANT_STORE_FILENAMES)
         identity = {
             "schema_version": self.SCHEMA_VERSION,
             "connection_alias": scope["alias"],
@@ -349,9 +359,9 @@ class TenantIsolationPlanner:
             **identity,
             "plan_id": _digest(identity),
             "generated_at": _now(),
-            "phase": "readiness-only",
-            "migration_executable": False,
-            "activation_available": False,
+            "phase": "routing-ready" if migration_executable else "readiness-only",
+            "migration_executable": migration_executable,
+            "activation_available": migration_executable,
             "records_attributed": sum(item["scope_records"] for item in components),
             "unbound_records": sum(item["unbound_records"] for item in components),
             "blocker_count": len(blockers),
@@ -364,8 +374,11 @@ class TenantIsolationPlanner:
                 "The global audit chain records planning, migration, verification, and rollback.",
             ],
             "next_step": (
-                "Implement tenant-aware store routing for copy-contract-ready components, then add "
-                "direct tenant keys to every blocking component before exposing migration authority."
+                "Stage and digest-verify the eight routed stores, then explicitly activate the "
+                "generation. Filesystem routing, reverse migration, and source purge remain next."
+                if migration_executable
+                else "Resolve missing schemas or unbound ownership in the eight routed stores; "
+                "filesystem and full-policy isolation remain later phases."
             ),
         }
 

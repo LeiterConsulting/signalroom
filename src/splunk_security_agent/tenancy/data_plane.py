@@ -12,9 +12,25 @@ from threading import RLock
 from typing import Any
 from uuid import uuid4
 
+from ..assurance import AssuranceStore
 from ..cases import CaseStore
+from ..delivery import DeliveryStore
+from ..detections import DetectionStore
 from ..discovery import DiscoveryJobStore
+from ..forecasting import TimeSeriesExperimentStore
 from ..rag import EvidenceStore
+from ..validation import ValidationStore
+
+TENANT_STORE_FILENAMES = {
+    "evidence": "evidence.db",
+    "cases": "cases.db",
+    "manual-discovery": "discovery_jobs.db",
+    "validations": "validations.db",
+    "detections": "detections.db",
+    "forecast-experiments": "time_series_experiments.db",
+    "assurance-responses": "assurance_responses.db",
+    "outbound-delivery": "delivery_history.db",
+}
 
 
 def _now() -> str:
@@ -62,6 +78,8 @@ class TenantDataPlaneRegistry:
                     connection_fingerprint TEXT NOT NULL,
                     plan_id TEXT NOT NULL,
                     generation_id TEXT NOT NULL,
+                    source_generation_id TEXT NOT NULL DEFAULT '',
+                    source_writes_since_cutover INTEGER NOT NULL DEFAULT 0,
                     status TEXT NOT NULL,
                     source_digest TEXT NOT NULL,
                     target_digest TEXT NOT NULL,
@@ -78,6 +96,20 @@ class TenantDataPlaneRegistry:
                     ON tenant_data_migrations(tenant_scope_id,created_at DESC);
                 """
             )
+            columns = {
+                str(row["name"])
+                for row in database.execute("PRAGMA table_info(tenant_data_migrations)").fetchall()
+            }
+            if "source_generation_id" not in columns:
+                database.execute(
+                    """ALTER TABLE tenant_data_migrations ADD COLUMN
+                    source_generation_id TEXT NOT NULL DEFAULT ''"""
+                )
+            if "source_writes_since_cutover" not in columns:
+                database.execute(
+                    """ALTER TABLE tenant_data_migrations ADD COLUMN
+                    source_writes_since_cutover INTEGER NOT NULL DEFAULT 0"""
+                )
 
     def route(self, tenant_scope_id: str) -> dict[str, Any]:
         tenant_scope_id = _safe_scope(tenant_scope_id)
@@ -96,28 +128,56 @@ class TenantDataPlaneRegistry:
         return dict(row)
 
     def path_for(self, component: str, tenant_scope_id: str) -> Path:
-        filenames = {
-            "evidence": "evidence.db",
-            "cases": "cases.db",
-            "manual-discovery": "discovery_jobs.db",
-        }
-        if component not in filenames:
+        if component not in TENANT_STORE_FILENAMES:
             raise ValueError(f"Unsupported tenant store component: {component}")
         route = self.route(tenant_scope_id)
-        if route["mode"] != "isolated-routing":
-            return self.data_root / filenames[component]
+        if route["mode"] != "isolated-routing" or not self.component_isolated(
+            component, tenant_scope_id, route=route
+        ):
+            shared_filenames = {
+                "assurance-responses": "assurance.db",
+                "outbound-delivery": "delivery.db",
+            }
+            return self.data_root / shared_filenames.get(component, TENANT_STORE_FILENAMES[component])
         path = (
             self.data_root
             / "tenants"
             / tenant_scope_id
             / "generations"
             / str(route["generation_id"])
-            / filenames[component]
+            / TENANT_STORE_FILENAMES[component]
         ).resolve()
         self.assert_contained(path)
         if not path.is_file():
             raise RuntimeError(f"The active isolated {component} store is missing; routing failed closed.")
         return path
+
+    def component_isolated(
+        self,
+        component: str,
+        tenant_scope_id: str,
+        *,
+        route: dict[str, Any] | None = None,
+    ) -> bool:
+        route = route or self.route(tenant_scope_id)
+        if route["mode"] != "isolated-routing":
+            return False
+        with self.connect() as database:
+            row = database.execute(
+                """SELECT components_json FROM tenant_data_migrations
+                WHERE tenant_scope_id=? AND generation_id=? AND status='cutover'
+                ORDER BY cutover_at DESC LIMIT 1""",
+                (tenant_scope_id, route["generation_id"]),
+            ).fetchone()
+        if not row:
+            raise RuntimeError("The active isolated generation manifest is missing; routing failed closed.")
+        try:
+            components = json.loads(str(row["components_json"]))
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError(
+                "The active isolated generation manifest is invalid; routing failed closed."
+            ) from exc
+        return component in {str(item.get("id") or "") for item in components if isinstance(item, dict)}
 
     def generation_root(self, tenant_scope_id: str, generation_id: str) -> Path:
         _safe_scope(tenant_scope_id)
@@ -163,15 +223,28 @@ class TenantDataPlaneRegistry:
     ) -> dict[str, Any]:
         tenant = _safe_scope(binding["tenant_scope_id"])
         route = self.route(tenant)
-        if route["mode"] != "shared":
-            raise ValueError("This tenant already uses an isolated store generation.")
+        if route["mode"] == "isolated-routing":
+            expected = (
+                route.get("connection_alias"),
+                route.get("connection_fingerprint"),
+                route.get("tenant_scope_id"),
+            )
+            observed = (
+                binding["alias"],
+                binding["fingerprint"],
+                binding["tenant_scope_id"],
+            )
+            if expected != observed:
+                raise ValueError("The active tenant generation belongs to a different Splunk identity.")
+        elif route["mode"] != "shared":
+            raise ValueError("The tenant data route is not eligible for migration.")
         migration_id = uuid4().hex
         generation_id = uuid4().hex
         now = _now()
         with self.connect() as database:
             pending = database.execute(
                 """SELECT id,status FROM tenant_data_migrations WHERE tenant_scope_id=?
-                AND status IN ('copying','verified','cutover') ORDER BY created_at DESC LIMIT 1""",
+                AND status IN ('copying','verified') ORDER BY created_at DESC LIMIT 1""",
                 (tenant,),
             ).fetchone()
             if pending:
@@ -179,9 +252,10 @@ class TenantDataPlaneRegistry:
             database.execute(
                 """INSERT INTO tenant_data_migrations
                 (id,tenant_scope_id,connection_alias,connection_fingerprint,plan_id,
-                generation_id,status,source_digest,target_digest,components_json,error,
+                generation_id,source_generation_id,source_writes_since_cutover,status,
+                source_digest,target_digest,components_json,error,
                 created_by,created_at,verified_at,cutover_at,rolled_back_at,updated_at)
-                VALUES (?,?,?,?,?,?,'copying','','','[]','',?,?,NULL,NULL,NULL,?)""",
+                VALUES (?,?,?,?,?,?,?,?,'copying','','','[]','',?,?,NULL,NULL,NULL,?)""",
                 (
                     migration_id,
                     tenant,
@@ -189,6 +263,8 @@ class TenantDataPlaneRegistry:
                     binding["fingerprint"],
                     plan_id,
                     generation_id,
+                    str(route.get("generation_id") or ""),
+                    int(route.get("writes_since_cutover") or 0),
                     actor,
                     now,
                     now,
@@ -241,10 +317,18 @@ class TenantDataPlaneRegistry:
         now = _now()
         with self.connect() as database:
             route = database.execute(
-                "SELECT mode FROM tenant_data_routes WHERE tenant_scope_id=?",
+                "SELECT mode,generation_id FROM tenant_data_routes WHERE tenant_scope_id=?",
                 (migration["tenant_scope_id"],),
             ).fetchone()
-            if route and route["mode"] != "shared":
+            expected_source = str(migration.get("source_generation_id") or "")
+            if expected_source:
+                if (
+                    not route
+                    or route["mode"] != "isolated-routing"
+                    or route["generation_id"] != expected_source
+                ):
+                    raise ValueError("Tenant routing changed after migration verification.")
+            elif route and route["mode"] != "shared":
                 raise ValueError("Tenant routing changed after migration verification.")
             database.execute(
                 """INSERT INTO tenant_data_routes
@@ -286,11 +370,24 @@ class TenantDataPlaneRegistry:
             )
         now = _now()
         with self.connect() as database:
-            database.execute(
-                """UPDATE tenant_data_routes SET mode='shared',generation_id='',
-                writes_since_cutover=0,updated_at=? WHERE tenant_scope_id=?""",
-                (now, migration["tenant_scope_id"]),
-            )
+            source_generation = str(migration.get("source_generation_id") or "")
+            if source_generation:
+                database.execute(
+                    """UPDATE tenant_data_routes SET mode='isolated-routing',generation_id=?,
+                    writes_since_cutover=?,updated_at=? WHERE tenant_scope_id=?""",
+                    (
+                        source_generation,
+                        int(migration.get("source_writes_since_cutover") or 0),
+                        now,
+                        migration["tenant_scope_id"],
+                    ),
+                )
+            else:
+                database.execute(
+                    """UPDATE tenant_data_routes SET mode='shared',generation_id='',
+                    writes_since_cutover=0,updated_at=? WHERE tenant_scope_id=?""",
+                    (now, migration["tenant_scope_id"]),
+                )
             database.execute(
                 """UPDATE tenant_data_migrations SET status='rolled-back',
                 rolled_back_at=?,updated_at=? WHERE id=? AND status='cutover'""",
@@ -324,7 +421,7 @@ class TenantDataPlaneRegistry:
             "routes": routes,
             "migrations": self.migrations(),
             "contract": {
-                "components": ["evidence", "cases", "manual-discovery"],
+                "components": list(TENANT_STORE_FILENAMES),
                 "cutover_requires_exact_source_digest": True,
                 "rollback_requires_zero_post_cutover_writes": True,
                 "source_retained_until_future_finalization": True,
@@ -344,7 +441,7 @@ class TenantDataPlaneRegistry:
 class TenantDataMigrationService:
     """Copy and verify tenant data before changing the runtime route."""
 
-    COMPONENTS = ("evidence", "cases", "manual-discovery")
+    COMPONENTS = tuple(TENANT_STORE_FILENAMES)
 
     def __init__(self, registry: TenantDataPlaneRegistry):
         self.registry = registry
@@ -434,21 +531,53 @@ class TenantDataMigrationService:
         return migration
 
     def _assert_no_active_discovery(self, tenant_scope_id: str) -> None:
-        path = self.registry.data_root / "discovery_jobs.db"
-        if not path.is_file():
-            return
-        with closing(sqlite3.connect(f"file:{path.as_posix()}?mode=ro", uri=True)) as database:
-            row = database.execute(
-                """SELECT id FROM discovery_jobs WHERE tenant_scope_id=?
-                AND status IN ('queued','running') ORDER BY created_at LIMIT 1""",
-                (tenant_scope_id,),
-            ).fetchone()
-        if row:
-            raise ValueError(f"Manual discovery job {row[0]} must finish or be cancelled before migration.")
+        active_checks = (
+            (
+                "manual-discovery",
+                "discovery_jobs",
+                "id",
+                ("queued", "running"),
+                "Manual discovery job",
+            ),
+            (
+                "validations",
+                "validation_tasks",
+                "id",
+                ("running",),
+                "Validation task",
+            ),
+            (
+                "assurance-responses",
+                "assurance_runs",
+                "id",
+                ("queued", "running"),
+                "Assurance run",
+            ),
+            (
+                "outbound-delivery",
+                "delivery_jobs",
+                "id",
+                ("queued", "retrying", "sending"),
+                "Delivery job",
+            ),
+        )
+        for component, table, id_column, statuses, label in active_checks:
+            path = self.registry.path_for(component, tenant_scope_id)
+            if not path.is_file():
+                continue
+            placeholders = ",".join("?" for _ in statuses)
+            with closing(sqlite3.connect(f"file:{path.as_posix()}?mode=ro", uri=True)) as database:
+                row = database.execute(
+                    f"SELECT {id_column} FROM {table} WHERE tenant_scope_id=? "
+                    f"AND status IN ({placeholders}) ORDER BY rowid LIMIT 1",
+                    (tenant_scope_id, *statuses),
+                ).fetchone()
+            if row:
+                raise ValueError(f"{label} {row[0]} must finish or be cancelled before migration.")
 
     def _copy_component(self, component: str, tenant_scope_id: str, root: Path) -> dict[str, Any]:
         source = self.registry.path_for(component, tenant_scope_id)
-        target = root / source.name
+        target = root / TENANT_STORE_FILENAMES[component]
         self._initialize_target(component, target, root)
         queries = self._queries(component, tenant_scope_id)
         source_hasher = hashlib.sha256()
@@ -480,24 +609,26 @@ class TenantDataMigrationService:
             EvidenceStore(target)
         elif component == "cases":
             CaseStore(target, root / "case_exports")
-        else:
+        elif component == "manual-discovery":
             DiscoveryJobStore(target)
+        elif component == "validations":
+            ValidationStore(target)
+        elif component == "detections":
+            DetectionStore(target)
+        elif component == "forecast-experiments":
+            TimeSeriesExperimentStore(target)
+        elif component == "assurance-responses":
+            AssuranceStore(target)
+        elif component == "outbound-delivery":
+            DeliveryStore(target)
+        else:
+            raise ValueError(f"Unsupported tenant store component: {component}")
 
     def _component_digest(self, component: str, tenant_scope_id: str, root: Path | None) -> dict[str, Any]:
         path = (
-            root
-            / {
-                "evidence": "evidence.db",
-                "cases": "cases.db",
-                "manual-discovery": "discovery_jobs.db",
-            }[component]
+            root / TENANT_STORE_FILENAMES[component]
             if root
-            else self.registry.data_root
-            / {
-                "evidence": "evidence.db",
-                "cases": "cases.db",
-                "manual-discovery": "discovery_jobs.db",
-            }[component]
+            else self.registry.path_for(component, tenant_scope_id)
         )
         return {
             "id": component,
@@ -542,19 +673,102 @@ class TenantDataMigrationService:
                     (tenant_scope_id,),
                 ),
             ]
-        root = "SELECT id FROM discovery_jobs WHERE tenant_scope_id=?"
-        return [
-            (
-                "discovery_jobs",
-                "SELECT * FROM discovery_jobs WHERE tenant_scope_id=? ORDER BY id",
-                (tenant_scope_id,),
-            ),
-            (
-                "discovery_job_events",
-                f"SELECT * FROM discovery_job_events WHERE job_id IN ({root}) ORDER BY id",
-                (tenant_scope_id,),
-            ),
-        ]
+        if component == "manual-discovery":
+            root = "SELECT id FROM discovery_jobs WHERE tenant_scope_id=?"
+            return [
+                (
+                    "discovery_jobs",
+                    "SELECT * FROM discovery_jobs WHERE tenant_scope_id=? ORDER BY id",
+                    (tenant_scope_id,),
+                ),
+                (
+                    "discovery_job_events",
+                    f"SELECT * FROM discovery_job_events WHERE job_id IN ({root}) ORDER BY id",
+                    (tenant_scope_id,),
+                ),
+            ]
+        if component == "validations":
+            return [
+                (
+                    "validation_tasks",
+                    "SELECT * FROM validation_tasks WHERE tenant_scope_id=? ORDER BY id",
+                    (tenant_scope_id,),
+                )
+            ]
+        if component == "detections":
+            root = "SELECT id FROM detections WHERE tenant_scope_id=?"
+            return [
+                (
+                    "detections",
+                    "SELECT * FROM detections WHERE tenant_scope_id=? ORDER BY id",
+                    (tenant_scope_id,),
+                ),
+                *[
+                    (
+                        table,
+                        f"SELECT * FROM {table} WHERE detection_id IN ({root}) ORDER BY id",
+                        (tenant_scope_id,),
+                    )
+                    for table in (
+                        "detection_versions",
+                        "detection_reviews",
+                        "detection_exports",
+                        "detection_gate_runs",
+                    )
+                ],
+            ]
+        if component == "forecast-experiments":
+            root = "SELECT id FROM time_series_runs WHERE tenant_scope_id=?"
+            return [
+                (
+                    "time_series_runs",
+                    "SELECT * FROM time_series_runs WHERE tenant_scope_id=? ORDER BY id",
+                    (tenant_scope_id,),
+                ),
+                (
+                    "time_series_alert_candidates",
+                    f"SELECT * FROM time_series_alert_candidates WHERE run_id IN ({root}) ORDER BY id",
+                    (tenant_scope_id,),
+                ),
+                (
+                    "time_series_baselines",
+                    f"SELECT * FROM time_series_baselines WHERE run_id IN ({root}) ORDER BY series_key,slot",
+                    (tenant_scope_id,),
+                ),
+            ]
+        if component == "assurance-responses":
+            return [
+                (
+                    "assurance_signals",
+                    "SELECT * FROM assurance_signals WHERE tenant_scope_id=? ORDER BY fingerprint",
+                    (tenant_scope_id,),
+                ),
+                (
+                    "assurance_packages",
+                    "SELECT * FROM assurance_packages WHERE tenant_scope_id=? ORDER BY id",
+                    (tenant_scope_id,),
+                ),
+            ]
+        if component == "outbound-delivery":
+            root = "SELECT id FROM delivery_jobs WHERE tenant_scope_id=?"
+            return [
+                (
+                    "delivery_jobs",
+                    "SELECT * FROM delivery_jobs WHERE tenant_scope_id=? ORDER BY id",
+                    (tenant_scope_id,),
+                ),
+                (
+                    "delivery_attempts",
+                    f"SELECT * FROM delivery_attempts WHERE job_id IN ({root}) ORDER BY id",
+                    (tenant_scope_id,),
+                ),
+                (
+                    "delivery_reconciliations",
+                    f"SELECT * FROM delivery_reconciliations WHERE job_id IN ({root}) ORDER BY id",
+                    (tenant_scope_id,),
+                ),
+            ]
+        raise ValueError(f"Unsupported tenant store component: {component}")
 
     @staticmethod
     def _copy_rows(

@@ -11,7 +11,7 @@ This is a focused reimplementation inspired by [LeiterConsulting/splunk-discover
 - Immutable Splunk connection revisions and tenant-scoped durable workflow bindings that fail closed before a call when any target moves
 - An explicit Splunk-scope selector with tenant-gated artifacts, hybrid RAG, discovery state, investigation memory, cases, exports, and SignalRoom MCP tools
 - Admin-only, content-free physical-isolation readiness plans that bind an exact Splunk revision, inventory tenant row/file counts, and expose every blocking store without moving data or changing routing
-- Digest-verified tenant generations and runtime routing for Evidence, Cases, and Manual Discovery, with stale-source rejection and zero-write rollback to a sealed shared source
+- Digest-verified tenant generations and runtime routing for Evidence, Cases, Manual Discovery, Validations, Detections, Forecast Experiments, Assurance Responses, and Delivery History, with stale-source rejection and zero-write rollback to a sealed shared source
 - Layered Splunk MCP diagnostics across configuration, DNS, TCP, TLS identity, authentication, and depth-specific tool contracts
 - Parallel read-only quick, standard, and deep discovery with change detection, JSON blueprints, and briefs
 - First-class security discovery across telemetry freshness, detection health, data-model readiness, and reusable RAG knowledge
@@ -162,7 +162,7 @@ create a tenant database, or change runtime routing. Its blockers identify store
 tenant key, verified parent relationship, or filesystem router. This is a migration engineering gate—not
 an isolation switch—and the shared source files remain authoritative.
 
-After reviewing a current plan, an administrator can stage Evidence, Cases, and Manual Discovery into
+After reviewing a current plan, an administrator can stage all eight tenant-owned workflow stores into
 a generation beneath the tenant root. This step locally reads and copies payload rows, verifies canonical
 source/target digests, and leaves routing unchanged. Cutover rechecks both the shared source and staged
 generation before activating the isolated route. The shared rows remain sealed as a rollback source;

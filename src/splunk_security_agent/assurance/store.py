@@ -808,7 +808,7 @@ class AssuranceStore:
                     binding["tenant_scope_id"],
                 ),
             )
-        result = self.get_package(package_id)
+        result = self.get_package(package_id, expire=False)
         assert result is not None
         return result
 
@@ -822,20 +822,25 @@ class AssuranceStore:
                 WHERE id=?""",
                 (json.dumps(sorted(set(validation_task_ids))), now, package_id),
             )
-        return self.get_package(package_id)
+        return self.get_package(package_id, expire=False)
 
-    def expire_packages(self) -> int:
+    def expire_packages(self, excluded_tenant_scope_ids: set[str] | None = None) -> int:
         now = _now().isoformat()
+        excluded = sorted(excluded_tenant_scope_ids or set())
+        tenant_clause = f" AND tenant_scope_id NOT IN ({','.join('?' for _ in excluded)})" if excluded else ""
         with self._lock, self.connect() as db:
             result = db.execute(
-                """UPDATE assurance_packages SET status='expired', updated_at=?
-                WHERE status='review' AND expires_at<=?""",
-                (now, now),
+                f"""UPDATE assurance_packages SET status='expired', updated_at=?
+                WHERE status='review' AND expires_at<=?{tenant_clause}""",
+                (now, now, *excluded),
             )
         return int(result.rowcount)
 
-    def get_package(self, package_id: str, tenant_scope_id: str = "") -> dict[str, Any] | None:
-        self.expire_packages()
+    def get_package(
+        self, package_id: str, tenant_scope_id: str = "", *, expire: bool = True
+    ) -> dict[str, Any] | None:
+        if expire:
+            self.expire_packages()
         with self.connect() as db:
             if tenant_scope_id:
                 row = db.execute(
@@ -847,8 +852,11 @@ class AssuranceStore:
                 row = db.execute("SELECT * FROM assurance_packages WHERE id=?", (package_id,)).fetchone()
         return self._package_with_signals(row) if row else None
 
-    def packages(self, limit: int = 20, *, tenant_scope_id: str = "") -> list[dict[str, Any]]:
-        self.expire_packages()
+    def packages(
+        self, limit: int = 20, *, tenant_scope_id: str = "", expire: bool = True
+    ) -> list[dict[str, Any]]:
+        if expire:
+            self.expire_packages()
         with self.connect() as db:
             if tenant_scope_id:
                 rows = db.execute(
@@ -866,8 +874,9 @@ class AssuranceStore:
                 ).fetchall()
         return [self._package_with_signals(row) for row in rows]
 
-    def covered_signal_fingerprints(self, *, tenant_scope_id: str = "") -> set[str]:
-        self.expire_packages()
+    def covered_signal_fingerprints(self, *, tenant_scope_id: str = "", expire: bool = True) -> set[str]:
+        if expire:
+            self.expire_packages()
         with self.connect() as db:
             if tenant_scope_id:
                 rows = db.execute(
@@ -882,8 +891,9 @@ class AssuranceStore:
                 ).fetchall()
         return {fingerprint for row in rows for fingerprint in json.loads(row["signal_fingerprints"])}
 
-    def close_package(self, package_id: str) -> dict[str, Any] | None:
-        self.expire_packages()
+    def close_package(self, package_id: str, *, expire: bool = True) -> dict[str, Any] | None:
+        if expire:
+            self.expire_packages()
         now = _now().isoformat()
         with self._lock, self.connect() as db:
             db.execute(
@@ -891,7 +901,7 @@ class AssuranceStore:
                 WHERE id=? AND status='review'""",
                 (now, now, package_id),
             )
-        return self.get_package(package_id)
+        return self.get_package(package_id, expire=False)
 
     def usage_today(self) -> dict[str, int]:
         start = _now().replace(hour=0, minute=0, second=0, microsecond=0).isoformat()

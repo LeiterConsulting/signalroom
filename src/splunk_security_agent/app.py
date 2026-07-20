@@ -16,7 +16,7 @@ from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Stre
 from fastapi.staticfiles import StaticFiles
 
 from .agents import SecurityAgent
-from .assurance import AssuranceResponseService, AssuranceService, AssuranceStore
+from .assurance import AssuranceResponseService, AssuranceService
 from .audit import AuditStore, bind_audit_actor, reset_audit_actor
 from .audit_export import (
     AuditExportStore,
@@ -37,14 +37,13 @@ from .benchmarks import (
 from .cases import CaseCockpitService
 from .config import ConfigStore
 from .connections import ConnectionRegistryStore
-from .delivery import AssuranceDeliveryService, DeliveryStore
+from .delivery import AssuranceDeliveryService
 from .detections import (
     DetectionDeploymentService,
     DetectionDeploymentStore,
     DetectionRepositoryService,
     DetectionRepositoryStore,
     DetectionService,
-    DetectionStore,
 )
 from .discovery import (
     DiscoveryComparisonService,
@@ -53,7 +52,6 @@ from .discovery import (
 )
 from .feedback import AnalystFeedbackStore
 from .forecasting import (
-    TimeSeriesExperimentStore,
     TimeSeriesForecastService,
     TimeSeriesScheduleService,
     TimeSeriesScheduleStore,
@@ -149,15 +147,20 @@ from .splunk import (
 )
 from .splunk_models import SplunkModelInventoryService
 from .tenancy import (
+    RoutedAssuranceStore,
     RoutedCaseStore,
+    RoutedDeliveryStore,
+    RoutedDetectionStore,
     RoutedDiscoveryJobStore,
     RoutedEvidenceStore,
+    RoutedTimeSeriesExperimentStore,
+    RoutedValidationStore,
     TenantDataMigrationService,
     TenantDataPlaneRegistry,
     TenantIsolationPlanner,
     TenantIsolationStore,
 )
-from .validation import QueryIntelligenceService, ValidationService, ValidationStore
+from .validation import QueryIntelligenceService, ValidationService
 from .workload import (
     SplunkWorkloadService,
     WorkloadControlledSplunkClient,
@@ -214,11 +217,11 @@ class Services:
             self.model_trust,
         )
         self.cases = RoutedCaseStore(self.tenant_data_registry)
-        self.validation_store = ValidationStore(DATA / "validations.db")
+        self.validation_store = RoutedValidationStore(self.tenant_data_registry)
         self.workload_store = WorkloadStore(DATA / "workload.db")
         self.workload = SplunkWorkloadService(self.workload_store)
         self.query_intelligence = QueryIntelligenceService(self.validation_store, self.workload)
-        self.detection_store = DetectionStore(DATA / "detections.db")
+        self.detection_store = RoutedDetectionStore(self.tenant_data_registry)
         self.detections = DetectionService(
             self.detection_store,
             self.validation_store,
@@ -258,14 +261,14 @@ class Services:
         self.auth = AuthService(self.auth_store, self.audit, self.available_auth_connections)
         self.oidc = OIDCService(self.auth_store, self.auth, self.config, self.audit)
         self.discovery_job_store = RoutedDiscoveryJobStore(self.tenant_data_registry)
-        self.assurance_store = AssuranceStore(DATA / "assurance.db")
-        self.delivery_store = DeliveryStore(DATA / "delivery.db")
+        self.assurance_store = RoutedAssuranceStore(self.tenant_data_registry)
+        self.delivery_store = RoutedDeliveryStore(self.tenant_data_registry)
         self.connection_diagnostics_store = ConnectionDiagnosticsStore(DATA / "connection_diagnostics.db")
         self.connection_diagnostics = SplunkConnectionDiagnostics(self.connection_diagnostics_store)
         self.discovery_lock = asyncio.Lock()
         self.benchmark_lock = asyncio.Lock()
         self.model_setup = ModelSetupService(self.config, self.evidence, self.model_trust)
-        self.time_series_store = TimeSeriesExperimentStore(DATA / "time_series_experiments.db")
+        self.time_series_store = RoutedTimeSeriesExperimentStore(self.tenant_data_registry)
         self.time_series = TimeSeriesForecastService(
             self.config,
             lambda: self.splunk,
@@ -1264,7 +1267,7 @@ async def stage_tenant_data_migration(
         target_type="tenant-scope",
         target_id=scope["tenant_scope_id"],
         summary=(
-            "Copied three tenant-owned stores into a staged generation and verified exact digests; "
+            "Copied eight tenant-owned workflow stores into a staged generation and verified exact digests; "
             "runtime routing remained shared."
         ),
         metadata={
@@ -1338,7 +1341,11 @@ async def rollback_tenant_data_migration(
         "rollback",
         target_type="tenant-scope",
         target_id=scope["tenant_scope_id"],
-        summary=("Restored shared tenant routing before any isolated-generation write occurred."),
+        summary=(
+            "Restored the prior isolated tenant generation before any new-generation write occurred."
+            if result.get("source_generation_id")
+            else "Restored shared tenant routing before any isolated-generation write occurred."
+        ),
         metadata={
             "migration_id": result["id"],
             "generation_id": result["generation_id"],

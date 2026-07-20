@@ -357,15 +357,17 @@ class DeliveryStore:
                 ).fetchall()
         return [self._job_with_attempts(row) for row in rows]
 
-    def next_due(self) -> dict[str, Any] | None:
+    def next_due(self, excluded_tenant_scope_ids: set[str] | None = None) -> dict[str, Any] | None:
         now = _now()
+        excluded = sorted(excluded_tenant_scope_ids or set())
+        tenant_clause = f" AND tenant_scope_id NOT IN ({','.join('?' for _ in excluded)})" if excluded else ""
         with self.connect() as db:
             row = db.execute(
-                """SELECT * FROM delivery_jobs
+                f"""SELECT * FROM delivery_jobs
                 WHERE status IN ('queued','retrying')
                 AND (next_attempt_at IS NULL OR next_attempt_at<=?)
-                ORDER BY created_at LIMIT 1""",
-                (now,),
+                {tenant_clause} ORDER BY created_at LIMIT 1""",
+                (now, *excluded),
             ).fetchone()
         return self._job_with_attempts(row) if row else None
 
@@ -486,13 +488,19 @@ class DeliveryStore:
             ).rowcount
         return int(changed)
 
-    def cancel_pending(self, reason: str) -> int:
+    def cancel_pending(
+        self,
+        reason: str,
+        excluded_tenant_scope_ids: set[str] | None = None,
+    ) -> int:
         now = _now()
+        excluded = sorted(excluded_tenant_scope_ids or set())
+        tenant_clause = f" AND tenant_scope_id NOT IN ({','.join('?' for _ in excluded)})" if excluded else ""
         with self._lock, self.connect() as db:
             changed = db.execute(
-                """UPDATE delivery_jobs SET status='cancelled',last_error=?,next_attempt_at=NULL,
-                updated_at=? WHERE status IN ('queued','retrying','failed')""",
-                (reason[:1000], now),
+                f"""UPDATE delivery_jobs SET status='cancelled',last_error=?,next_attempt_at=NULL,
+                updated_at=? WHERE status IN ('queued','retrying','failed'){tenant_clause}""",
+                (reason[:1000], now, *excluded),
             ).rowcount
         return int(changed)
 
@@ -531,31 +539,34 @@ class DeliveryStore:
             ).rowcount
         return self.get(job_id) if changed else None
 
-    def recover_interrupted(self) -> dict[str, int]:
+    def recover_interrupted(self, excluded_tenant_scope_ids: set[str] | None = None) -> dict[str, int]:
         now = _now()
+        excluded = sorted(excluded_tenant_scope_ids or set())
+        tenant_clause = f" AND tenant_scope_id NOT IN ({','.join('?' for _ in excluded)})" if excluded else ""
         with self._lock, self.connect() as db:
             correlated = db.execute(
-                """UPDATE delivery_jobs SET status='delivered',next_attempt_at=NULL,
+                f"""UPDATE delivery_jobs SET status='delivered',next_attempt_at=NULL,
                 last_error='Recovered after the external record correlation was durably recorded.',
                 delivered_at=COALESCE(delivered_at,external_record_created_at,?),
                 updated_at=? WHERE status='sending'
                 AND destination_kind IN ('jira-cloud','splunk-soar')
-                AND external_record_id<>''""",
-                (now, now),
+                AND external_record_id<>''{tenant_clause}""",
+                (now, now, *excluded),
             ).rowcount
             uncertain = db.execute(
-                """UPDATE delivery_jobs SET status='failed',next_attempt_at=NULL,
+                f"""UPDATE delivery_jobs SET status='failed',next_attempt_at=NULL,
                 last_error='Process restarted during Jira issue creation; the outcome is
                 unknown. Inspect Jira for the SignalRoom correlation label before an
                 explicit retry.',updated_at=? WHERE status='sending'
-                AND destination_kind='jira-cloud' AND external_record_key=''""",
-                (now,),
+                AND destination_kind='jira-cloud' AND external_record_key=''{tenant_clause}""",
+                (now, *excluded),
             ).rowcount
             retrying = db.execute(
-                """UPDATE delivery_jobs SET status='retrying',next_attempt_at=?,
+                f"""UPDATE delivery_jobs SET status='retrying',next_attempt_at=?,
                 last_error='Process restarted during delivery; retry uses the original approved payload.',
-                updated_at=? WHERE status='sending' AND destination_kind<>'jira-cloud'""",
-                (now, now),
+                updated_at=? WHERE status='sending' AND destination_kind<>'jira-cloud'
+                {tenant_clause}""",
+                (now, now, *excluded),
             ).rowcount
         return {
             "correlated": int(correlated),
