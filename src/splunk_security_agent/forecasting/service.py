@@ -80,7 +80,7 @@ class TimeSeriesForecastService:
             **health,
         }
 
-    def experiments(self, limit: int = 30) -> dict[str, Any]:
+    def experiments(self, limit: int = 30, tenant_scope_id: str = "") -> dict[str, Any]:
         if self.experiment_store is None:
             return {
                 "runs": [],
@@ -94,10 +94,12 @@ class TimeSeriesForecastService:
                     "alert_candidate_creates_validation_draft": True,
                 },
             }
-        return self.experiment_store.overview(limit)
+        return self.experiment_store.overview(limit, tenant_scope_id=tenant_scope_id)
 
-    def experiment(self, run_id: str) -> dict[str, Any] | None:
-        return self.experiment_store.get(run_id) if self.experiment_store is not None else None
+    def experiment(self, run_id: str, tenant_scope_id: str = "") -> dict[str, Any] | None:
+        return (
+            self.experiment_store.get(run_id, tenant_scope_id) if self.experiment_store is not None else None
+        )
 
     def accept_baseline(
         self,
@@ -663,9 +665,7 @@ class TimeSeriesForecastService:
                 "query_fingerprint": query_fingerprint,
                 "connection_alias": str((binding or {}).get("alias") or "primary"),
                 "connection_fingerprint": str((binding or {}).get("fingerprint") or ""),
-                "tenant_scope_id": str(
-                    (binding or {}).get("tenant_scope_id") or "workspace-primary"
-                ),
+                "tenant_scope_id": str((binding or {}).get("tenant_scope_id") or "workspace-primary"),
             },
             "series": {key: value for key, value in prepared.items() if key not in {"values", "timestamps"}},
             "series_sha256": series_fingerprint,

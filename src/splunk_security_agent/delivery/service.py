@@ -95,7 +95,7 @@ class AssuranceDeliveryService:
             await asyncio.gather(self._worker, return_exceptions=True)
         self._worker = None
 
-    def overview(self) -> dict[str, Any]:
+    def overview(self, tenant_scope_id: str = "") -> dict[str, Any]:
         policy = self.store.policy()
         url = self.config.secret("delivery_webhook_url")
         destination_kind = policy["destination_kind"]
@@ -107,9 +107,7 @@ class AssuranceDeliveryService:
         soar_token = self.config.secret("delivery_soar_auth_token")
         configured = bool(url)
         if is_jira:
-            configured = bool(
-                url and jira_email and jira_token and policy["jira_project_key"]
-            )
+            configured = bool(url and jira_email and jira_token and policy["jira_project_key"])
         elif is_soar:
             configured = bool(url and soar_token and policy["soar_label"])
         return {
@@ -119,17 +117,13 @@ class AssuranceDeliveryService:
                 "configured": configured,
                 "url_configured": bool(url),
                 "origin": self._origin(url) if url else "",
-                "authorization_configured": bool(
-                    self.config.secret("delivery_authorization")
-                ),
+                "authorization_configured": bool(self.config.secret("delivery_authorization")),
                 "authorization_supported": not (is_slack or is_jira or is_soar),
                 "jira_email_configured": bool(jira_email),
                 "jira_api_token_configured": bool(jira_token),
                 "soar_auth_token_configured": bool(soar_token),
                 "transport": (
-                    "verified TLS"
-                    if policy["verify_tls"]
-                    else "encrypted without certificate verification"
+                    "verified TLS" if policy["verify_tls"] else "encrypted without certificate verification"
                 ),
                 "delivery_semantics": (
                     "notification-only · local deduplication · at-least-once delivery"
@@ -145,7 +139,7 @@ class AssuranceDeliveryService:
                     )
                 ),
             },
-            "jobs": self.store.jobs(),
+            "jobs": self.store.jobs(tenant_scope_id=tenant_scope_id),
             "worker": {
                 "online": bool(self._worker and not self._worker.done()),
                 "restart_recovery": (
@@ -154,11 +148,7 @@ class AssuranceDeliveryService:
                     else (
                         "analyst-reviewed-retry"
                         if is_jira
-                        else (
-                            "source-id-deduplicated-retry"
-                            if is_soar
-                            else "idempotent-retry"
-                        )
+                        else ("source-id-deduplicated-retry" if is_soar else "idempotent-retry")
                     )
                 ),
                 "external_authority": (
@@ -184,9 +174,7 @@ class AssuranceDeliveryService:
         if policy["destination_kind"] == SOAR_DESTINATION:
             return await self._test_soar_destination(policy)
         if policy["destination_kind"] != JIRA_DESTINATION:
-            raise ValueError(
-                "Read-only destination testing is available for Jira Cloud and Splunk SOAR"
-            )
+            raise ValueError("Read-only destination testing is available for Jira Cloud and Splunk SOAR")
         site_url = self.config.secret("delivery_webhook_url")
         if not site_url:
             raise ValueError("Save the Jira Cloud site URL before testing")
@@ -200,8 +188,7 @@ class AssuranceDeliveryService:
         project_key = policy["jira_project_key"]
         issue_type = policy["jira_issue_type"]
         endpoint = (
-            f"{site_url.rstrip('/')}/rest/api/3/issue/createmeta/"
-            f"{quote(project_key, safe='')}/issuetypes"
+            f"{site_url.rstrip('/')}/rest/api/3/issue/createmeta/{quote(project_key, safe='')}/issuetypes"
         )
         headers = {
             "Accept": "application/json",
@@ -217,9 +204,7 @@ class AssuranceDeliveryService:
             ) as client:
                 response = await client.get(endpoint, headers=headers)
         except (httpx.HTTPError, OSError, ValueError) as exc:
-            raise ValueError(
-                f"Jira destination test failed ({type(exc).__name__})"
-            ) from exc
+            raise ValueError(f"Jira destination test failed ({type(exc).__name__})") from exc
         status = int(response.status_code)
         if status != 200:
             raise ValueError(f"Jira destination test returned HTTP {status}")
@@ -237,9 +222,7 @@ class AssuranceDeliveryService:
                 if isinstance(item, dict) and item.get("name")
             }
         )[:30]
-        matched = issue_type.casefold() in {
-            candidate.casefold() for candidate in available
-        }
+        matched = issue_type.casefold() in {candidate.casefold() for candidate in available}
         result = {
             "ok": matched,
             "adapter": JIRA_DESTINATION,
@@ -259,8 +242,7 @@ class AssuranceDeliveryService:
             summary=(
                 f"Verified Jira project {project_key} and issue type {issue_type}."
                 if matched
-                else f"Jira project {project_key} is reachable, but issue type "
-                f"{issue_type} is not available."
+                else f"Jira project {project_key} is reachable, but issue type {issue_type} is not available."
             ),
             metadata={
                 "destination_kind": JIRA_DESTINATION,
@@ -272,9 +254,7 @@ class AssuranceDeliveryService:
         )
         return result
 
-    async def _test_soar_destination(
-        self, policy: dict[str, Any]
-    ) -> dict[str, Any]:
+    async def _test_soar_destination(self, policy: dict[str, Any]) -> dict[str, Any]:
         site_url = self.config.secret("delivery_webhook_url")
         if not site_url:
             raise ValueError("Save the Splunk SOAR site URL before testing")
@@ -299,22 +279,16 @@ class AssuranceDeliveryService:
             ) as client:
                 response = await client.get(endpoint, headers=headers)
         except (httpx.HTTPError, OSError, ValueError) as exc:
-            raise ValueError(
-                f"Splunk SOAR destination test failed ({type(exc).__name__})"
-            ) from exc
+            raise ValueError(f"Splunk SOAR destination test failed ({type(exc).__name__})") from exc
         status = int(response.status_code)
         if status != 200:
             raise ValueError(f"Splunk SOAR destination test returned HTTP {status}")
         try:
             value = response.json()
         except (TypeError, ValueError) as exc:
-            raise ValueError(
-                "Splunk SOAR destination test returned invalid JSON"
-            ) from exc
+            raise ValueError("Splunk SOAR destination test returned invalid JSON") from exc
         if not isinstance(value, dict):
-            raise ValueError(
-                "Splunk SOAR destination test did not return container options"
-            )
+            raise ValueError("Splunk SOAR destination test did not return container options")
         labels = self._soar_option_names(value.get("label"))
         statuses = self._soar_option_names(value.get("status"))
         severities = self._soar_option_names(value.get("severity"))
@@ -326,10 +300,7 @@ class AssuranceDeliveryService:
             "severity_map": policy["soar_severity_map"],
         }
         availability = {
-            name: (
-                expected.casefold()
-                in {candidate.casefold() for candidate in available}
-            )
+            name: (expected.casefold() in {candidate.casefold() for candidate in available})
             for name, expected, available in (
                 ("label", configured["label"], labels),
                 ("status", configured["status"], statuses),
@@ -337,8 +308,7 @@ class AssuranceDeliveryService:
             )
         }
         availability["severity_map"] = {
-            str(item).casefold()
-            for item in policy["soar_severity_map"].values()
+            str(item).casefold() for item in policy["soar_severity_map"].values()
         } <= {item.casefold() for item in severities}
         result = {
             "ok": all(availability.values()),
@@ -361,8 +331,7 @@ class AssuranceDeliveryService:
             summary=(
                 "Verified the configured Splunk SOAR container mapping."
                 if result["ok"]
-                else "Splunk SOAR is reachable, but one or more configured "
-                "container options are unavailable."
+                else "Splunk SOAR is reachable, but one or more configured container options are unavailable."
             ),
             metadata={
                 "destination_kind": SOAR_DESTINATION,
@@ -380,20 +349,15 @@ class AssuranceDeliveryService:
         if job["destination_kind"] != JIRA_DESTINATION:
             raise ValueError("Only a correlated Jira delivery can be reconciled")
         if job["status"] != "delivered" or not job.get("external_record"):
-            raise ValueError(
-                "Jira reconciliation requires a delivered job with a durable issue correlation"
-            )
+            raise ValueError("Jira reconciliation requires a delivered job with a durable issue correlation")
         record = job["external_record"]
-        if (
-            not str(record.get("id") or "").isdigit()
-            or not JIRA_ISSUE_KEY_PATTERN.fullmatch(str(record.get("key") or ""))
+        if not str(record.get("id") or "").isdigit() or not JIRA_ISSUE_KEY_PATTERN.fullmatch(
+            str(record.get("key") or "")
         ):
             raise ValueError("The stored Jira issue correlation is not trustworthy")
         policy = self.store.policy()
         if policy["destination_kind"] != JIRA_DESTINATION:
-            raise ValueError(
-                "Restore the correlated Jira destination before refreshing this issue"
-            )
+            raise ValueError("Restore the correlated Jira destination before refreshing this issue")
         site_url = self.config.secret("delivery_webhook_url")
         if not site_url:
             raise ValueError("The correlated Jira destination is not configured")
@@ -417,10 +381,7 @@ class AssuranceDeliveryService:
                 "failFast": "true",
             }
         )
-        endpoint = (
-            f"{site_url.rstrip('/')}/rest/api/3/issue/"
-            f"{quote(str(record['id']), safe='')}?{query}"
-        )
+        endpoint = f"{site_url.rstrip('/')}/rest/api/3/issue/{quote(str(record['id']), safe='')}?{query}"
         headers = {
             "Accept": "application/json",
             "Authorization": self._jira_authorization(),
@@ -440,9 +401,7 @@ class AssuranceDeliveryService:
                 response = await client.get(endpoint, headers=headers)
             status = int(response.status_code)
             if status == 200:
-                snapshot, error = self._jira_reconciliation_snapshot(
-                    response, job, site_url
-                )
+                snapshot, error = self._jira_reconciliation_snapshot(response, job, site_url)
                 outcome = "observed" if snapshot else "identity-mismatch"
             elif status == 404:
                 outcome = "not-found-or-not-visible"
@@ -463,9 +422,7 @@ class AssuranceDeliveryService:
 
         current = self.store.get(job_id)
         assert current is not None
-        drift = self._jira_reconciliation_drift(
-            outcome, snapshot, current.get("reconciliations", [])
-        )
+        drift = self._jira_reconciliation_drift(outcome, snapshot, current.get("reconciliations", []))
         reconciliation = self.store.record_reconciliation(
             job_id,
             outcome=outcome,
@@ -491,9 +448,7 @@ class AssuranceDeliveryService:
             target_type="delivery-job",
             target_id=job_id,
             outcome=audit_outcome,
-            summary=self._jira_reconciliation_summary(
-                outcome, snapshot, drift_count, error
-            ),
+            summary=self._jira_reconciliation_summary(outcome, snapshot, drift_count, error),
             metadata={
                 "destination_kind": JIRA_DESTINATION,
                 "external_record_id": record["id"],
@@ -512,27 +467,16 @@ class AssuranceDeliveryService:
         if value.webhook_url and value.clear_webhook_url:
             raise ValueError("Choose either a replacement webhook URL or removal, not both")
         if value.authorization_header and value.clear_authorization_header:
-            raise ValueError(
-                "Choose either a replacement authorization header or removal, not both"
-            )
+            raise ValueError("Choose either a replacement authorization header or removal, not both")
         if value.jira_email and value.clear_jira_email:
-            raise ValueError(
-                "Choose either a replacement Jira account email or removal, not both"
-            )
+            raise ValueError("Choose either a replacement Jira account email or removal, not both")
         if value.jira_api_token and value.clear_jira_api_token:
-            raise ValueError(
-                "Choose either a replacement Jira API token or removal, not both"
-            )
+            raise ValueError("Choose either a replacement Jira API token or removal, not both")
         if value.soar_auth_token and value.clear_soar_auth_token:
+            raise ValueError("Choose either a replacement Splunk SOAR auth token or removal, not both")
+        if value.clear_webhook_url and self.config.secret_is_environment_managed("delivery_webhook_url"):
             raise ValueError(
-                "Choose either a replacement Splunk SOAR auth token or removal, not both"
-            )
-        if value.clear_webhook_url and self.config.secret_is_environment_managed(
-            "delivery_webhook_url"
-        ):
-            raise ValueError(
-                "The webhook URL is environment-managed; remove SIGNALROOM_WEBHOOK_URL "
-                "and restart SignalRoom"
+                "The webhook URL is environment-managed; remove SIGNALROOM_WEBHOOK_URL and restart SignalRoom"
             )
         if value.clear_authorization_header and self.config.secret_is_environment_managed(
             "delivery_authorization"
@@ -541,9 +485,7 @@ class AssuranceDeliveryService:
                 "The authorization header is environment-managed; remove "
                 "SIGNALROOM_WEBHOOK_AUTHORIZATION and restart SignalRoom"
             )
-        if value.clear_jira_email and self.config.secret_is_environment_managed(
-            "delivery_jira_email"
-        ):
+        if value.clear_jira_email and self.config.secret_is_environment_managed("delivery_jira_email"):
             raise ValueError(
                 "The Jira account email is environment-managed; remove "
                 "SIGNALROOM_JIRA_EMAIL and restart SignalRoom"
@@ -571,38 +513,22 @@ class AssuranceDeliveryService:
         candidate_authorization = (
             value.authorization_header.strip()
             if value.authorization_header
-            else (
-                ""
-                if value.clear_authorization_header
-                else self.config.secret("delivery_authorization")
-            )
+            else ("" if value.clear_authorization_header else self.config.secret("delivery_authorization"))
         )
         candidate_jira_email = (
             value.jira_email.strip()
             if value.jira_email
-            else (
-                ""
-                if value.clear_jira_email
-                else self.config.secret("delivery_jira_email")
-            )
+            else ("" if value.clear_jira_email else self.config.secret("delivery_jira_email"))
         )
         candidate_jira_token = (
             value.jira_api_token.strip()
             if value.jira_api_token
-            else (
-                ""
-                if value.clear_jira_api_token
-                else self.config.secret("delivery_jira_api_token")
-            )
+            else ("" if value.clear_jira_api_token else self.config.secret("delivery_jira_api_token"))
         )
         candidate_soar_token = (
             value.soar_auth_token.strip()
             if value.soar_auth_token
-            else (
-                ""
-                if value.clear_soar_auth_token
-                else self.config.secret("delivery_soar_auth_token")
-            )
+            else ("" if value.clear_soar_auth_token else self.config.secret("delivery_soar_auth_token"))
         )
         if (
             value.destination_kind != previous_policy["destination_kind"]
@@ -610,9 +536,7 @@ class AssuranceDeliveryService:
             and not value.webhook_url
             and not value.clear_webhook_url
         ):
-            raise ValueError(
-                "Enter a new destination URL or remove the saved URL when changing adapters"
-            )
+            raise ValueError("Enter a new destination URL or remove the saved URL when changing adapters")
         if candidate_url:
             self._validate_destination_url(value.destination_kind, candidate_url)
         if "\r" in candidate_authorization or "\n" in candidate_authorization:
@@ -620,29 +544,16 @@ class AssuranceDeliveryService:
         if value.destination_kind == SLACK_DESTINATION and value.authorization_header:
             raise ValueError("Slack Incoming Webhooks do not use SignalRoom's generic authorization header")
         if value.destination_kind == JIRA_DESTINATION and value.authorization_header:
-            raise ValueError(
-                "Jira Cloud uses its dedicated account email and API token fields"
-            )
+            raise ValueError("Jira Cloud uses its dedicated account email and API token fields")
         if value.destination_kind == SOAR_DESTINATION and value.authorization_header:
-            raise ValueError(
-                "Splunk SOAR uses its dedicated ph-auth-token field"
-            )
+            raise ValueError("Splunk SOAR uses its dedicated ph-auth-token field")
         if value.destination_kind in {SLACK_DESTINATION, JIRA_DESTINATION} and not value.verify_tls:
             destination_name = (
-                "Jira Cloud"
-                if value.destination_kind == JIRA_DESTINATION
-                else "Slack Incoming Webhooks"
+                "Jira Cloud" if value.destination_kind == JIRA_DESTINATION else "Slack Incoming Webhooks"
             )
-            raise ValueError(
-                f"{destination_name} destinations require TLS certificate verification"
-            )
-        if (
-            value.destination_kind in {SLACK_DESTINATION, JIRA_DESTINATION}
-            and value.ca_bundle
-        ):
-            raise ValueError(
-                "Public Slack and Jira Cloud destinations do not accept a private CA override"
-            )
+            raise ValueError(f"{destination_name} destinations require TLS certificate verification")
+        if value.destination_kind in {SLACK_DESTINATION, JIRA_DESTINATION} and value.ca_bundle:
+            raise ValueError("Public Slack and Jira Cloud destinations do not accept a private CA override")
         if value.destination_kind == JIRA_DESTINATION:
             self._validate_jira_policy(
                 value,
@@ -665,19 +576,13 @@ class AssuranceDeliveryService:
         if value.webhook_url:
             self.config.update_secrets(delivery_webhook_url=value.webhook_url.strip())
         if value.authorization_header:
-            self.config.update_secrets(
-                delivery_authorization=value.authorization_header.strip()
-            )
+            self.config.update_secrets(delivery_authorization=value.authorization_header.strip())
         if value.jira_email:
             self.config.update_secrets(delivery_jira_email=value.jira_email.strip())
         if value.jira_api_token:
-            self.config.update_secrets(
-                delivery_jira_api_token=value.jira_api_token.strip()
-            )
+            self.config.update_secrets(delivery_jira_api_token=value.jira_api_token.strip())
         if value.soar_auth_token:
-            self.config.update_secrets(
-                delivery_soar_auth_token=value.soar_auth_token.strip()
-            )
+            self.config.update_secrets(delivery_soar_auth_token=value.soar_auth_token.strip())
         if value.clear_webhook_url:
             self.config.delete_secrets("delivery_webhook_url")
         if value.clear_authorization_header:
@@ -715,17 +620,11 @@ class AssuranceDeliveryService:
                 "destination_kind": policy["destination_kind"],
                 "destination_label": policy["destination_label"],
                 "jira_project_key": (
-                    policy["jira_project_key"]
-                    if policy["destination_kind"] == JIRA_DESTINATION
-                    else ""
+                    policy["jira_project_key"] if policy["destination_kind"] == JIRA_DESTINATION else ""
                 ),
-                "jira_credentials_configured": bool(
-                    candidate_jira_email and candidate_jira_token
-                ),
+                "jira_credentials_configured": bool(candidate_jira_email and candidate_jira_token),
                 "soar_label": (
-                    policy["soar_label"]
-                    if policy["destination_kind"] == SOAR_DESTINATION
-                    else ""
+                    policy["soar_label"] if policy["destination_kind"] == SOAR_DESTINATION else ""
                 ),
                 "soar_credentials_configured": bool(candidate_soar_token),
                 "destination_origin": self._origin(candidate_url) if candidate_url else "",
@@ -784,6 +683,11 @@ class AssuranceDeliveryService:
             payload_sha256=prepared["payload_sha256"],
             idempotency_key=prepared["idempotency_key"],
             max_attempts=policy["max_attempts"],
+            binding={
+                "connection_alias": prepared["connection_alias"],
+                "connection_fingerprint": prepared["connection_fingerprint"],
+                "tenant_scope_id": prepared["tenant_scope_id"],
+            },
         )
         self.audit.record(
             "delivery.approved",
@@ -812,9 +716,7 @@ class AssuranceDeliveryService:
             return None
         try:
             prepared = self._prepare(package["id"])
-            return self.approve(
-                package["id"], prepared["payload_sha256"], automatic=True
-            )
+            return self.approve(package["id"], prepared["payload_sha256"], automatic=True)
         except ValueError as exc:
             self.audit.record(
                 "delivery.automatic.skipped",
@@ -834,9 +736,7 @@ class AssuranceDeliveryService:
         if current is None:
             raise KeyError(job_id)
         if self._destination_fingerprint() != current["destination_fingerprint"]:
-            raise ValueError(
-                "The destination changed after approval; create and approve a fresh preview"
-            )
+            raise ValueError("The destination changed after approval; create and approve a fresh preview")
         is_jira = current["destination_kind"] == JIRA_DESTINATION
         additional_attempts = 1 if is_jira else policy["max_attempts"]
         job = self.store.retry(job_id, additional_attempts)
@@ -903,13 +803,9 @@ class AssuranceDeliveryService:
         self._validate_destination_url(destination_kind, url)
         if destination_kind in {SLACK_DESTINATION, JIRA_DESTINATION} and not policy["verify_tls"]:
             destination_name = (
-                "Jira Cloud"
-                if destination_kind == JIRA_DESTINATION
-                else "Slack Incoming Webhooks"
+                "Jira Cloud" if destination_kind == JIRA_DESTINATION else "Slack Incoming Webhooks"
             )
-            raise ValueError(
-                f"{destination_name} destinations require TLS certificate verification"
-            )
+            raise ValueError(f"{destination_name} destinations require TLS certificate verification")
         if destination_kind == JIRA_DESTINATION:
             self._validate_jira_policy(
                 policy,
@@ -930,9 +826,7 @@ class AssuranceDeliveryService:
             raise ValueError("Only an active review package can be delivered")
         if datetime.fromisoformat(package["expires_at"]) <= datetime.now(UTC):
             raise ValueError("The response package has expired")
-        if SEVERITY_RANK.get(package["severity"], 0) < SEVERITY_RANK.get(
-            policy["minimum_severity"], 0
-        ):
+        if SEVERITY_RANK.get(package["severity"], 0) < SEVERITY_RANK.get(policy["minimum_severity"], 0):
             raise ValueError(
                 f"Package severity is below the destination's {policy['minimum_severity']} threshold"
             )
@@ -1014,6 +908,9 @@ class AssuranceDeliveryService:
         )
         return {
             "package_id": package_id,
+            "connection_alias": package["connection_alias"],
+            "connection_fingerprint": package["connection_fingerprint"],
+            "tenant_scope_id": package["tenant_scope_id"],
             "payload": payload,
             "payload_sha256": payload_sha256,
             "payload_bytes": len(canonical.encode()),
@@ -1253,8 +1150,7 @@ class AssuranceDeliveryService:
         prefix = cls._one_line(policy.get("jira_summary_prefix") or "", 80)
         if redaction_level == "standard":
             summary_body = (
-                f"[{severity.upper()}] "
-                f"{cls._one_line(package.get('title') or 'Assurance response', 180)}"
+                f"[{severity.upper()}] {cls._one_line(package.get('title') or 'Assurance response', 180)}"
             )
         else:
             summary_body = (
@@ -1264,10 +1160,7 @@ class AssuranceDeliveryService:
         summary = cls._one_line(f"{prefix} {summary_body}".strip(), 255)
         correlation_label = f"signalroom-{correlation_id[:16]}"
         labels = list(dict.fromkeys([*policy.get("jira_labels", []), correlation_label]))
-        categories = ", ".join(
-            f"{kind} ({count})"
-            for kind, count in signal_summary["by_kind"].items()
-        )
+        categories = ", ".join(f"{kind} ({count})" for kind, count in signal_summary["by_kind"].items())
         description_content: list[dict[str, Any]] = [
             cls._adf_paragraph("SignalRoom assurance response"),
             cls._adf_paragraph(f"Severity: {severity.title()}"),
@@ -1280,9 +1173,7 @@ class AssuranceDeliveryService:
         if redaction_level == "standard":
             description_content.extend(
                 [
-                    cls._adf_paragraph(
-                        f"Summary: {cls._plain_text(package.get('summary') or '', 1000)}"
-                    ),
+                    cls._adf_paragraph(f"Summary: {cls._plain_text(package.get('summary') or '', 1000)}"),
                     cls._adf_bullet_list(
                         [
                             cls._one_line(
@@ -1299,9 +1190,7 @@ class AssuranceDeliveryService:
             )
         else:
             description_content.append(
-                cls._adf_paragraph(
-                    "Strict redaction withheld source-derived package and signal text."
-                )
+                cls._adf_paragraph("Strict redaction withheld source-derived package and signal text.")
             )
         description_content.append(
             cls._adf_paragraph(
@@ -1355,18 +1244,14 @@ class AssuranceDeliveryService:
         prefix = cls._one_line(policy.get("soar_name_prefix") or "", 80)
         if redaction_level == "standard":
             name_body = (
-                f"[{severity.upper()}] "
-                f"{cls._one_line(package.get('title') or 'Assurance response', 180)}"
+                f"[{severity.upper()}] {cls._one_line(package.get('title') or 'Assurance response', 180)}"
             )
         else:
             name_body = (
                 f"[{severity.upper()}] Assurance response "
                 f"({matched} matched signal{'s' if matched != 1 else ''})"
             )
-        categories = ", ".join(
-            f"{kind} ({count})"
-            for kind, count in signal_summary["by_kind"].items()
-        )
+        categories = ", ".join(f"{kind} ({count})" for kind, count in signal_summary["by_kind"].items())
         description_lines = [
             "SignalRoom assurance response",
             f"Severity: {severity.title()}",
@@ -1394,9 +1279,7 @@ class AssuranceDeliveryService:
                 ]
             )
         else:
-            description_lines.append(
-                "Strict redaction withheld source-derived package and signal text."
-            )
+            description_lines.append("Strict redaction withheld source-derived package and signal text.")
         description_lines.append(
             "Authority: create this container only, with automation disabled and no "
             "artifacts. SignalRoom did not approve or execute SPL and cannot update, "
@@ -1406,9 +1289,7 @@ class AssuranceDeliveryService:
             "name": cls._one_line(f"{prefix} {name_body}".strip(), 255),
             "label": policy["soar_label"],
             "description": "\n".join(description_lines)[:8000],
-            "severity": str(
-                policy.get("soar_severity_map", {}).get(severity) or "medium"
-            ),
+            "severity": str(policy.get("soar_severity_map", {}).get(severity) or "medium"),
             "sensitivity": policy["soar_sensitivity"],
             "status": policy["soar_status"],
             "container_type": policy["soar_container_type"],
@@ -1432,10 +1313,7 @@ class AssuranceDeliveryService:
     def _adf_bullet_list(cls, items: list[str]) -> dict[str, Any]:
         return {
             "type": "bulletList",
-            "content": [
-                {"type": "listItem", "content": [cls._adf_paragraph(item)]}
-                for item in items
-            ],
+            "content": [{"type": "listItem", "content": [cls._adf_paragraph(item)]} for item in items],
         }
 
     @staticmethod
@@ -1501,6 +1379,30 @@ class AssuranceDeliveryService:
                 summary="Delivery was cancelled because the source package is no longer active.",
             )
             return
+        package_binding = (
+            package.get("connection_alias"),
+            package.get("connection_fingerprint"),
+            package.get("tenant_scope_id"),
+        )
+        job_binding = (
+            job.get("connection_alias"),
+            job.get("connection_fingerprint"),
+            job.get("tenant_scope_id"),
+        )
+        if package_binding != job_binding:
+            self.store.fail_without_attempt(
+                job["id"],
+                "Source package tenant identity changed after payload approval.",
+            )
+            self.audit.record(
+                "delivery.attempt.blocked",
+                "send",
+                target_type="delivery-job",
+                target_id=job["id"],
+                outcome="blocked",
+                summary="Source package tenant identity did not match the approved delivery job.",
+            )
+            return
         if self._destination_fingerprint() != job["destination_fingerprint"]:
             self.store.fail_without_attempt(
                 job["id"],
@@ -1559,9 +1461,7 @@ class AssuranceDeliveryService:
         elif destination_kind == SOAR_DESTINATION:
             delivery_url = f"{url.rstrip('/')}/rest/container"
             headers["Accept"] = "application/json"
-            headers["ph-auth-token"] = self.config.secret(
-                "delivery_soar_auth_token"
-            )
+            headers["ph-auth-token"] = self.config.secret("delivery_soar_auth_token")
         started_at = datetime.now(UTC).isoformat()
         http_status: int | None = None
         error = ""
@@ -1575,9 +1475,7 @@ class AssuranceDeliveryService:
                 follow_redirects=False,
                 trust_env=False,
             ) as client:
-                response = await client.post(
-                    delivery_url, content=canonical_payload, headers=headers
-                )
+                response = await client.post(delivery_url, content=canonical_payload, headers=headers)
             http_status = int(response.status_code)
             if destination_kind == JIRA_DESTINATION and http_status == 201:
                 external_record, error = self._jira_external_record(response, url)
@@ -1594,10 +1492,7 @@ class AssuranceDeliveryService:
                             "Jira created an issue, but SignalRoom could not persist its "
                             "correlation. Inspect Jira before retrying."
                         )
-            elif (
-                destination_kind == SOAR_DESTINATION
-                and http_status in {200, 201, 400, 409}
-            ):
+            elif destination_kind == SOAR_DESTINATION and http_status in {200, 201, 400, 409}:
                 external_record, error = self._soar_external_record(response, url)
                 if external_record:
                     stored = self.store.record_external_record(
@@ -1617,9 +1512,7 @@ class AssuranceDeliveryService:
                 bool(external_record)
                 if destination_kind in {JIRA_DESTINATION, SOAR_DESTINATION}
                 else (
-                    http_status == 200
-                    if destination_kind == SLACK_DESTINATION
-                    else 200 <= http_status < 300
+                    http_status == 200 if destination_kind == SLACK_DESTINATION else 200 <= http_status < 300
                 )
             )
             if successful:
@@ -1630,8 +1523,7 @@ class AssuranceDeliveryService:
                     False
                     if destination_kind == JIRA_DESTINATION
                     else (
-                        http_status in {200, 201, 408, 425, 429}
-                        or http_status >= 500
+                        http_status in {200, 201, 408, 425, 429} or http_status >= 500
                         if destination_kind == SOAR_DESTINATION
                         else http_status in {408, 425, 429} or http_status >= 500
                     )
@@ -1689,12 +1581,8 @@ class AssuranceDeliveryService:
                 "payload_sha256": job["payload_sha256"],
                 "idempotency_key": job["idempotency_key"],
                 "destination_kind": destination_kind,
-                "external_record_id": (
-                    external_record["id"] if external_record else ""
-                ),
-                "external_record_key": (
-                    external_record["key"] if external_record else ""
-                ),
+                "external_record_id": (external_record["id"] if external_record else ""),
+                "external_record_key": (external_record["key"] if external_record else ""),
                 "next_attempt_at": updated["next_attempt_at"],
             },
             actor="delivery-worker",
@@ -1709,16 +1597,13 @@ class AssuranceDeliveryService:
         return f"Basic {encoded}"
 
     @staticmethod
-    def _jira_external_record(
-        response: Any, site_url: str
-    ) -> tuple[dict[str, str] | None, str]:
+    def _jira_external_record(response: Any, site_url: str) -> tuple[dict[str, str] | None, str]:
         try:
             value = response.json()
         except (TypeError, ValueError):
             return (
                 None,
-                "Jira returned HTTP 201 without a valid issue response. Inspect Jira "
-                "before retrying.",
+                "Jira returned HTTP 201 without a valid issue response. Inspect Jira before retrying.",
             )
         if not isinstance(value, dict):
             return (
@@ -1743,9 +1628,7 @@ class AssuranceDeliveryService:
         )
 
     @staticmethod
-    def _soar_external_record(
-        response: Any, site_url: str
-    ) -> tuple[dict[str, str] | None, str]:
+    def _soar_external_record(response: Any, site_url: str) -> tuple[dict[str, str] | None, str]:
         try:
             value = response.json()
         except (TypeError, ValueError):
@@ -1756,8 +1639,7 @@ class AssuranceDeliveryService:
         duplicate = (
             value.get("failed") is True
             and "duplicate" in str(value.get("message") or "").casefold()
-            and "source_data_identifier"
-            in str(value.get("message") or "").casefold()
+            and "source_data_identifier" in str(value.get("message") or "").casefold()
         )
         status = int(response.status_code)
         if success and status not in {200, 201}:
@@ -1771,17 +1653,12 @@ class AssuranceDeliveryService:
                 f"Splunk SOAR returned HTTP {status} with a contradictory duplicate body",
             )
         record_id = str(
-            value.get("id")
-            if success
-            else value.get("existing_container_id")
-            if duplicate
-            else ""
+            value.get("id") if success else value.get("existing_container_id") if duplicate else ""
         )
         if not record_id.isdigit() or int(record_id) < 1:
             return (
                 None,
-                "Splunk SOAR did not return a trustworthy created or duplicate "
-                "container ID",
+                "Splunk SOAR did not return a trustworthy created or duplicate container ID",
             )
         return (
             {
@@ -1801,12 +1678,7 @@ class AssuranceDeliveryService:
             if isinstance(item, str):
                 candidate = item
             elif isinstance(item, dict):
-                candidate = str(
-                    item.get("name")
-                    or item.get("value")
-                    or item.get("label")
-                    or ""
-                )
+                candidate = str(item.get("name") or item.get("value") or item.get("label") or "")
             elif isinstance(item, (list, tuple)) and item:
                 candidate = str(item[0] or "")
             else:
@@ -1857,17 +1729,11 @@ class AssuranceDeliveryService:
                 "Jira returned incomplete project, issue-type, or workflow identity",
             )
         status_category = (
-            fields["status"].get("statusCategory")
-            if isinstance(fields.get("status"), dict)
-            else None
+            fields["status"].get("statusCategory") if isinstance(fields.get("status"), dict) else None
         )
         if isinstance(status_category, dict):
-            status["category_key"] = cls._one_line(
-                status_category.get("key") or "", 120
-            )
-            status["category_name"] = cls._one_line(
-                status_category.get("name") or "", 120
-            )
+            status["category_key"] = cls._one_line(status_category.get("key") or "", 120)
+            status["category_name"] = cls._one_line(status_category.get("name") or "", 120)
         else:
             status["category_key"] = ""
             status["category_name"] = ""
@@ -1885,15 +1751,9 @@ class AssuranceDeliveryService:
         payload = job.get("payload")
         payload_fields = payload.get("fields") if isinstance(payload, dict) else None
         candidate_payload_labels = (
-            payload_fields.get("labels", [])
-            if isinstance(payload_fields, dict)
-            else []
+            payload_fields.get("labels", []) if isinstance(payload_fields, dict) else []
         )
-        payload_labels = (
-            candidate_payload_labels
-            if isinstance(candidate_payload_labels, list)
-            else []
-        )
+        payload_labels = candidate_payload_labels if isinstance(candidate_payload_labels, list) else []
         correlation_label = next(
             (
                 str(label)
@@ -1908,9 +1768,7 @@ class AssuranceDeliveryService:
             {
                 "issue_id": issue_id,
                 "issue_key": issue_key,
-                "browse_url": (
-                    f"{site_url.rstrip('/')}/browse/{quote(issue_key, safe='')}"
-                ),
+                "browse_url": (f"{site_url.rstrip('/')}/browse/{quote(issue_key, safe='')}"),
                 "project_key": str(project["key"]),
                 "issue_type": issue_type,
                 "status": status,
@@ -1993,9 +1851,7 @@ class AssuranceDeliveryService:
             "baseline": "compared" if previous_observed else "established",
             "previous_outcome": latest.get("outcome") if latest else None,
             "previous_observed_sha256": (
-                previous_observed.get("snapshot_sha256")
-                if previous_observed
-                else None
+                previous_observed.get("snapshot_sha256") if previous_observed else None
             ),
             "changes": changes,
         }
@@ -2010,10 +1866,7 @@ class AssuranceDeliveryService:
         if outcome == "observed":
             issue_key = snapshot.get("issue_key") or "correlated issue"
             if drift_count:
-                return (
-                    f"Observed Jira issue {issue_key} with {drift_count} material "
-                    "local drift change(s)."
-                )
+                return f"Observed Jira issue {issue_key} with {drift_count} material local drift change(s)."
             return f"Observed Jira issue {issue_key}; no material local drift was detected."
         if outcome == "not-found-or-not-visible":
             return (
@@ -2114,13 +1967,10 @@ class AssuranceDeliveryService:
         if not parsed.hostname:
             raise ValueError("The Splunk SOAR site URL must include a hostname")
         if parsed.username or parsed.password:
-            raise ValueError(
-                "Splunk SOAR credentials must not be embedded in the site URL"
-            )
+            raise ValueError("Splunk SOAR credentials must not be embedded in the site URL")
         if parsed.path not in {"", "/"} or parsed.params or parsed.query or parsed.fragment:
             raise ValueError(
-                "The Splunk SOAR destination must be a site origin without a path, "
-                "query, or fragment"
+                "The Splunk SOAR destination must be a site origin without a path, query, or fragment"
             )
 
     @staticmethod
@@ -2135,20 +1985,13 @@ class AssuranceDeliveryService:
         except ValueError as exc:
             raise ValueError("The Jira Cloud site URL contains an invalid port") from exc
         hostname = (parsed.hostname or "").lower()
-        if (
-            not hostname.endswith(".atlassian.net")
-            or hostname == "atlassian.net"
-            or port is not None
-        ):
-            raise ValueError(
-                "Use the Jira Cloud site URL for an atlassian.net tenant"
-            )
+        if not hostname.endswith(".atlassian.net") or hostname == "atlassian.net" or port is not None:
+            raise ValueError("Use the Jira Cloud site URL for an atlassian.net tenant")
         if parsed.username or parsed.password:
             raise ValueError("Jira credentials must not be embedded in the site URL")
         if parsed.path not in {"", "/"} or parsed.params or parsed.query or parsed.fragment:
             raise ValueError(
-                "The Jira Cloud destination must be a site origin without a path, "
-                "query, or fragment"
+                "The Jira Cloud destination must be a site origin without a path, query, or fragment"
             )
 
     @classmethod
@@ -2161,9 +2004,7 @@ class AssuranceDeliveryService:
         require_credentials: bool,
     ) -> None:
         read = (
-            value.get
-            if isinstance(value, dict)
-            else lambda name, default=None: getattr(value, name, default)
+            value.get if isinstance(value, dict) else lambda name, default=None: getattr(value, name, default)
         )
         project_key = str(read("jira_project_key", "") or "")
         issue_type = str(read("jira_issue_type", "") or "")
@@ -2171,27 +2012,17 @@ class AssuranceDeliveryService:
         labels = list(read("jira_labels", []) or [])
         priority_map = dict(read("jira_priority_map", {}) or {})
         if not JIRA_PROJECT_PATTERN.fullmatch(project_key):
-            raise ValueError(
-                "The Jira project key must be 2-32 uppercase letters, numbers, or underscores"
-            )
-        if (
-            not issue_type.strip()
-            or issue_type != issue_type.strip()
-            or cls._contains_control(issue_type)
-        ):
+            raise ValueError("The Jira project key must be 2-32 uppercase letters, numbers, or underscores")
+        if not issue_type.strip() or issue_type != issue_type.strip() or cls._contains_control(issue_type):
             raise ValueError("The Jira issue type must be a single printable value")
         if summary_prefix != summary_prefix.strip() or cls._contains_control(summary_prefix):
             raise ValueError("The Jira summary prefix must be a single printable value")
         if len(labels) != len(set(labels)):
             raise ValueError("Jira labels must be unique")
         if any(not JIRA_LABEL_PATTERN.fullmatch(str(label)) for label in labels):
-            raise ValueError(
-                "Jira labels may contain only letters, numbers, underscores, and hyphens"
-            )
+            raise ValueError("Jira labels may contain only letters, numbers, underscores, and hyphens")
         if set(priority_map) != DELIVERY_SEVERITIES:
-            raise ValueError(
-                "The Jira priority map must define critical, high, medium, and low"
-            )
+            raise ValueError("The Jira priority map must define critical, high, medium, and low")
         if any(
             len(str(priority)) > 120
             or str(priority) != str(priority).strip()
@@ -2209,8 +2040,7 @@ class AssuranceDeliveryService:
         ):
             raise ValueError("Enter the Atlassian account email used by the API token")
         if api_token and (
-            any(character.isspace() for character in api_token)
-            or cls._contains_control(api_token)
+            any(character.isspace() for character in api_token) or cls._contains_control(api_token)
         ):
             raise ValueError("The Jira API token must be a printable value without whitespace")
         if require_credentials and (not email or not api_token):
@@ -2228,9 +2058,7 @@ class AssuranceDeliveryService:
         require_credentials: bool,
     ) -> None:
         read = (
-            value.get
-            if isinstance(value, dict)
-            else lambda name, default=None: getattr(value, name, default)
+            value.get if isinstance(value, dict) else lambda name, default=None: getattr(value, name, default)
         )
         label = str(read("soar_label", "") or "")
         status = str(read("soar_status", "") or "")
@@ -2244,43 +2072,20 @@ class AssuranceDeliveryService:
             ("label", label),
             ("status", status),
         ):
-            if (
-                not item
-                or item != item.strip()
-                or cls._contains_control(item)
-            ):
-                raise ValueError(
-                    f"The Splunk SOAR {name} must be a single printable value"
-                )
-        if (
-            name_prefix != name_prefix.strip()
-            or cls._contains_control(name_prefix)
-        ):
-            raise ValueError(
-                "The Splunk SOAR name prefix must be a single printable value"
-            )
+            if not item or item != item.strip() or cls._contains_control(item):
+                raise ValueError(f"The Splunk SOAR {name} must be a single printable value")
+        if name_prefix != name_prefix.strip() or cls._contains_control(name_prefix):
+            raise ValueError("The Splunk SOAR name prefix must be a single printable value")
         if container_type not in {"default", "case"}:
-            raise ValueError(
-                "The Splunk SOAR container type must be default or case"
-            )
+            raise ValueError("The Splunk SOAR container type must be default or case")
         if sensitivity not in {"red", "amber", "green", "white"}:
-            raise ValueError(
-                "The Splunk SOAR sensitivity must be red, amber, green, or white"
-            )
+            raise ValueError("The Splunk SOAR sensitivity must be red, amber, green, or white")
         if len(tags) != len(set(tags)):
             raise ValueError("Splunk SOAR tags must be unique")
-        if any(
-            not SOAR_TAG_PATTERN.fullmatch(str(tag))
-            or str(tag) != str(tag).strip()
-            for tag in tags
-        ):
-            raise ValueError(
-                "Splunk SOAR tags must be printable values up to 80 characters"
-            )
+        if any(not SOAR_TAG_PATTERN.fullmatch(str(tag)) or str(tag) != str(tag).strip() for tag in tags):
+            raise ValueError("Splunk SOAR tags must be printable values up to 80 characters")
         if set(severity_map) != DELIVERY_SEVERITIES:
-            raise ValueError(
-                "The Splunk SOAR severity map must define critical, high, medium, and low"
-            )
+            raise ValueError("The Splunk SOAR severity map must define critical, high, medium, and low")
         if any(
             not str(severity)
             or len(str(severity)) > 120
@@ -2288,26 +2093,15 @@ class AssuranceDeliveryService:
             or cls._contains_control(str(severity))
             for severity in severity_map.values()
         ):
-            raise ValueError(
-                "Splunk SOAR severity values must be printable values"
-            )
-        if tenant_id and (
-            tenant_id != tenant_id.strip() or cls._contains_control(tenant_id)
-        ):
-            raise ValueError(
-                "The Splunk SOAR tenant ID must be a single printable value"
-            )
+            raise ValueError("Splunk SOAR severity values must be printable values")
+        if tenant_id and (tenant_id != tenant_id.strip() or cls._contains_control(tenant_id)):
+            raise ValueError("The Splunk SOAR tenant ID must be a single printable value")
         if auth_token and (
-            any(character.isspace() for character in auth_token)
-            or cls._contains_control(auth_token)
+            any(character.isspace() for character in auth_token) or cls._contains_control(auth_token)
         ):
-            raise ValueError(
-                "The Splunk SOAR auth token must be a printable value without whitespace"
-            )
+            raise ValueError("The Splunk SOAR auth token must be a printable value without whitespace")
         if require_credentials and not auth_token:
-            raise ValueError(
-                "A Splunk SOAR auth token is required before SOAR delivery can be enabled"
-            )
+            raise ValueError("A Splunk SOAR auth token is required before SOAR delivery can be enabled")
 
     @staticmethod
     def _contains_control(value: str) -> bool:

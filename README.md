@@ -140,7 +140,8 @@ Continuous assurance runs this same preflight and records `connection-blocked` w
 the selected discovery depth is not ready.
 
 Connection identity is evaluated before transport preflight. Manual discovery jobs, continuous
-assurance policy/runs, direct forecasts, and scheduled shadow forecasts retain the exact selected
+assurance policy/runs and response packages, direct forecast experiments, scheduled shadow forecasts,
+validation/detection work, and approved delivery jobs retain the exact selected
 alias, revision, and tenant scope. Assurance and forecast forms expose an explicit target instead of
 inferring it from the global browser selector. Endpoint, TLS-trust, scope, or credential changes never
 silently preserve secondary admission; administrators must diagnose and enable the replacement
@@ -278,7 +279,7 @@ a bounded review to a case.
 
 Completed and data-quality-blocked runs are also retained in `data/time_series_experiments.db` as immutable local
 experiments. The registry stores the exact run contract, aggregate series statistics, backtest and forecast
-output, model identity, and fingerprints—not raw Splunk result rows. A logical series key binds the
+output, model identity, fingerprints, and indexed tenant ownership—not raw Splunk result rows. A logical series key binds the
 Splunk alias, immutable connection revision, and tenant scope while normalizing the `timechart` span,
 so analysts can compare windows and bucket sizes without mixing estates. Accepting a general or matching-weekday
 baseline requires the exact promotion-eligible run fingerprint and a review note. Later runs prefer their
@@ -603,7 +604,8 @@ coverage, MLTK, high-severity finding, collection-failure, dependency, and budge
 local notices. Deterministic signals are correlated across runs as transient, repeated, severity-elevated, or
 resolved. Repeated medium/low signals and first-seen high/critical signals create deduplicated response packages.
 Each package can pivot into Investigate, a case, or the validation queue. Continuous assurance never approves or
-executes proposed validation SPL automatically.
+executes proposed validation SPL automatically. Correlated signals and packages retain direct indexed ownership
+copied from the exact assurance run rather than relying on fingerprint prefixes or a later parent lookup.
 
 Outbound response-package delivery is independently disabled by default. Operators can select a generic JSON
 webhook (with loopback HTTP permitted only for local testing), a Slack Incoming Webhook, a Jira Cloud
@@ -613,6 +615,8 @@ titles, and subjects. Neither level includes raw events, SPL, validation identif
 run identifiers, Splunk credentials, or endpoint configuration. Manual mode binds approval to the exact payload
 SHA-256 and destination identity. Automatic mode must be separately enabled and applies severity/category policy
 before creating a locally deduplicated delivery job.
+The delivery job copies that package's immutable Splunk alias, revision, and tenant scope at approval, and the
+worker rechecks the package-to-job identity before spending an outbound request.
 
 The Slack adapter accepts only complete `hooks.slack.com` or `hooks.slack-gov.com` URLs, requires verified TLS, emits
 only `plain_text` Block Kit objects, and never sends the generic authorization header. Slack controls the destination

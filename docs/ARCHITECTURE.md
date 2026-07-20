@@ -429,8 +429,8 @@ there is deliberately no remote recovery route.
 
 ## Next production increments
 
-1. Add durable direct tenant ownership to forecast-experiment, delivery, and assurance-response roots, then expand
-   generation routing to those stores plus the now directly scoped validation and detection roots
+1. Expand digest-verified generation routing to validation, detection, forecast-experiment,
+   assurance-response, and delivery roots; keep singleton assurance/delivery policy in the global control plane
 2. Add tenant filesystem routing plus verified reverse migration and shared-source purge/finalization
 3. Add OIDC group-to-alias assignment policy and encrypted credential backup/restore controls
 4. Add time-aligned durable multi-estate review packets without cross-tenant fact copying
@@ -452,6 +452,12 @@ an MCP client, and preserved evidence/case entries inherit the same scope. Detec
 binding from their completed validation; versioning, gates, runtime validation drafts, repository handoffs, and
 API mutations first resolve through the detection tenant. Both roots now expose deterministic parent-copy
 contracts, although generation routing for them is not active yet.
+
+Forecast experiments now promote the retained source binding from result JSON into indexed root columns; baseline
+and alert-candidate relationships inherit that run boundary. Assurance signals and response packages copy the exact
+assurance-run binding into direct columns, while delivery jobs copy the package binding at approval and compare it
+again before an outbound request. These roots are copy-contract-ready, but runtime generation routing remains the
+next increment because singleton assurance and delivery policy must remain global control-plane state.
 
 `TenantDataPlaneRegistry` is the runtime authority for the three currently routed stores. A generation copy holds the
 process-wide store-operation lock, refuses active manual discovery, streams rows selected through the tenant root,

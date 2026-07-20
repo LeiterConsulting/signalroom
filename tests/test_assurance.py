@@ -334,22 +334,18 @@ def test_assurance_correlates_transient_persistent_and_resolved_signals(tmp_path
         "source_ref": "",
     }
 
-    first = store.correlate_signals(
-        "run-1", [signal], authoritative=True, authoritative_kinds={"inventory"}
-    )[0]
+    first = store.correlate_signals("run-1", [signal], authoritative=True, authoritative_kinds={"inventory"})[
+        0
+    ]
     second = store.correlate_signals(
         "run-2", [signal], authoritative=True, authoritative_kinds={"inventory"}
     )[0]
     duplicate = store.correlate_signals(
         "run-2", [signal], authoritative=True, authoritative_kinds={"inventory"}
     )[0]
-    store.correlate_signals(
-        "run-partial", [], authoritative=False, authoritative_kinds={"inventory"}
-    )
+    store.correlate_signals("run-partial", [], authoritative=False, authoritative_kinds={"inventory"})
     unresolved = store.get_signal(signal["fingerprint"])
-    store.correlate_signals(
-        "run-3", [], authoritative=True, authoritative_kinds={"inventory"}
-    )
+    store.correlate_signals("run-3", [], authoritative=True, authoritative_kinds={"inventory"})
     resolved = store.get_signal(signal["fingerprint"])
 
     assert first["status"] == "watching"
@@ -393,10 +389,62 @@ def test_assurance_recurrence_and_resolution_are_isolated_by_connection_scope(tm
     )
 
     assert east["fingerprint"] != west["fingerprint"]
+    assert east["connection_alias"] == "soc-east"
+    assert east["connection_fingerprint"] == "a" * 64
+    assert east["tenant_scope_id"] == "tenant-east"
+    assert west["tenant_scope_id"] == "tenant-west"
+    assert [item["fingerprint"] for item in store.signals(tenant_scope_id="tenant-east")] == [
+        east["fingerprint"]
+    ]
+    assert [item["fingerprint"] for item in store.signals(tenant_scope_id="tenant-west")] == [
+        west["fingerprint"]
+    ]
     assert east["status"] == "watching"
     assert west["status"] == "watching"
     assert store.get_signal(east["fingerprint"])["status"] == "resolved"
     assert store.get_signal(west["fingerprint"])["status"] == "watching"
+
+
+def test_assurance_response_package_inherits_exact_run_scope(tmp_path):
+    store = AssuranceStore(tmp_path / "assurance.db")
+    binding = {
+        "alias": "soc-east",
+        "fingerprint": "a" * 64,
+        "tenant_scope_id": "tenant-east",
+    }
+    store.bind_unbound(binding)
+    run = store.create_run("manual", "quick", 8)
+    signal = store.correlate_signals(
+        run.id,
+        [
+            {
+                "fingerprint": "scoped-package-signal",
+                "kind": "coverage",
+                "severity": "high",
+                "title": "Scoped response signal",
+                "detail": "Direct ownership must follow the source run.",
+                "subject": "identity",
+                "source_ref": "D1",
+            }
+        ],
+        authoritative=True,
+        scope_key=f"soc-east|{'a' * 64}|tenant-east",
+    )[0]
+    package = store.create_package(
+        run.id,
+        "high",
+        "Scoped assurance package",
+        "Exact run ownership",
+        [signal["fingerprint"]],
+        (datetime.now(UTC) + timedelta(days=1)).isoformat(),
+    )
+
+    assert package["connection_alias"] == "soc-east"
+    assert package["connection_fingerprint"] == "a" * 64
+    assert package["tenant_scope_id"] == "tenant-east"
+    assert store.get_package(package["id"], "tenant-east") is not None
+    assert store.get_package(package["id"], "tenant-west") is None
+    assert [item["id"] for item in store.packages(tenant_scope_id="tenant-east")] == [package["id"]]
 
 
 def test_partial_observations_do_not_accumulate_recurrence(tmp_path):
@@ -519,9 +567,7 @@ def test_response_service_names_failed_collection_paths():
 def test_assurance_response_package_lifecycle_is_durable(tmp_path):
     store = AssuranceStore(tmp_path / "assurance.db")
     future = (datetime.now(UTC) + timedelta(days=1)).isoformat()
-    package = store.create_package(
-        "run-1", "medium", "Review drift", "Needs analyst review.", [], future
-    )
+    package = store.create_package("run-1", "medium", "Review drift", "Needs analyst review.", [], future)
     closed = store.close_package(package["id"])
     expired = store.create_package(
         "run-2",

@@ -77,10 +77,13 @@ evidence, cases, jobs, and immutable provenance.
 
 ## Durable workflow behavior
 
-Discovery jobs, continuous-assurance runs, the assurance policy, shadow-forecast schedules, their queued
-attempts, validation tasks, and detection projects copy the exact connection fingerprint and tenant scope at
+Discovery jobs, continuous-assurance runs, the assurance policy, assurance signals and response packages,
+shadow-forecast schedules and their queued attempts, direct forecast experiments, validation tasks,
+detection projects, and approved delivery jobs copy the exact connection fingerprint and tenant scope at
 creation. A validation executes through the client for its retained identity—not whichever alias revision is
 currently selected—and detection work inherits that binding from the completed validation that anchors it.
+Delivery also verifies that its retained identity still matches the source response package before an outbound
+attempt; this binding does not add Splunk write authority.
 
 If an administrator changes the endpoint, TLS trust, mode, or scope:
 
@@ -118,7 +121,8 @@ Continuous assurance and scheduled shadow forecasting now expose an explicit adm
 own policy forms rather than inferring one from the browser's active scope. Their workers recheck the
 owner's alias assignment and exact immutable revision before every run, construct the alias-specific
 Splunk client only after that check, and retain alias/scope provenance in run history. Direct forecast
-experiments and comparison baselines are also partitioned by alias, revision, and tenant scope.
+experiments and comparison baselines are also partitioned through indexed alias, revision, and tenant
+ownership. Assurance-response and delivery histories use the same direct ownership contract.
 Changing a durable target requires exact prior fingerprint and `updated_at` concurrency values and
 pauses the cadence for review.
 

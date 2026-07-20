@@ -59,9 +59,7 @@ class AssuranceService:
         on_complete: Callable[[str, dict[str, Any]], Awaitable[None] | None] | None = None,
         run_lock: asyncio.Lock | None = None,
         preflight: Callable[..., Awaitable[dict[str, Any]]] | None = None,
-        validate_connection_binding: (
-            Callable[[str, str, str], tuple[bool, str]] | None
-        ) = None,
+        validate_connection_binding: (Callable[[str, str, str], tuple[bool, str]] | None) = None,
         poll_seconds: float = 2.0,
     ):
         self.store = store
@@ -126,9 +124,7 @@ class AssuranceService:
             raise ValueError(
                 f"The daily assurance limit of {policy['max_runs_per_day']} run(s) has been reached"
             )
-        run = self.store.create_run(
-            trigger, selected_depth, policy["max_splunk_calls_per_run"]
-        )
+        run = self.store.create_run(trigger, selected_depth, policy["max_splunk_calls_per_run"])
         self._wake.set()
         return run
 
@@ -145,8 +141,7 @@ class AssuranceService:
         policy = self.store.policy()
         active = self.store.active_run()
         scope_key = (
-            f"{policy['connection_alias']}|{policy['connection_fingerprint']}|"
-            f"{policy['tenant_scope_id']}"
+            f"{policy['connection_alias']}|{policy['connection_fingerprint']}|{policy['tenant_scope_id']}"
         )
         runs = [
             item
@@ -158,10 +153,9 @@ class AssuranceService:
         run_ids = {item.id for item in runs}
         packages = [
             item
-            for item in self.store.packages()
+            for item in self.store.packages(tenant_scope_id=policy["tenant_scope_id"])
             if item["connection_alias"] == policy["connection_alias"]
             and item["connection_fingerprint"] == policy["connection_fingerprint"]
-            and item["tenant_scope_id"] == policy["tenant_scope_id"]
         ]
         return {
             "policy": policy,
@@ -171,12 +165,12 @@ class AssuranceService:
             "active_events": self.store.events(active.id) if active else [],
             "runs": [item.model_dump(mode="json") for item in runs],
             "notifications": [
-                item
-                for item in self.store.notifications()
-                if not item["run_id"] or item["run_id"] in run_ids
+                item for item in self.store.notifications() if not item["run_id"] or item["run_id"] in run_ids
             ],
-            "signals": self.store.signals(scope_key=scope_key),
-            "signal_counts": self.store.signal_counts(scope_key=scope_key),
+            "signals": self.store.signals(scope_key=scope_key, tenant_scope_id=policy["tenant_scope_id"]),
+            "signal_counts": self.store.signal_counts(
+                scope_key=scope_key, tenant_scope_id=policy["tenant_scope_id"]
+            ),
             "response_packages": packages,
             "worker": {
                 "online": bool(self._worker and not self._worker.done()),
@@ -321,16 +315,11 @@ class AssuranceService:
                 if not readiness.get("depth_readiness", {}).get(running.depth, False):
                     blocking_stage = str(readiness.get("blocking_stage") or "tool-contract")
                     stage = next(
-                        (
-                            item
-                            for item in readiness.get("stages", [])
-                            if item.get("id") == blocking_stage
-                        ),
+                        (item for item in readiness.get("stages", []) if item.get("id") == blocking_stage),
                         {},
                     )
                     detail = str(
-                        stage.get("detail")
-                        or f"The endpoint is not ready for {running.depth} discovery."
+                        stage.get("detail") or f"The endpoint is not ready for {running.depth} discovery."
                     )
                     summary = {
                         "discovery_run_id": "",
@@ -439,9 +428,7 @@ class AssuranceService:
         )
         coverage_drift = len(changes.get("coverage", {}))
         findings = result.get("findings", [])
-        high_findings = sum(
-            1 for item in findings if item.get("severity") in {"critical", "high"}
-        )
+        high_findings = sum(1 for item in findings if item.get("severity") in {"critical", "high"})
         mltk = result.get("splunk_models", {}).get("summary", {})
         collection_failures = int(result.get("collection_status", {}).get("failed_calls", 0))
         return {

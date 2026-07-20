@@ -16,9 +16,7 @@ def _now() -> str:
 
 
 def _digest(value: Any) -> str:
-    payload = json.dumps(
-        value, sort_keys=True, separators=(",", ":"), default=str
-    ).encode()
+    payload = json.dumps(value, sort_keys=True, separators=(",", ":"), default=str).encode()
     return hashlib.sha256(payload).hexdigest()
 
 
@@ -97,6 +95,21 @@ TENANT_COMPONENTS = (
         2,
     ),
     TenantDataComponent(
+        "assurance-responses",
+        "Assurance signals and response packages",
+        "sqlite",
+        "assurance.db",
+        "assurance_packages",
+        "tenant_scope_id",
+        ("assurance_signals",),
+        readiness="copy-contract-ready",
+        detail=(
+            "Response packages retain the exact assurance-run tenant identity; correlated signals "
+            "carry the same indexed ownership and package membership relationship."
+        ),
+        sequence=3,
+    ),
+    TenantDataComponent(
         "shadow-forecasting",
         "Shadow forecast schedules",
         "sqlite",
@@ -155,11 +168,12 @@ TENANT_COMPONENTS = (
         "sqlite",
         "time_series_experiments.db",
         "time_series_runs",
+        "tenant_scope_id",
         dependent_tables=("time_series_alert_candidates", "time_series_baselines"),
-        readiness="scope-key-required",
+        readiness="copy-contract-ready",
         detail=(
-            "The tenant binding is inside retained result JSON; migration needs a durable indexed "
-            "column before rows can be copied safely."
+            "Forecast runs retain the immutable Splunk alias, revision, and indexed tenant key; "
+            "baselines and alert candidates inherit ownership from the exact run."
         ),
         sequence=3,
     ),
@@ -169,11 +183,12 @@ TENANT_COMPONENTS = (
         "sqlite",
         "delivery.db",
         "delivery_jobs",
+        "tenant_scope_id",
         dependent_tables=("delivery_attempts", "delivery_reconciliations"),
-        readiness="scope-key-required",
+        readiness="copy-contract-ready",
         detail=(
-            "Delivery jobs inherit scope from assurance packages but do not retain an independent "
-            "tenant key. Destination policy remains a global control-plane decision."
+            "Delivery jobs copy the source package tenant identity at approval and recheck it before "
+            "delivery. Destination policy remains a global control-plane decision."
         ),
         sequence=3,
     ),
@@ -268,10 +283,7 @@ class TenantIsolationStore:
                 ORDER BY created_at DESC LIMIT ?""",
                 (max(1, min(limit, 100)),),
             ).fetchall()
-        return [
-            {**json.loads(str(row["plan_json"])), "created_by": row["created_by"]}
-            for row in rows
-        ]
+        return [{**json.loads(str(row["plan_json"])), "created_by": row["created_by"]} for row in rows]
 
 
 class TenantIsolationPlanner:
@@ -357,9 +369,7 @@ class TenantIsolationPlanner:
             ),
         }
 
-    def _inspect(
-        self, component: TenantDataComponent, scope: dict[str, str]
-    ) -> dict[str, Any]:
+    def _inspect(self, component: TenantDataComponent, scope: dict[str, str]) -> dict[str, Any]:
         base = {
             "id": component.id,
             "label": component.label,
@@ -396,22 +406,16 @@ class TenantIsolationPlanner:
         try:
             tables = {
                 str(row["name"])
-                for row in connection.execute(
-                    "SELECT name FROM sqlite_master WHERE type='table'"
-                ).fetchall()
+                for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
             }
             if component.root_table not in tables:
                 return {"source_exists": True, "schema_observed": False}
             total = int(
-                connection.execute(
-                    f'SELECT COUNT(*) count FROM "{component.root_table}"'
-                ).fetchone()["count"]
+                connection.execute(f'SELECT COUNT(*) count FROM "{component.root_table}"').fetchone()["count"]
             )
             columns = {
                 str(row["name"])
-                for row in connection.execute(
-                    f'PRAGMA table_info("{component.root_table}")'
-                ).fetchall()
+                for row in connection.execute(f'PRAGMA table_info("{component.root_table}")').fetchall()
             }
             if not component.scope_column or component.scope_column not in columns:
                 result: dict[str, Any] = {
@@ -424,23 +428,22 @@ class TenantIsolationPlanner:
                         {
                             "readiness": "scope-key-required",
                             "detail": (
-                                f'The observed {component.root_table} schema does not contain '
-                                f'the required {component.scope_column} ownership column.'
+                                f"The observed {component.root_table} schema does not contain "
+                                f"the required {component.scope_column} ownership column."
                             ),
                         }
                     )
                 return result
             scope_count = int(
                 connection.execute(
-                    f'SELECT COUNT(*) count FROM "{component.root_table}" '
-                    f'WHERE "{component.scope_column}"=?',
+                    f'SELECT COUNT(*) count FROM "{component.root_table}" WHERE "{component.scope_column}"=?',
                     (tenant_scope_id,),
                 ).fetchone()["count"]
             )
             unbound = int(
                 connection.execute(
                     f'SELECT COUNT(*) count FROM "{component.root_table}" '
-                    f'WHERE COALESCE("{component.scope_column}",\'\')=\'\''
+                    f"WHERE COALESCE(\"{component.scope_column}\",'')=''"
                 ).fetchone()["count"]
             )
             return {

@@ -91,7 +91,10 @@ class DeliveryStore:
                     external_record_key TEXT NOT NULL DEFAULT '',
                     external_record_url TEXT NOT NULL DEFAULT '',
                     external_record_created_at TEXT,
-                    updated_at TEXT NOT NULL
+                    updated_at TEXT NOT NULL,
+                    connection_alias TEXT NOT NULL DEFAULT 'primary',
+                    connection_fingerprint TEXT NOT NULL DEFAULT '',
+                    tenant_scope_id TEXT NOT NULL DEFAULT ''
                 );
                 CREATE INDEX IF NOT EXISTS idx_delivery_jobs_state
                     ON delivery_jobs(status, next_attempt_at, created_at);
@@ -127,17 +130,14 @@ class DeliveryStore:
                 """
             )
             policy_columns = {
-                str(row["name"])
-                for row in db.execute("PRAGMA table_info(delivery_policy)").fetchall()
+                str(row["name"]) for row in db.execute("PRAGMA table_info(delivery_policy)").fetchall()
             }
             policy_migrations = {
                 "destination_kind": "TEXT NOT NULL DEFAULT 'generic-webhook'",
                 "jira_project_key": "TEXT NOT NULL DEFAULT ''",
                 "jira_issue_type": "TEXT NOT NULL DEFAULT 'Task'",
                 "jira_summary_prefix": "TEXT NOT NULL DEFAULT '[SignalRoom]'",
-                "jira_labels": (
-                    """TEXT NOT NULL DEFAULT '["signalroom","security-assurance"]'"""
-                ),
+                "jira_labels": ("""TEXT NOT NULL DEFAULT '["signalroom","security-assurance"]'"""),
                 "jira_priority_map": (
                     "TEXT NOT NULL DEFAULT "
                     """'{"critical":"Highest","high":"High","medium":"Medium","low":"Low"}'"""
@@ -147,9 +147,7 @@ class DeliveryStore:
                 "soar_status": "TEXT NOT NULL DEFAULT 'new'",
                 "soar_name_prefix": "TEXT NOT NULL DEFAULT '[SignalRoom]'",
                 "soar_sensitivity": "TEXT NOT NULL DEFAULT 'amber'",
-                "soar_tags": (
-                    """TEXT NOT NULL DEFAULT '["signalroom","security-assurance"]'"""
-                ),
+                "soar_tags": ("""TEXT NOT NULL DEFAULT '["signalroom","security-assurance"]'"""),
                 "soar_severity_map": (
                     "TEXT NOT NULL DEFAULT "
                     """'{"critical":"high","high":"high","medium":"medium","low":"low"}'"""
@@ -158,12 +156,9 @@ class DeliveryStore:
             }
             for column, definition in policy_migrations.items():
                 if column not in policy_columns:
-                    db.execute(
-                        f"ALTER TABLE delivery_policy ADD COLUMN {column} {definition}"
-                    )
+                    db.execute(f"ALTER TABLE delivery_policy ADD COLUMN {column} {definition}")
             job_columns = {
-                str(row["name"])
-                for row in db.execute("PRAGMA table_info(delivery_jobs)").fetchall()
+                str(row["name"]) for row in db.execute("PRAGMA table_info(delivery_jobs)").fetchall()
             }
             job_migrations = {
                 "destination_kind": "TEXT NOT NULL DEFAULT 'generic-webhook'",
@@ -171,12 +166,17 @@ class DeliveryStore:
                 "external_record_key": "TEXT NOT NULL DEFAULT ''",
                 "external_record_url": "TEXT NOT NULL DEFAULT ''",
                 "external_record_created_at": "TEXT",
+                "connection_alias": "TEXT NOT NULL DEFAULT 'primary'",
+                "connection_fingerprint": "TEXT NOT NULL DEFAULT ''",
+                "tenant_scope_id": "TEXT NOT NULL DEFAULT ''",
             }
             for column, definition in job_migrations.items():
                 if column not in job_columns:
-                    db.execute(
-                        f"ALTER TABLE delivery_jobs ADD COLUMN {column} {definition}"
-                    )
+                    db.execute(f"ALTER TABLE delivery_jobs ADD COLUMN {column} {definition}")
+            db.execute(
+                """CREATE INDEX IF NOT EXISTS idx_delivery_jobs_tenant_state
+                ON delivery_jobs(tenant_scope_id,status,created_at DESC)"""
+            )
             db.execute(
                 """INSERT OR IGNORE INTO delivery_policy
                 (id,enabled,mode,destination_kind,minimum_severity,signal_kinds,redaction_level,
@@ -186,6 +186,39 @@ class DeliveryStore:
                 'Primary webhook',1,'',3,60,?)""",
                 (json.dumps(DEFAULT_SIGNAL_KINDS), now),
             )
+
+    def bind_unbound(
+        self,
+        binding: dict[str, Any],
+        package_resolver: Any | None = None,
+    ) -> int:
+        """Backfill jobs from their exact response package, with a primary fallback."""
+        fallback = {
+            "connection_alias": str(binding.get("alias") or "primary"),
+            "connection_fingerprint": str(binding.get("fingerprint") or ""),
+            "tenant_scope_id": str(binding.get("tenant_scope_id") or "workspace-primary"),
+        }
+        changed = 0
+        with self._lock, self.connect() as db:
+            rows = db.execute(
+                """SELECT id,package_id FROM delivery_jobs
+                WHERE connection_fingerprint='' OR tenant_scope_id=''"""
+            ).fetchall()
+            for row in rows:
+                package = package_resolver(str(row["package_id"])) if package_resolver else None
+                source = package or fallback
+                changed += db.execute(
+                    """UPDATE delivery_jobs SET connection_alias=?,
+                    connection_fingerprint=?,tenant_scope_id=?
+                    WHERE id=? AND (connection_fingerprint='' OR tenant_scope_id='')""",
+                    (
+                        str(source.get("connection_alias") or fallback["connection_alias"]),
+                        str(source.get("connection_fingerprint") or fallback["connection_fingerprint"]),
+                        str(source.get("tenant_scope_id") or fallback["tenant_scope_id"]),
+                        row["id"],
+                    ),
+                ).rowcount
+        return int(changed)
 
     def policy(self) -> dict[str, Any]:
         with self.connect() as db:
@@ -246,7 +279,9 @@ class DeliveryStore:
         payload_sha256: str,
         idempotency_key: str,
         max_attempts: int,
+        binding: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        binding = binding or {}
         with self._lock, self.connect() as db:
             existing = db.execute(
                 "SELECT * FROM delivery_jobs WHERE idempotency_key=?",
@@ -266,8 +301,9 @@ class DeliveryStore:
                     (id,package_id,status,approval_mode,destination_kind,destination_label,
                     destination_fingerprint,
                     payload,payload_sha256,idempotency_key,attempt_count,max_attempts,next_attempt_at,
-                    last_error,http_status,created_at,approved_at,delivered_at,updated_at)
-                    VALUES (?,?,'queued',?,?,?,?,?,?,?,0,?,?,'',NULL,?,?,NULL,?)""",
+                    last_error,http_status,created_at,approved_at,delivered_at,updated_at,
+                    connection_alias,connection_fingerprint,tenant_scope_id)
+                    VALUES (?,?,'queued',?,?,?,?,?,?,?,0,?,?,'',NULL,?,?,NULL,?,?,?,?)""",
                     (
                         job_id,
                         package_id,
@@ -275,9 +311,7 @@ class DeliveryStore:
                         destination_kind,
                         destination_label,
                         destination_fingerprint,
-                        json.dumps(
-                            payload, sort_keys=True, separators=(",", ":"), default=str
-                        ),
+                        json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str),
                         payload_sha256,
                         idempotency_key,
                         max_attempts,
@@ -285,25 +319,42 @@ class DeliveryStore:
                         now,
                         now,
                         now,
+                        str(binding.get("connection_alias") or "primary"),
+                        str(binding.get("connection_fingerprint") or ""),
+                        str(binding.get("tenant_scope_id") or "workspace-primary"),
                     ),
                 )
         result = self.get(job_id)
         assert result is not None
         return result
 
-    def get(self, job_id: str) -> dict[str, Any] | None:
+    def get(self, job_id: str, tenant_scope_id: str = "") -> dict[str, Any] | None:
         with self.connect() as db:
-            row = db.execute("SELECT * FROM delivery_jobs WHERE id=?", (job_id,)).fetchone()
+            if tenant_scope_id:
+                row = db.execute(
+                    "SELECT * FROM delivery_jobs WHERE id=? AND tenant_scope_id=?",
+                    (job_id, tenant_scope_id),
+                ).fetchone()
+            else:
+                row = db.execute("SELECT * FROM delivery_jobs WHERE id=?", (job_id,)).fetchone()
         return self._job_with_attempts(row) if row else None
 
-    def jobs(self, limit: int = 30) -> list[dict[str, Any]]:
+    def jobs(self, limit: int = 30, *, tenant_scope_id: str = "") -> list[dict[str, Any]]:
         with self.connect() as db:
-            rows = db.execute(
-                """SELECT * FROM delivery_jobs ORDER BY
-                CASE status WHEN 'sending' THEN 0 WHEN 'queued' THEN 1
-                WHEN 'retrying' THEN 2 ELSE 3 END, created_at DESC LIMIT ?""",
-                (min(max(limit, 1), 200),),
-            ).fetchall()
+            if tenant_scope_id:
+                rows = db.execute(
+                    """SELECT * FROM delivery_jobs WHERE tenant_scope_id=? ORDER BY
+                    CASE status WHEN 'sending' THEN 0 WHEN 'queued' THEN 1
+                    WHEN 'retrying' THEN 2 ELSE 3 END, created_at DESC LIMIT ?""",
+                    (tenant_scope_id, min(max(limit, 1), 200)),
+                ).fetchall()
+            else:
+                rows = db.execute(
+                    """SELECT * FROM delivery_jobs ORDER BY
+                    CASE status WHEN 'sending' THEN 0 WHEN 'queued' THEN 1
+                    WHEN 'retrying' THEN 2 ELSE 3 END, created_at DESC LIMIT ?""",
+                    (min(max(limit, 1), 200),),
+                ).fetchall()
         return [self._job_with_attempts(row) for row in rows]
 
     def next_due(self) -> dict[str, Any] | None:
@@ -546,13 +597,9 @@ class DeliveryStore:
             return None
         reconciliation_id = str(uuid4())
         observed_at = _now()
-        canonical_snapshot = json.dumps(
-            snapshot, sort_keys=True, separators=(",", ":"), default=str
-        )
+        canonical_snapshot = json.dumps(snapshot, sort_keys=True, separators=(",", ":"), default=str)
         snapshot_sha256 = hashlib.sha256(canonical_snapshot.encode()).hexdigest()
-        canonical_drift = json.dumps(
-            drift, sort_keys=True, separators=(",", ":"), default=str
-        )
+        canonical_drift = json.dumps(drift, sort_keys=True, separators=(",", ":"), default=str)
         with self._lock, self.connect() as db:
             db.execute(
                 """INSERT INTO delivery_reconciliations
@@ -580,9 +627,7 @@ class DeliveryStore:
             ).fetchone()
         return self._reconciliation(row) if row else None
 
-    def reconciliations(
-        self, job_id: str, limit: int = 20
-    ) -> list[dict[str, Any]]:
+    def reconciliations(self, job_id: str, limit: int = 20) -> list[dict[str, Any]]:
         with self.connect() as db:
             rows = db.execute(
                 """SELECT * FROM delivery_reconciliations WHERE job_id=?
@@ -625,9 +670,7 @@ class DeliveryStore:
         value = self._job(row)
         value["attempts"] = self.attempts(value["id"])
         value["reconciliations"] = self.reconciliations(value["id"])
-        value["latest_reconciliation"] = (
-            value["reconciliations"][0] if value["reconciliations"] else None
-        )
+        value["latest_reconciliation"] = value["reconciliations"][0] if value["reconciliations"] else None
         return value
 
     @staticmethod
@@ -676,5 +719,8 @@ class DeliveryStore:
             "approved_at": row["approved_at"],
             "delivered_at": row["delivered_at"],
             "external_record": external_record,
+            "connection_alias": row["connection_alias"],
+            "connection_fingerprint": row["connection_fingerprint"],
+            "tenant_scope_id": row["tenant_scope_id"],
             "updated_at": row["updated_at"],
         }

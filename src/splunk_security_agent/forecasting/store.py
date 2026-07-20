@@ -51,7 +51,10 @@ class TimeSeriesExperimentStore:
                     created_at TEXT NOT NULL,
                     baseline_accepted_by TEXT NOT NULL DEFAULT '',
                     baseline_review_note TEXT NOT NULL DEFAULT '',
-                    baseline_accepted_at TEXT
+                    baseline_accepted_at TEXT,
+                    connection_alias TEXT NOT NULL DEFAULT 'primary',
+                    connection_fingerprint TEXT NOT NULL DEFAULT '',
+                    tenant_scope_id TEXT NOT NULL DEFAULT ''
                 );
                 CREATE TABLE IF NOT EXISTS time_series_alert_candidates (
                     id TEXT PRIMARY KEY,
@@ -93,6 +96,13 @@ class TimeSeriesExperimentStore:
                     ON time_series_alert_candidates(run_id, direction);
                 """
             )
+            self._ensure_column(db, "time_series_runs", "connection_alias", "TEXT NOT NULL DEFAULT 'primary'")
+            self._ensure_column(db, "time_series_runs", "connection_fingerprint", "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column(db, "time_series_runs", "tenant_scope_id", "TEXT NOT NULL DEFAULT ''")
+            db.execute(
+                """CREATE INDEX IF NOT EXISTS idx_time_series_runs_tenant_created
+                ON time_series_runs(tenant_scope_id,created_at DESC)"""
+            )
             db.execute(
                 """INSERT OR IGNORE INTO time_series_baselines
                 (series_key,slot,run_id,accepted_by,review_note,accepted_at)
@@ -101,6 +111,37 @@ class TimeSeriesExperimentStore:
                 FROM time_series_runs WHERE is_baseline=1"""
             )
 
+    def bind_unbound(self, binding: dict[str, Any]) -> int:
+        """Promote legacy JSON provenance into immutable indexed ownership columns."""
+        fallback = (
+            str(binding.get("alias") or "primary"),
+            str(binding.get("fingerprint") or ""),
+            str(binding.get("tenant_scope_id") or "workspace-primary"),
+        )
+        changed = 0
+        with self._lock, self.connect() as db:
+            rows = db.execute(
+                """SELECT id,result_json FROM time_series_runs
+                WHERE connection_fingerprint='' OR tenant_scope_id=''"""
+            ).fetchall()
+            for row in rows:
+                try:
+                    source = (json.loads(str(row["result_json"])) or {}).get("source") or {}
+                except (TypeError, ValueError):
+                    source = {}
+                values = (
+                    str(source.get("connection_alias") or fallback[0]),
+                    str(source.get("connection_fingerprint") or fallback[1]),
+                    str(source.get("tenant_scope_id") or fallback[2]),
+                )
+                changed += db.execute(
+                    """UPDATE time_series_runs SET connection_alias=?,
+                    connection_fingerprint=?,tenant_scope_id=?
+                    WHERE id=? AND (connection_fingerprint='' OR tenant_scope_id='')""",
+                    (*values, row["id"]),
+                ).rowcount
+        return int(changed)
+
     def connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.path)
         connection.row_factory = sqlite3.Row
@@ -108,9 +149,7 @@ class TimeSeriesExperimentStore:
         return connection
 
     @staticmethod
-    def series_key(
-        request: dict[str, Any], result: dict[str, Any] | None = None
-    ) -> str:
+    def series_key(request: dict[str, Any], result: dict[str, Any] | None = None) -> str:
         spl = re.sub(r"\s+", " ", str(request.get("spl") or "").strip())
         spl_template = re.sub(
             r"\bspan\s*=\s*\d+\s*[smhd]\b",
@@ -156,12 +195,17 @@ class TimeSeriesExperimentStore:
             seasonal_slot=seasonal_slot,
         )
         comparison["seasonal_comparison"] = seasonal_comparison
+        source = result.get("source") or {}
+        connection_alias = str(source.get("connection_alias") or "primary")
+        connection_fingerprint = str(source.get("connection_fingerprint") or "")
+        tenant_scope_id = str(source.get("tenant_scope_id") or "workspace-primary")
         with self._lock, self.connect() as db:
             db.execute(
                 """INSERT INTO time_series_runs
                 (id,series_key,run_fingerprint,title,status,request_json,result_json,
-                comparison_json,promotion_ready,is_baseline,created_by,created_at)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                comparison_json,promotion_ready,is_baseline,created_by,created_at,
+                connection_alias,connection_fingerprint,tenant_scope_id)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     result["run_id"],
                     series_key,
@@ -175,18 +219,27 @@ class TimeSeriesExperimentStore:
                     0,
                     actor[:160] or "local-operator",
                     str(result.get("executed_at") or _now()),
+                    connection_alias,
+                    connection_fingerprint,
+                    tenant_scope_id,
                 ),
             )
         recorded = self.get(str(result["run_id"]))
         assert recorded is not None
         return recorded
 
-    def get(self, run_id: str) -> dict[str, Any] | None:
+    def get(self, run_id: str, tenant_scope_id: str = "") -> dict[str, Any] | None:
         with self.connect() as db:
-            row = db.execute(
-                "SELECT * FROM time_series_runs WHERE id=?",
-                (run_id,),
-            ).fetchone()
+            if tenant_scope_id:
+                row = db.execute(
+                    "SELECT * FROM time_series_runs WHERE id=? AND tenant_scope_id=?",
+                    (run_id, tenant_scope_id),
+                ).fetchone()
+            else:
+                row = db.execute(
+                    "SELECT * FROM time_series_runs WHERE id=?",
+                    (run_id,),
+                ).fetchone()
         return self._run(row, full=True) if row else None
 
     def list(
@@ -194,14 +247,28 @@ class TimeSeriesExperimentStore:
         limit: int = 30,
         *,
         series_key: str = "",
+        tenant_scope_id: str = "",
     ) -> list[dict[str, Any]]:
         bounded = max(1, min(int(limit), 100))
         with self.connect() as db:
-            if series_key:
+            if series_key and tenant_scope_id:
+                rows = db.execute(
+                    """SELECT * FROM time_series_runs
+                    WHERE series_key=? AND tenant_scope_id=?
+                    ORDER BY created_at DESC LIMIT ?""",
+                    (series_key, tenant_scope_id, bounded),
+                ).fetchall()
+            elif series_key:
                 rows = db.execute(
                     """SELECT * FROM time_series_runs
                     WHERE series_key=? ORDER BY created_at DESC LIMIT ?""",
                     (series_key, bounded),
+                ).fetchall()
+            elif tenant_scope_id:
+                rows = db.execute(
+                    """SELECT * FROM time_series_runs WHERE tenant_scope_id=?
+                    ORDER BY created_at DESC LIMIT ?""",
+                    (tenant_scope_id, bounded),
                 ).fetchall()
             else:
                 rows = db.execute(
@@ -385,14 +452,23 @@ class TimeSeriesExperimentStore:
                 raise ValueError("Alert candidates require the exact current accepted baseline")
         return self._candidate(row)
 
-    def list_alert_candidates(self, limit: int = 30) -> list[dict[str, Any]]:
+    def list_alert_candidates(self, limit: int = 30, *, tenant_scope_id: str = "") -> list[dict[str, Any]]:
         bounded = max(1, min(int(limit), 100))
         with self.connect() as db:
-            rows = db.execute(
-                """SELECT * FROM time_series_alert_candidates
-                ORDER BY created_at DESC LIMIT ?""",
-                (bounded,),
-            ).fetchall()
+            if tenant_scope_id:
+                rows = db.execute(
+                    """SELECT candidates.* FROM time_series_alert_candidates AS candidates
+                    JOIN time_series_runs AS runs ON runs.id=candidates.run_id
+                    WHERE runs.tenant_scope_id=?
+                    ORDER BY candidates.created_at DESC LIMIT ?""",
+                    (tenant_scope_id, bounded),
+                ).fetchall()
+            else:
+                rows = db.execute(
+                    """SELECT * FROM time_series_alert_candidates
+                    ORDER BY created_at DESC LIMIT ?""",
+                    (bounded,),
+                ).fetchall()
         return [self._candidate(row) for row in rows]
 
     def alert_candidate(
@@ -408,8 +484,8 @@ class TimeSeriesExperimentStore:
             ).fetchone()
         return self._candidate(row) if row else None
 
-    def overview(self, limit: int = 30) -> dict[str, Any]:
-        runs = self.list(limit)
+    def overview(self, limit: int = 30, *, tenant_scope_id: str = "") -> dict[str, Any]:
+        runs = self.list(limit, tenant_scope_id=tenant_scope_id)
         series: dict[str, dict[str, Any]] = {}
         for run in runs:
             item = series.setdefault(
@@ -432,7 +508,7 @@ class TimeSeriesExperimentStore:
         return {
             "runs": runs,
             "series": list(series.values()),
-            "alert_candidates": self.list_alert_candidates(limit),
+            "alert_candidates": self.list_alert_candidates(limit, tenant_scope_id=tenant_scope_id),
             "contract": {
                 "source_rows_persisted": False,
                 "runs_immutable": True,
@@ -669,7 +745,21 @@ class TimeSeriesExperimentStore:
             "baseline_accepted_by": row["baseline_accepted_by"],
             "baseline_review_note": row["baseline_review_note"],
             "baseline_accepted_at": row["baseline_accepted_at"],
+            "connection_alias": row["connection_alias"],
+            "connection_fingerprint": row["connection_fingerprint"],
+            "tenant_scope_id": row["tenant_scope_id"],
         }
+
+    @staticmethod
+    def _ensure_column(
+        db: sqlite3.Connection,
+        table: str,
+        column: str,
+        declaration: str,
+    ) -> None:
+        columns = {str(row["name"]) for row in db.execute(f"PRAGMA table_info({table})")}
+        if column not in columns:
+            db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
 
     def _baseline_slots(self, run_id: str) -> list[str]:
         with self.connect() as db:

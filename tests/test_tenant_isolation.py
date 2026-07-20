@@ -3,6 +3,9 @@ import sqlite3
 
 import pytest
 
+from splunk_security_agent.assurance import AssuranceStore
+from splunk_security_agent.delivery import DeliveryStore
+from splunk_security_agent.forecasting import TimeSeriesExperimentStore
 from splunk_security_agent.tenancy import TenantIsolationPlanner, TenantIsolationStore
 
 
@@ -69,12 +72,8 @@ def test_readiness_plan_counts_scope_without_reading_payload_content(tmp_path) -
     second = planner.preview(binding())
 
     evidence = next(item for item in first["components"] if item["id"] == "evidence")
-    validations = next(
-        item for item in first["components"] if item["id"] == "validations"
-    )
-    discovery_files = next(
-        item for item in first["components"] if item["id"] == "discovery-files"
-    )
+    validations = next(item for item in first["components"] if item["id"] == "validations")
+    discovery_files = next(item for item in first["components"] if item["id"] == "discovery-files")
     serialized = json.dumps(first)
 
     assert first["plan_id"] == second["plan_id"]
@@ -118,13 +117,33 @@ def test_created_plan_is_review_only_and_retained_in_global_control_plane(tmp_pa
     assert overview["latest_plans"][0]["created_by"] == "security-admin"
 
 
+def test_remaining_workflow_roots_expose_direct_copy_contracts(tmp_path) -> None:
+    TimeSeriesExperimentStore(tmp_path / "time_series_experiments.db")
+    AssuranceStore(tmp_path / "assurance.db")
+    DeliveryStore(tmp_path / "delivery.db")
+    planner = TenantIsolationPlanner(
+        tmp_path,
+        TenantIsolationStore(tmp_path / "tenant_isolation.db"),
+    )
+
+    plan = planner.preview(binding())
+    components = {item["id"]: item for item in plan["components"]}
+
+    for component_id in (
+        "forecast-experiments",
+        "assurance-responses",
+        "outbound-delivery",
+    ):
+        assert components[component_id]["readiness"] == "copy-contract-ready"
+        assert components[component_id]["schema_observed"] is True
+        assert components[component_id]["unbound_records"] == 0
+
+
 @pytest.mark.parametrize(
     "tenant_scope_id",
     ["", "UPPERCASE", "../escape", "a", "tenant/escape"],
 )
-def test_isolation_planning_rejects_unsafe_tenant_roots(
-    tmp_path, tenant_scope_id: str
-) -> None:
+def test_isolation_planning_rejects_unsafe_tenant_roots(tmp_path, tenant_scope_id: str) -> None:
     planner = TenantIsolationPlanner(
         tmp_path,
         TenantIsolationStore(tmp_path / "tenant_isolation.db"),

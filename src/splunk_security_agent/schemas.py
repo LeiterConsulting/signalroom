@@ -779,6 +779,9 @@ class DeliveryPolicyUpdate(BaseModel):
 
 class DeliveryApproval(BaseModel):
     expected_payload_sha256: str = Field(min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$")
+    connection_alias: str = Field(default="primary", min_length=1, max_length=120)
+    connection_fingerprint: str = Field(default="", max_length=64)
+    tenant_scope_id: str = Field(default="workspace-primary", min_length=1, max_length=160)
 
 
 ValidationStatus = Literal["draft", "approved", "running", "complete", "error", "expired"]

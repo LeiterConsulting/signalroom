@@ -178,9 +178,7 @@ class Services:
         self.connection_registry = ConnectionRegistryStore(DATA / "connection_registry.db")
         self.tenant_isolation_store = TenantIsolationStore(DATA / "tenant_isolation.db")
         self.tenant_isolation = TenantIsolationPlanner(DATA, self.tenant_isolation_store)
-        self.tenant_data_registry = TenantDataPlaneRegistry(
-            DATA / "tenant_isolation.db", DATA
-        )
+        self.tenant_data_registry = TenantDataPlaneRegistry(DATA / "tenant_isolation.db", DATA)
         self.tenant_data_plane = TenantDataMigrationService(self.tenant_data_registry)
         initial_settings = self.config.load()
         self._connection_binding = self.connection_registry.sync_primary(
@@ -365,9 +363,7 @@ class Services:
         if current is None:
             raise ValueError(f"Connection alias {resolved_alias!r} is no longer configured.")
         resolved_tenant = tenant_scope_id.strip() or str(current["tenant_scope_id"])
-        resolved_fingerprint = fingerprint.strip() or (
-            str(current["fingerprint"])
-        )
+        resolved_fingerprint = fingerprint.strip() or (str(current["fingerprint"]))
         valid, reason = self.connection_registry.validate(
             resolved_alias, resolved_fingerprint, resolved_tenant
         )
@@ -387,6 +383,11 @@ class Services:
         self.validation_store.bind_unbound(self._connection_binding)
         self.detection_store.bind_unbound(self._connection_binding)
         self.assurance_store.bind_unbound(self._connection_binding)
+        self.delivery_store.bind_unbound(
+            self._connection_binding,
+            self.assurance_store.get_package,
+        )
+        self.time_series_store.bind_unbound(self._connection_binding)
         self.time_series_schedule_store.bind_unbound(self._connection_binding)
 
     def connection_overview(
@@ -412,10 +413,7 @@ class Services:
 
         policy = state(self.assurance_store.policy())
         schedules = [state(item) for item in self.time_series_schedule_store.list()]
-        jobs = [
-            state(item.model_dump(mode="json"))
-            for item in self.discovery_job_store.list_jobs(limit=10)
-        ]
+        jobs = [state(item.model_dump(mode="json")) for item in self.discovery_job_store.list_jobs(limit=10)]
         result = self.connection_registry.overview(
             {
                 "current_fingerprint": current["fingerprint"],
@@ -461,9 +459,7 @@ class Services:
         )
         return value, connection, self.config.secret(f"splunk_token:{alias}")
 
-    async def diagnose_connection(
-        self, alias: str, progress: Any | None = None
-    ) -> dict[str, Any]:
+    async def diagnose_connection(self, alias: str, progress: Any | None = None) -> dict[str, Any]:
         if alias == "primary":
             settings = self.config.load()
             binding = self.current_connection_binding()
@@ -475,9 +471,7 @@ class Services:
                 binding=binding,
             )
         binding, connection, token = self.managed_connection(alias)
-        result = await self.connection_diagnostics.run(
-            connection, token, progress=progress, binding=binding
-        )
+        result = await self.connection_diagnostics.run(connection, token, progress=progress, binding=binding)
         self.connection_registry.record_diagnostic(
             alias,
             binding["fingerprint"],
@@ -537,9 +531,7 @@ class Services:
     async def _assurance_complete(self, run_id: str, result: dict[str, Any]) -> None:
         run = self.assurance_store.get_run(run_id)
         scope_key = (
-            f"{run.connection_alias}|{run.connection_fingerprint}|{run.tenant_scope_id}"
-            if run
-            else ""
+            f"{run.connection_alias}|{run.connection_fingerprint}|{run.tenant_scope_id}" if run else ""
         )
         package = self.assurance_response.process(run_id, result, scope_key=scope_key)
         if package:
@@ -734,9 +726,7 @@ def _request_scope(
 
 def _authorize_connection_alias(alias: str) -> None:
     principal = _request_principal.get() or {}
-    if services.auth_store.policy()["enabled"] and alias not in set(
-        principal.get("connection_ids") or []
-    ):
+    if services.auth_store.policy()["enabled"] and alias not in set(principal.get("connection_ids") or []):
         raise HTTPException(
             403,
             f"This user is not assigned to the {alias} Splunk connection.",
@@ -780,8 +770,7 @@ def _scoped_validation(task_id: str, scope: dict[str, Any]) -> Any:
     except TypeError:  # Lightweight route-test doubles predate tenant-aware stores.
         task = services.validation_store.get(task_id)
     has_binding = all(
-        hasattr(task, field)
-        for field in ("connection_alias", "connection_fingerprint", "tenant_scope_id")
+        hasattr(task, field) for field in ("connection_alias", "connection_fingerprint", "tenant_scope_id")
     )
     if task is None or (
         has_binding
@@ -806,8 +795,7 @@ def _scoped_detection(detection_id: str, scope: dict[str, Any]) -> dict[str, Any
     has_binding = bool(
         detection
         and all(
-            field in detection
-            for field in ("connection_alias", "connection_fingerprint", "tenant_scope_id")
+            field in detection for field in ("connection_alias", "connection_fingerprint", "tenant_scope_id")
         )
     )
     if detection is None or (
@@ -831,6 +819,36 @@ def _scoped_detection_handoff(handoff_id: str, scope: dict[str, Any]) -> dict[st
         raise HTTPException(404, "Detection repository handoff not found")
     _scoped_detection(str(handoff["detection_id"]), scope)
     return handoff
+
+
+def _scoped_time_series_experiment(run_id: str, scope: dict[str, Any]) -> dict[str, Any]:
+    result = services.time_series.experiment(run_id, scope["tenant_scope_id"])
+    if result is None or (
+        result["connection_alias"] != scope["alias"]
+        or result["connection_fingerprint"] != scope["fingerprint"]
+        or result["tenant_scope_id"] != scope["tenant_scope_id"]
+    ):
+        raise HTTPException(404, "Time-series experiment not found")
+    return result
+
+
+def _scoped_assurance_package(package_id: str, scope: dict[str, Any]) -> dict[str, Any]:
+    package = services.assurance_store.get_package(package_id, scope["tenant_scope_id"])
+    if package is None or (
+        package["connection_alias"] != scope["alias"]
+        or package["connection_fingerprint"] != scope["fingerprint"]
+    ):
+        raise HTTPException(404, "Assurance response package not found")
+    return package
+
+
+def _scoped_delivery_job(job_id: str, scope: dict[str, Any]) -> dict[str, Any]:
+    job = services.delivery_store.get(job_id, scope["tenant_scope_id"])
+    if job is None or (
+        job["connection_alias"] != scope["alias"] or job["connection_fingerprint"] != scope["fingerprint"]
+    ):
+        raise HTTPException(404, "Delivery job not found")
+    return job
 
 
 @asynccontextmanager
@@ -1196,11 +1214,7 @@ async def get_settings() -> dict[str, Any]:
 @app.get("/api/connections")
 async def get_connections(request: Request) -> dict[str, Any]:
     principal = getattr(request.state, "principal", {}) or {}
-    allowed = (
-        set(principal.get("connection_ids") or [])
-        if services.auth_store.policy()["enabled"]
-        else None
-    )
+    allowed = set(principal.get("connection_ids") or []) if services.auth_store.policy()["enabled"] else None
     return services.connection_overview(
         allowed,
         include_all_managed=principal.get("role") == "admin",
@@ -1217,9 +1231,9 @@ async def tenant_isolation_overview(request: Request) -> dict[str, Any]:
     result["runtime"]["isolated_route_count"] = len(
         [item for item in data_plane["routes"] if item["mode"] == "isolated-routing"]
     )
-    result["available_targets"] = services.connection_overview(
-        None, include_all_managed=True
-    ).get("execution_scopes", [])
+    result["available_targets"] = services.connection_overview(None, include_all_managed=True).get(
+        "execution_scopes", []
+    )
     return result
 
 
@@ -1324,9 +1338,7 @@ async def rollback_tenant_data_migration(
         "rollback",
         target_type="tenant-scope",
         target_id=scope["tenant_scope_id"],
-        summary=(
-            "Restored shared tenant routing before any isolated-generation write occurred."
-        ),
+        summary=("Restored shared tenant routing before any isolated-generation write occurred."),
         metadata={
             "migration_id": result["id"],
             "generation_id": result["generation_id"],
@@ -1357,9 +1369,7 @@ async def create_tenant_isolation_plan(
         "plan",
         target_type="tenant-scope",
         target_id=scope["tenant_scope_id"],
-        summary=(
-            "Created a content-free physical-isolation readiness plan; no tenant data moved."
-        ),
+        summary=("Created a content-free physical-isolation readiness plan; no tenant data moved."),
         metadata={
             "plan_id": result["plan_id"],
             "connection_alias": scope["alias"],
@@ -1556,10 +1566,7 @@ async def rebind_assurance_connection(
         "rebind",
         target_type="assurance-policy",
         target_id=binding["alias"],
-        summary=(
-            "Continuous assurance was paused and rebound to an explicitly selected "
-            "Splunk revision."
-        ),
+        summary=("Continuous assurance was paused and rebound to an explicitly selected Splunk revision."),
         metadata={
             "connection_alias": binding["alias"],
             "previous_fingerprint": value.expected_connection_fingerprint,
@@ -1910,9 +1917,7 @@ async def run_time_series_forecast(
         value.tenant_scope_id,
     )
     forecast_request = TimeSeriesForecastRequest.model_validate(
-        value.model_dump(
-            exclude={"connection_alias", "connection_fingerprint", "tenant_scope_id"}
-        )
+        value.model_dump(exclude={"connection_alias", "connection_fingerprint", "tenant_scope_id"})
     )
 
     async def run(progress: Any) -> dict[str, Any]:
@@ -1965,44 +1970,39 @@ async def run_time_series_forecast(
 
 
 @app.get("/api/model-capabilities/time-series/experiments")
-async def list_time_series_experiments(limit: int = 30) -> dict[str, Any]:
-    result = services.time_series.experiments(limit)
-    allowed = _allowed_connection_ids()
-    if allowed is None:
-        return result
+async def list_time_series_experiments(
+    limit: int = 30,
+    connection_alias: str = "primary",
+    connection_fingerprint: str = "",
+    tenant_scope_id: str = "workspace-primary",
+) -> dict[str, Any]:
+    scope = _request_scope(connection_alias, connection_fingerprint, tenant_scope_id)
+    result = services.time_series.experiments(limit, scope["tenant_scope_id"])
     result["runs"] = [
         item
         for item in result.get("runs", [])
-        if str((item.get("source") or {}).get("connection_alias") or "primary")
-        in allowed
+        if item.get("connection_alias") == scope["alias"]
+        and item.get("connection_fingerprint") == scope["fingerprint"]
+        and item.get("tenant_scope_id") == scope["tenant_scope_id"]
     ]
     run_ids = {item["id"] for item in result["runs"]}
     series_keys = {item["series_key"] for item in result["runs"]}
-    result["series"] = [
-        item
-        for item in result.get("series", [])
-        if item.get("series_key") in series_keys
-    ]
+    result["series"] = [item for item in result.get("series", []) if item.get("series_key") in series_keys]
     result["alert_candidates"] = [
-        item
-        for item in result.get("alert_candidates", [])
-        if item.get("run_id") in run_ids
+        item for item in result.get("alert_candidates", []) if item.get("run_id") in run_ids
     ]
-    return result
-
-
-def _authorize_time_series_experiment(run_id: str) -> dict[str, Any]:
-    result = services.time_series.experiment(run_id)
-    if result is None:
-        raise HTTPException(404, "Time-series experiment not found")
-    source = result.get("source") or {}
-    _authorize_connection_alias(str(source.get("connection_alias") or "primary"))
     return result
 
 
 @app.get("/api/model-capabilities/time-series/experiments/{run_id}")
-async def get_time_series_experiment(run_id: str) -> dict[str, Any]:
-    return _authorize_time_series_experiment(run_id)
+async def get_time_series_experiment(
+    run_id: str,
+    connection_alias: str = "primary",
+    connection_fingerprint: str = "",
+    tenant_scope_id: str = "workspace-primary",
+) -> dict[str, Any]:
+    scope = _request_scope(connection_alias, connection_fingerprint, tenant_scope_id)
+    return _scoped_time_series_experiment(run_id, scope)
 
 
 @app.post("/api/model-capabilities/time-series/experiments/{run_id}/baseline")
@@ -2010,10 +2010,14 @@ async def accept_time_series_baseline(
     run_id: str,
     value: TimeSeriesBaselineAcceptRequest,
     request: Request,
+    connection_alias: str = "primary",
+    connection_fingerprint: str = "",
+    tenant_scope_id: str = "workspace-primary",
 ) -> dict[str, Any]:
     principal = getattr(request.state, "principal", {}) or {}
     actor = str(principal.get("username") or "local-operator")
-    _authorize_time_series_experiment(run_id)
+    scope = _request_scope(connection_alias, connection_fingerprint, tenant_scope_id)
+    _scoped_time_series_experiment(run_id, scope)
     try:
         result = services.time_series.accept_baseline(
             run_id,
@@ -2051,10 +2055,14 @@ async def create_time_series_alert_candidate(
     run_id: str,
     value: TimeSeriesAlertCandidateCreate,
     request: Request,
+    connection_alias: str = "primary",
+    connection_fingerprint: str = "",
+    tenant_scope_id: str = "workspace-primary",
 ) -> dict[str, Any]:
     principal = getattr(request.state, "principal", {}) or {}
     actor = str(principal.get("username") or "local-operator")
-    _authorize_time_series_experiment(run_id)
+    scope = _request_scope(connection_alias, connection_fingerprint, tenant_scope_id)
+    _scoped_time_series_experiment(run_id, scope)
     try:
         result = services.time_series.create_alert_candidate(
             run_id,
@@ -2100,16 +2108,10 @@ async def list_time_series_schedules(limit: int = 30) -> dict[str, Any]:
     ]
     schedule_ids = {item["id"] for item in result["schedules"]}
     result["attempts"] = [
-        item
-        for item in result.get("attempts", [])
-        if item.get("schedule_id") in schedule_ids
+        item for item in result.get("attempts", []) if item.get("schedule_id") in schedule_ids
     ]
     attempt_ids = {item["id"] for item in result["attempts"]}
-    result["reviews"] = [
-        item
-        for item in result.get("reviews", [])
-        if item.get("attempt_id") in attempt_ids
-    ]
+    result["reviews"] = [item for item in result.get("reviews", []) if item.get("attempt_id") in attempt_ids]
     return result
 
 
@@ -2876,9 +2878,9 @@ async def chat_stream(request: ChatRequest) -> StreamingResponse:
 
     async def run(progress: Any) -> dict[str, Any]:
         async with services.workload.scope("investigate:chat", progress):
-            return (
-                await services.agent_for_scope(scope).chat(request, progress=progress)
-            ).model_dump(mode="json")
+            return (await services.agent_for_scope(scope).chat(request, progress=progress)).model_dump(
+                mode="json"
+            )
 
     return _stream_response(run)
 
@@ -2909,9 +2911,7 @@ async def latest_discovery(
 
 
 @app.post("/api/discovery/comparison")
-async def compare_discovery_snapshots(
-    value: DiscoveryComparisonRequest, request: Request
-) -> dict[str, Any]:
+async def compare_discovery_snapshots(value: DiscoveryComparisonRequest, request: Request) -> dict[str, Any]:
     left_scope = _request_scope(
         value.left.connection_alias,
         value.left.connection_fingerprint,
@@ -2931,10 +2931,7 @@ async def compare_discovery_snapshots(
         )
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from exc
-    actor = str(
-        (getattr(request.state, "principal", {}) or {}).get("username")
-        or "local-operator"
-    )
+    actor = str((getattr(request.state, "principal", {}) or {}).get("username") or "local-operator")
     services.audit.record(
         "discovery.comparison.created",
         "compare-retained-snapshots",
@@ -3106,9 +3103,7 @@ async def discovery_stream(request: DiscoveryRequest) -> StreamingResponse:
             )
         async with services.discovery_lock:
             async with services.workload.scope(f"discovery:{request.depth}", progress):
-                result = await services.discovery_for_scope(scope).run(
-                    request.depth, progress=progress
-                )
+                result = await services.discovery_for_scope(scope).run(request.depth, progress=progress)
         services.invalidate_context_caches()
         services.model_setup.schedule_context_index()
         return result
@@ -3123,7 +3118,7 @@ async def assurance_overview(request: Request) -> dict[str, Any]:
     if principal.get("role") != "admin":
         _authorize_connection_alias(policy["connection_alias"])
     result = services.assurance.overview()
-    result["delivery"] = services.delivery.overview()
+    result["delivery"] = services.delivery.overview(policy["tenant_scope_id"])
     result["audit"] = services.audit.overview(20)
     result["audit_export"] = services.audit_export.overview()
     result["audit_operations"] = services.audit_operations.overview(result["audit_export"])
@@ -3151,9 +3146,7 @@ async def update_assurance_policy(
         )
         if changed_binding:
             if services.assurance_store.active_run() is not None:
-                raise ValueError(
-                    "Wait for the active assurance run before changing its target connection."
-                )
+                raise ValueError("Wait for the active assurance run before changing its target connection.")
         policy_update = AssurancePolicyUpdate.model_validate(
             {
                 **value.model_dump(
@@ -3270,8 +3263,14 @@ async def acknowledge_assurance_notification(notification_id: str) -> dict[str, 
 
 
 @app.post("/api/assurance/packages/{package_id}/close")
-async def close_assurance_package(package_id: str) -> dict[str, Any]:
-    _authorize_assurance_package(package_id)
+async def close_assurance_package(
+    package_id: str,
+    connection_alias: str = "primary",
+    connection_fingerprint: str = "",
+    tenant_scope_id: str = "workspace-primary",
+) -> dict[str, Any]:
+    scope = _request_scope(connection_alias, connection_fingerprint, tenant_scope_id)
+    _authorize_assurance_package(package_id, scope)
     package = services.assurance_store.close_package(package_id)
     if package is None:
         raise HTTPException(404, "Assurance response package not found")
@@ -3287,7 +3286,9 @@ async def close_assurance_package(package_id: str) -> dict[str, Any]:
     return package
 
 
-def _authorize_assurance_package(package_id: str) -> dict[str, Any]:
+def _authorize_assurance_package(package_id: str, scope: dict[str, Any] | None = None) -> dict[str, Any]:
+    if scope is not None:
+        return _scoped_assurance_package(package_id, scope)
     package = services.assurance_store.get_package(package_id)
     if package is None:
         raise HTTPException(404, "Assurance response package not found")
@@ -3296,8 +3297,13 @@ def _authorize_assurance_package(package_id: str) -> dict[str, Any]:
 
 
 @app.get("/api/delivery")
-async def delivery_overview() -> dict[str, Any]:
-    return services.delivery.overview()
+async def delivery_overview(
+    connection_alias: str = "primary",
+    connection_fingerprint: str = "",
+    tenant_scope_id: str = "workspace-primary",
+) -> dict[str, Any]:
+    scope = _request_scope(connection_alias, connection_fingerprint, tenant_scope_id)
+    return services.delivery.overview(scope["tenant_scope_id"])
 
 
 @app.put("/api/delivery/policy")
@@ -3317,8 +3323,14 @@ async def test_delivery_destination() -> dict[str, Any]:
 
 
 @app.post("/api/assurance/packages/{package_id}/delivery/preview")
-async def preview_assurance_delivery(package_id: str) -> dict[str, Any]:
-    _authorize_assurance_package(package_id)
+async def preview_assurance_delivery(
+    package_id: str,
+    connection_alias: str = "primary",
+    connection_fingerprint: str = "",
+    tenant_scope_id: str = "workspace-primary",
+) -> dict[str, Any]:
+    scope = _request_scope(connection_alias, connection_fingerprint, tenant_scope_id)
+    _authorize_assurance_package(package_id, scope)
     try:
         return services.delivery.preview(package_id)
     except KeyError as exc:
@@ -3329,7 +3341,12 @@ async def preview_assurance_delivery(package_id: str) -> dict[str, Any]:
 
 @app.post("/api/assurance/packages/{package_id}/delivery/approve", status_code=202)
 async def approve_assurance_delivery(package_id: str, request: DeliveryApproval) -> dict[str, Any]:
-    _authorize_assurance_package(package_id)
+    scope = _request_scope(
+        request.connection_alias,
+        request.connection_fingerprint,
+        request.tenant_scope_id,
+    )
+    _authorize_assurance_package(package_id, scope)
     try:
         return services.delivery.approve(package_id, request.expected_payload_sha256)
     except KeyError as exc:
@@ -3339,7 +3356,14 @@ async def approve_assurance_delivery(package_id: str, request: DeliveryApproval)
 
 
 @app.post("/api/delivery/jobs/{job_id}/retry", status_code=202)
-async def retry_assurance_delivery(job_id: str) -> dict[str, Any]:
+async def retry_assurance_delivery(
+    job_id: str,
+    connection_alias: str = "primary",
+    connection_fingerprint: str = "",
+    tenant_scope_id: str = "workspace-primary",
+) -> dict[str, Any]:
+    scope = _request_scope(connection_alias, connection_fingerprint, tenant_scope_id)
+    _scoped_delivery_job(job_id, scope)
     try:
         return services.delivery.retry(job_id)
     except KeyError as exc:
@@ -3349,7 +3373,14 @@ async def retry_assurance_delivery(job_id: str) -> dict[str, Any]:
 
 
 @app.post("/api/delivery/jobs/{job_id}/cancel")
-async def cancel_assurance_delivery(job_id: str) -> dict[str, Any]:
+async def cancel_assurance_delivery(
+    job_id: str,
+    connection_alias: str = "primary",
+    connection_fingerprint: str = "",
+    tenant_scope_id: str = "workspace-primary",
+) -> dict[str, Any]:
+    scope = _request_scope(connection_alias, connection_fingerprint, tenant_scope_id)
+    _scoped_delivery_job(job_id, scope)
     try:
         return services.delivery.cancel(job_id)
     except KeyError as exc:
@@ -3359,7 +3390,14 @@ async def cancel_assurance_delivery(job_id: str) -> dict[str, Any]:
 
 
 @app.post("/api/delivery/jobs/{job_id}/reconcile")
-async def reconcile_assurance_delivery(job_id: str) -> dict[str, Any]:
+async def reconcile_assurance_delivery(
+    job_id: str,
+    connection_alias: str = "primary",
+    connection_fingerprint: str = "",
+    tenant_scope_id: str = "workspace-primary",
+) -> dict[str, Any]:
+    scope = _request_scope(connection_alias, connection_fingerprint, tenant_scope_id)
+    _scoped_delivery_job(job_id, scope)
     try:
         return await services.delivery.reconcile(job_id)
     except KeyError as exc:
@@ -3446,8 +3484,7 @@ async def list_validations(
     return [
         item.model_dump(mode="json")
         for item in services.validation_store.list(tenant_scope_id=scope["tenant_scope_id"])
-        if item.connection_alias == scope["alias"]
-        and item.connection_fingerprint == scope["fingerprint"]
+        if item.connection_alias == scope["alias"] and item.connection_fingerprint == scope["fingerprint"]
     ]
 
 
@@ -3567,6 +3604,7 @@ async def run_validation_stream(
 ) -> StreamingResponse:
     scope = _request_scope(connection_alias, connection_fingerprint, tenant_scope_id)
     _scoped_validation(task_id, scope)
+
     async def run(progress: Any) -> dict[str, Any]:
         try:
             task = await services.validations.execute(task_id, progress)
@@ -4525,8 +4563,7 @@ async def list_cases(
 ) -> list[dict[str, Any]]:
     scope = _request_scope(connection_alias, connection_fingerprint, tenant_scope_id)
     return [
-        case.model_dump(mode="json")
-        for case in services.cases.list(tenant_scope_id=scope["tenant_scope_id"])
+        case.model_dump(mode="json") for case in services.cases.list(tenant_scope_id=scope["tenant_scope_id"])
     ]
 
 
@@ -4666,9 +4703,7 @@ async def update_case_item(
     tenant_scope_id: str = "workspace-primary",
 ) -> dict[str, Any]:
     scope = _request_scope(connection_alias, connection_fingerprint, tenant_scope_id)
-    item = services.cases.update_item(
-        case_id, item_id, request, scope["tenant_scope_id"]
-    )
+    item = services.cases.update_item(case_id, item_id, request, scope["tenant_scope_id"])
     if not item:
         raise HTTPException(404, "Case timeline item not found")
     services.audit.record(

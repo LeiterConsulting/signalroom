@@ -75,9 +75,7 @@ def test_delivery_preview_is_redacted_and_approval_is_hash_bound(tmp_path):
     package = package_fixture(assurance)
     config = ConfigStore(tmp_path / "config")
     audit = AuditStore(tmp_path / "audit.db")
-    service = AssuranceDeliveryService(
-        DeliveryStore(tmp_path / "delivery.db"), assurance, config, audit
-    )
+    service = AssuranceDeliveryService(DeliveryStore(tmp_path / "delivery.db"), assurance, config, audit)
     service.update_policy(
         DeliveryPolicyUpdate(
             enabled=True,
@@ -109,6 +107,11 @@ def test_delivery_preview_is_redacted_and_approval_is_hash_bound(tmp_path):
     assert job["status"] == "queued"
     assert job["payload_sha256"] == preview["payload_sha256"]
     assert job["approval_mode"] == "analyst"
+    assert job["connection_alias"] == package["connection_alias"]
+    assert job["connection_fingerprint"] == package["connection_fingerprint"]
+    assert job["tenant_scope_id"] == package["tenant_scope_id"]
+    assert service.store.get(job["id"], "tenant-other") is None
+    assert service.store.jobs(tenant_scope_id=package["tenant_scope_id"])[0]["id"] == job["id"]
     assert audit.verify()["valid"] is True
 
     disabled = service.update_policy(
@@ -121,6 +124,34 @@ def test_delivery_preview_is_redacted_and_approval_is_hash_bound(tmp_path):
     assert disabled["destination"]["configured"] is False
     assert config.secret("delivery_webhook_url") == ""
     assert service.store.get(job["id"])["status"] == "cancelled"
+
+
+def test_delivery_store_retains_direct_package_scope(tmp_path):
+    store = DeliveryStore(tmp_path / "delivery.db")
+    binding = {
+        "connection_alias": "soc-east",
+        "connection_fingerprint": "a" * 64,
+        "tenant_scope_id": "tenant-east",
+    }
+    job = store.approve(
+        package_id="package-east",
+        approval_mode="analyst",
+        destination_kind="generic-webhook",
+        destination_label="East SOC",
+        destination_fingerprint="b" * 64,
+        payload={"event": "bounded"},
+        payload_sha256="c" * 64,
+        idempotency_key="d" * 64,
+        max_attempts=3,
+        binding=binding,
+    )
+
+    assert job["connection_alias"] == "soc-east"
+    assert job["connection_fingerprint"] == "a" * 64
+    assert job["tenant_scope_id"] == "tenant-east"
+    assert store.get(job["id"], "tenant-east") is not None
+    assert store.get(job["id"], "tenant-west") is None
+    assert [item["id"] for item in store.jobs(tenant_scope_id="tenant-east")] == [job["id"]]
 
 
 def test_delivery_rejects_insecure_remote_http_and_filters_policy(tmp_path):
@@ -250,10 +281,7 @@ def test_delivery_store_migrates_legacy_destination_columns(tmp_path):
     } <= job_columns
     with store.connect() as db:
         reconciliation_tables = {
-            row["name"]
-            for row in db.execute(
-                "SELECT name FROM sqlite_master WHERE type='table'"
-            )
+            row["name"] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")
         }
     assert "delivery_reconciliations" in reconciliation_tables
 
@@ -438,9 +466,7 @@ def test_jira_adapter_restricts_authority_and_builds_redacted_create_payload(
     assert delivery_property["value"]["correlation_id"] == preview["correlation_id"]
     assert delivery_property["value"]["contract"] == "create-issue-only"
     assert delivery_property["value"]["splunk_execution"] is False
-    assert any(
-        label.startswith("signalroom-") for label in fields["labels"]
-    )
+    assert any(label.startswith("signalroom-") for label in fields["labels"])
     assert "Identity telemetry coverage changed" not in serialized
     assert "Raw environment detail" not in serialized
     assert "vpn-authentication" not in serialized
@@ -505,9 +531,7 @@ class FakeDeliveryClient:
     async def __aexit__(self, *args: Any) -> None:
         return None
 
-    async def post(
-        self, url: str, *, content: bytes, headers: dict[str, str]
-    ) -> FakeResponse:
+    async def post(self, url: str, *, content: bytes, headers: dict[str, str]) -> FakeResponse:
         self.calls.append({"url": url, "content": content, "headers": headers})
         return FakeResponse()
 
@@ -553,9 +577,7 @@ async def test_delivery_worker_sends_exact_payload_with_idempotency_and_no_splun
     delivered = store.get(job["id"])
     assert delivered is not None and delivered["status"] == "delivered"
     assert len(calls) == 1
-    expected_bytes = json.dumps(
-        preview["payload"], sort_keys=True, separators=(",", ":")
-    ).encode()
+    expected_bytes = json.dumps(preview["payload"], sort_keys=True, separators=(",", ":")).encode()
     assert calls[0]["content"] == expected_bytes
     assert calls[0]["headers"]["Idempotency-Key"] == job["idempotency_key"]
     assert calls[0]["headers"]["Authorization"] == "Bearer encrypted-at-rest"
@@ -564,11 +586,7 @@ async def test_delivery_worker_sends_exact_payload_with_idempotency_and_no_splun
         "splunk_execution": False,
         "validation_approval": False,
     }
-    attempted = [
-        event
-        for event in audit.events()
-        if event["event_type"] == "delivery.attempted"
-    ]
+    attempted = [event for event in audit.events() if event["event_type"] == "delivery.attempted"]
     assert attempted[0]["outcome"] == "delivered"
     assert audit.verify()["valid"] is True
 
@@ -649,9 +667,7 @@ async def test_jira_worker_creates_once_and_persists_trusted_external_correlatio
     calls: list[dict[str, Any]] = []
 
     class FakeJiraClient(FakeDeliveryClient):
-        async def post(
-            self, url: str, *, content: bytes, headers: dict[str, str]
-        ) -> FakeJiraResponse:
+        async def post(self, url: str, *, content: bytes, headers: dict[str, str]) -> FakeJiraResponse:
             self.calls.append(
                 {
                     "url": url,
@@ -686,26 +702,18 @@ async def test_jira_worker_creates_once_and_persists_trusted_external_correlatio
     }
     assert delivered["external_record"]["created_at"]
     assert len(calls) == 1
-    assert calls[0]["url"] == (
-        "https://security-team.atlassian.net/rest/api/3/issue"
+    assert calls[0]["url"] == ("https://security-team.atlassian.net/rest/api/3/issue")
+    assert (
+        calls[0]["content"] == json.dumps(preview["payload"], sort_keys=True, separators=(",", ":")).encode()
     )
-    assert calls[0]["content"] == json.dumps(
-        preview["payload"], sort_keys=True, separators=(",", ":")
-    ).encode()
     assert calls[0]["client"]["verify"] is True
     assert calls[0]["client"]["follow_redirects"] is False
     assert "Idempotency-Key" not in calls[0]["headers"]
     assert "X-SignalRoom-Event" not in calls[0]["headers"]
     scheme, encoded = calls[0]["headers"]["Authorization"].split(" ", 1)
     assert scheme == "Basic"
-    assert base64.b64decode(encoded).decode() == (
-        "analyst@example.com:jira-api-token"
-    )
-    attempted = [
-        event
-        for event in audit.events()
-        if event["event_type"] == "delivery.attempted"
-    ]
+    assert base64.b64decode(encoded).decode() == ("analyst@example.com:jira-api-token")
+    attempted = [event for event in audit.events() if event["event_type"] == "delivery.attempted"]
     assert attempted[0]["metadata"]["external_record_key"] == "SEC-42"
     assert attempted[0]["outcome"] == "delivered"
 
@@ -739,9 +747,7 @@ async def delivered_jira_for_reconciliation(
     store = DeliveryStore(tmp_path / "delivery.db")
 
     class ReconciliationClient(FakeDeliveryClient):
-        async def post(
-            self, url: str, *, content: bytes, headers: dict[str, str]
-        ) -> FakeJiraResponse:
+        async def post(self, url: str, *, content: bytes, headers: dict[str, str]) -> FakeJiraResponse:
             self.calls.append(
                 {
                     "method": "POST",
@@ -753,9 +759,7 @@ async def delivered_jira_for_reconciliation(
             )
             return FakeJiraResponse()
 
-        async def get(
-            self, url: str, *, headers: dict[str, str]
-        ) -> FakeJiraIssueResponse:
+        async def get(self, url: str, *, headers: dict[str, str]) -> FakeJiraIssueResponse:
             self.calls.append(
                 {
                     "method": "GET",
@@ -825,20 +829,14 @@ async def test_jira_reconciliation_reads_minimal_fields_and_preserves_material_d
 ):
     calls: list[dict[str, Any]] = []
     responses: list[FakeJiraIssueResponse] = []
-    service, store, audit, job, preview = await delivered_jira_for_reconciliation(
-        tmp_path, responses, calls
-    )
+    service, store, audit, job, preview = await delivered_jira_for_reconciliation(tmp_path, responses, calls)
     assert job is not None
     correlation_label = next(
-        label
-        for label in preview["payload"]["fields"]["labels"]
-        if label.startswith("signalroom-")
+        label for label in preview["payload"]["fields"]["labels"] if label.startswith("signalroom-")
     )
     responses.extend(
         [
-            FakeJiraIssueResponse(
-                200, jira_issue_observation(correlation_label)
-            ),
+            FakeJiraIssueResponse(200, jira_issue_observation(correlation_label)),
             FakeJiraIssueResponse(
                 200,
                 jira_issue_observation(
@@ -861,11 +859,10 @@ async def test_jira_reconciliation_reads_minimal_fields_and_preserves_material_d
 
     get_calls = [call for call in calls if call["method"] == "GET"]
     assert len(get_calls) == 2
-    assert get_calls[0]["url"].startswith(
-        "https://security-team.atlassian.net/rest/api/3/issue/10042?"
-    )
-    assert "fields=status%2Cpriority%2Cresolution%2Cupdated%2Cproject%2Cissuetype%2Clabels" in (
-        get_calls[0]["url"]
+    assert get_calls[0]["url"].startswith("https://security-team.atlassian.net/rest/api/3/issue/10042?")
+    assert (
+        "fields=status%2Cpriority%2Cresolution%2Cupdated%2Cproject%2Cissuetype%2Clabels"
+        in (get_calls[0]["url"])
     )
     assert "summary" not in get_calls[0]["url"]
     assert "description" not in get_calls[0]["url"]
@@ -876,23 +873,17 @@ async def test_jira_reconciliation_reads_minimal_fields_and_preserves_material_d
     assert baseline["outcome"] == "observed"
     assert baseline["drift"]["baseline"] == "established"
     assert baseline["drift"]["changed"] is False
-    assert baseline["snapshot"]["browse_url"] == (
-        "https://security-team.atlassian.net/browse/SEC-42"
-    )
+    assert baseline["snapshot"]["browse_url"] == ("https://security-team.atlassian.net/browse/SEC-42")
     serialized = json.dumps(baseline["snapshot"])
     assert "Sensitive" not in serialized
     assert "summary" not in serialized
     assert "description" not in serialized
     assert "comment" not in serialized
     assert "untrusted.example" not in serialized
-    assert changed["snapshot"]["browse_url"] == (
-        "https://security-team.atlassian.net/browse/OPS-42"
-    )
+    assert changed["snapshot"]["browse_url"] == ("https://security-team.atlassian.net/browse/OPS-42")
     assert changed["snapshot"]["correlation_label_present"] is False
     assert changed["drift"]["changed"] is True
-    changed_fields = {
-        item["field"] for item in changed["drift"]["changes"]
-    }
+    changed_fields = {item["field"] for item in changed["drift"]["changes"]}
     assert {
         "issue_key",
         "project_key",
@@ -905,13 +896,9 @@ async def test_jira_reconciliation_reads_minimal_fields_and_preserves_material_d
     assert current is not None
     assert len(current["reconciliations"]) == 2
     assert current["latest_reconciliation"]["id"] == changed["id"]
-    assert current["reconciliations"][1]["snapshot_sha256"] == (
-        baseline["snapshot_sha256"]
-    )
+    assert current["reconciliations"][1]["snapshot_sha256"] == (baseline["snapshot_sha256"])
     reconciled_events = [
-        event
-        for event in audit.events()
-        if event["event_type"] == "delivery.external.reconciled"
+        event for event in audit.events() if event["event_type"] == "delivery.external.reconciled"
     ]
     assert len(reconciled_events) == 2
     assert reconciled_events[0]["metadata"]["snapshot_sha256"]
@@ -924,26 +911,18 @@ async def test_jira_reconciliation_preserves_ambiguous_visibility_and_fails_clos
 ):
     calls: list[dict[str, Any]] = []
     responses: list[FakeJiraIssueResponse] = []
-    service, store, _, job, preview = await delivered_jira_for_reconciliation(
-        tmp_path, responses, calls
-    )
+    service, store, _, job, preview = await delivered_jira_for_reconciliation(tmp_path, responses, calls)
     assert job is not None
     correlation_label = next(
-        label
-        for label in preview["payload"]["fields"]["labels"]
-        if label.startswith("signalroom-")
+        label for label in preview["payload"]["fields"]["labels"] if label.startswith("signalroom-")
     )
     responses.extend(
         [
-            FakeJiraIssueResponse(
-                200, jira_issue_observation(correlation_label)
-            ),
+            FakeJiraIssueResponse(200, jira_issue_observation(correlation_label)),
             FakeJiraIssueResponse(404),
             FakeJiraIssueResponse(
                 200,
-                jira_issue_observation(
-                    correlation_label, issue_id="99999"
-                ),
+                jira_issue_observation(correlation_label, issue_id="99999"),
             ),
         ]
     )
@@ -962,9 +941,7 @@ async def test_jira_reconciliation_preserves_ambiguous_visibility_and_fails_clos
     assert "did not match" in mismatched["error"]
     assert len(store.get(job["id"])["reconciliations"]) == 3
 
-    service.update_policy(
-        jira_policy(webhook_url="https://other-team.atlassian.net")
-    )
+    service.update_policy(jira_policy(webhook_url="https://other-team.atlassian.net"))
     get_count = len([call for call in calls if call["method"] == "GET"])
     with pytest.raises(ValueError, match="destination or credentials changed"):
         await service.reconcile(job["id"])
@@ -980,9 +957,7 @@ async def test_jira_unknown_create_outcome_stops_automatic_retry_and_restart(
     store = DeliveryStore(tmp_path / "delivery.db")
 
     class UnknownJiraClient(FakeDeliveryClient):
-        async def post(
-            self, url: str, *, content: bytes, headers: dict[str, str]
-        ) -> FakeResponse:
+        async def post(self, url: str, *, content: bytes, headers: dict[str, str]) -> FakeResponse:
             raise httpx.ReadTimeout("response not received")
 
     service = AssuranceDeliveryService(
@@ -1030,9 +1005,7 @@ async def test_jira_destination_test_reads_metadata_without_creating_issue(tmp_p
             return {"issueTypes": [{"id": "10001", "name": "Task"}]}
 
     class MetadataClient(FakeDeliveryClient):
-        async def get(
-            self, url: str, *, headers: dict[str, str]
-        ) -> MetadataResponse:
+        async def get(self, url: str, *, headers: dict[str, str]) -> MetadataResponse:
             self.calls.append(
                 {
                     "method": "GET",
@@ -1043,9 +1016,7 @@ async def test_jira_destination_test_reads_metadata_without_creating_issue(tmp_p
             )
             return MetadataResponse()
 
-        async def post(
-            self, url: str, *, content: bytes, headers: dict[str, str]
-        ) -> FakeResponse:
+        async def post(self, url: str, *, content: bytes, headers: dict[str, str]) -> FakeResponse:
             raise AssertionError("The destination test must not create a Jira issue")
 
     service = AssuranceDeliveryService(
@@ -1063,9 +1034,7 @@ async def test_jira_destination_test_reads_metadata_without_creating_issue(tmp_p
     assert result["authority"] == "read-create-metadata-only"
     assert result["available_issue_types"] == ["Task"]
     assert calls[0]["method"] == "GET"
-    assert calls[0]["url"].endswith(
-        "/rest/api/3/issue/createmeta/SEC/issuetypes"
-    )
+    assert calls[0]["url"].endswith("/rest/api/3/issue/createmeta/SEC/issuetypes")
     assert calls[0]["client"]["verify"] is True
     assert calls[0]["client"]["follow_redirects"] is False
 
@@ -1098,13 +1067,9 @@ def test_soar_adapter_builds_bounded_create_only_container_payload(tmp_path):
     assert overview["destination"]["configured"] is True
     assert overview["destination"]["authorization_supported"] is False
     assert overview["destination"]["soar_auth_token_configured"] is True
-    assert overview["destination"]["transport"] == (
-        "encrypted without certificate verification"
-    )
+    assert overview["destination"]["transport"] == ("encrypted without certificate verification")
     assert overview["worker"]["external_authority"] == "create-container-only"
-    assert overview["worker"]["external_read_authority"] == (
-        "read-container-options-only"
-    )
+    assert overview["worker"]["external_read_authority"] == ("read-container-options-only")
     assert "soar_auth_token" not in overview["destination"]
 
     preview = service.preview(package["id"])
@@ -1120,9 +1085,7 @@ def test_soar_adapter_builds_bounded_create_only_container_payload(tmp_path):
     assert payload["tenant_id"] == "tenant-blue"
     assert payload["tags"] == ["signalroom", "security-assurance"]
     assert payload["run_automation"] is False
-    assert payload["source_data_identifier"] == (
-        f"signalroom-{preview['correlation_id']}"
-    )
+    assert payload["source_data_identifier"] == (f"signalroom-{preview['correlation_id']}")
     assert "artifacts" not in payload
     assert "data" not in payload
     assert "Identity telemetry coverage changed" not in serialized
@@ -1133,9 +1096,7 @@ def test_soar_adapter_builds_bounded_create_only_container_payload(tmp_path):
     assert "automation disabled" in preview["destination"]["delivery_semantics"]
     assert any("no artifacts" in warning for warning in preview["warnings"])
 
-    service.update_policy(
-        soar_policy(webhook_url=None, redaction_level="standard")
-    )
+    service.update_policy(soar_policy(webhook_url=None, redaction_level="standard"))
     standard = json.dumps(service.preview(package["id"])["payload"])
     assert "Identity telemetry coverage changed" in standard
     assert "vpn-authentication" in standard
@@ -1163,9 +1124,7 @@ async def test_soar_worker_creates_or_recovers_container_without_expanded_author
         calls: list[dict[str, Any]] = []
 
         class SoarClient(FakeDeliveryClient):
-            async def post(
-                self, url: str, *, content: bytes, headers: dict[str, str]
-            ) -> SoarResponse:
+            async def post(self, url: str, *, content: bytes, headers: dict[str, str]) -> SoarResponse:
                 self.calls.append(
                     {
                         "url": url,
@@ -1197,9 +1156,7 @@ async def test_soar_worker_creates_or_recovers_container_without_expanded_author
     assert created["status"] == "delivered"
     assert created["external_record"]["id"] == "52"
     assert created["external_record"]["key"] == "Container 52"
-    assert created["external_record"]["url"] == (
-        "https://soar.internal:8443/mission/52"
-    )
+    assert created["external_record"]["url"] == ("https://soar.internal:8443/mission/52")
     assert create_call["url"] == "https://soar.internal:8443/rest/container"
     assert create_call["headers"]["ph-auth-token"] == "soar-auth-token"
     assert "Authorization" not in create_call["headers"]
@@ -1216,18 +1173,14 @@ async def test_soar_worker_creates_or_recovers_container_without_expanded_author
             {
                 "failed": True,
                 "existing_container_id": 87,
-                "message": (
-                    "duplicate container with matching source_data_identifier"
-                ),
+                "message": ("duplicate container with matching source_data_identifier"),
             },
         ),
     )
     assert duplicate["status"] == "delivered"
     assert duplicate["external_record"]["key"] == "Container 87"
 
-    contradictory, _, _ = await deliver(
-        "contradictory", SoarResponse(400, {"id": 99, "success": True})
-    )
+    contradictory, _, _ = await deliver("contradictory", SoarResponse(400, {"id": 99, "success": True}))
     assert contradictory["status"] == "failed"
     assert contradictory["external_record"] is None
     assert "contradictory success body" in contradictory["last_error"]
@@ -1251,9 +1204,7 @@ async def test_soar_ambiguous_create_uses_bounded_source_identifier_retry(tmp_pa
     store = DeliveryStore(tmp_path / "delivery.db")
 
     class UnknownSoarClient(FakeDeliveryClient):
-        async def post(
-            self, url: str, *, content: bytes, headers: dict[str, str]
-        ) -> FakeResponse:
+        async def post(self, url: str, *, content: bytes, headers: dict[str, str]) -> FakeResponse:
             raise httpx.ReadTimeout("response not received")
 
     service = AssuranceDeliveryService(
@@ -1298,9 +1249,7 @@ async def test_soar_destination_test_reads_options_without_creating_container(tm
             }
 
     class OptionsClient(FakeDeliveryClient):
-        async def get(
-            self, url: str, *, headers: dict[str, str]
-        ) -> OptionsResponse:
+        async def get(self, url: str, *, headers: dict[str, str]) -> OptionsResponse:
             self.calls.append(
                 {
                     "method": "GET",
@@ -1311,12 +1260,8 @@ async def test_soar_destination_test_reads_options_without_creating_container(tm
             )
             return OptionsResponse()
 
-        async def post(
-            self, url: str, *, content: bytes, headers: dict[str, str]
-        ) -> FakeResponse:
-            raise AssertionError(
-                "The destination test must not create a Splunk SOAR container"
-            )
+        async def post(self, url: str, *, content: bytes, headers: dict[str, str]) -> FakeResponse:
+            raise AssertionError("The destination test must not create a Splunk SOAR container")
 
     service = AssuranceDeliveryService(
         DeliveryStore(tmp_path / "delivery.db"),

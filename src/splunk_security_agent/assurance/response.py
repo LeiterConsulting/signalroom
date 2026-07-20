@@ -46,10 +46,14 @@ class AssuranceResponseService:
             authoritative_kinds=authoritative_kinds,
             scope_key=scope_key,
         )
-        covered = self.store.covered_signal_fingerprints()
+        source_run = self.store.get_run(run_id)
+        tenant_scope_id = source_run.tenant_scope_id if source_run else ""
+        covered = self.store.covered_signal_fingerprints(tenant_scope_id=tenant_scope_id)
         authoritative = {
-            self.store.scoped_signal_fingerprint(scope_key, item["fingerprint"]):
-            str(item.get("authoritative", "true")).lower() != "false"
+            self.store.scoped_signal_fingerprint(scope_key, item["fingerprint"]): str(
+                item.get("authoritative", "true")
+            ).lower()
+            != "false"
             for item in signals
         }
         eligible = [
@@ -77,10 +81,7 @@ class AssuranceResponseService:
         )
         repeated = sum(int(item.get("consecutive_count", 0)) >= 2 for item in eligible)
         urgent = len(eligible) - repeated
-        title = (
-            f"Assurance response · {len(eligible)} actionable signal"
-            f"{'s' if len(eligible) != 1 else ''}"
-        )
+        title = f"Assurance response · {len(eligible)} actionable signal{'s' if len(eligible) != 1 else ''}"
         summary_parts = []
         if repeated:
             summary_parts.append(f"{repeated} repeated across consecutive runs")
@@ -97,9 +98,7 @@ class AssuranceResponseService:
             [item["fingerprint"] for item in eligible],
             expires_at,
         )
-        task_ids = self._validation_drafts(
-            package["id"], expires_at, eligible, result, package
-        )
+        task_ids = self._validation_drafts(package["id"], expires_at, eligible, result, package)
         package = self.store.update_package_validations(package["id"], task_ids) or package
         self.store.add_notification(
             run_id,
@@ -141,8 +140,7 @@ class AssuranceResponseService:
                         "observation before escalation or ownership decisions."
                     ),
                     "spl": (
-                        "| tstats count where earliest=-24h by index sourcetype "
-                        "| sort - count | head 100"
+                        "| tstats count where earliest=-24h by index sourcetype | sort - count | head 100"
                     ),
                     "earliest_time": "-24h",
                     "latest_time": "now",
@@ -175,11 +173,7 @@ class AssuranceResponseService:
             evidence_refs = sorted(
                 {
                     *[str(value) for value in candidate.get("evidence_refs", []) if value],
-                    *[
-                        str(item.get("source_ref"))
-                        for item in signals
-                        if item.get("source_ref")
-                    ],
+                    *[str(item.get("source_ref")) for item in signals if item.get("source_ref")],
                 }
             )[:16]
             task = service.create(
@@ -201,9 +195,7 @@ class AssuranceResponseService:
                     approval_scope="single-execution",
                     connection_alias=str(binding.get("connection_alias") or "primary"),
                     connection_fingerprint=str(binding.get("connection_fingerprint") or ""),
-                    tenant_scope_id=str(
-                        binding.get("tenant_scope_id") or "workspace-primary"
-                    ),
+                    tenant_scope_id=str(binding.get("tenant_scope_id") or "workspace-primary"),
                 )
             )
             task_ids.append(task.id)
@@ -223,10 +215,7 @@ class AssuranceResponseService:
             detail = str(finding.get("evidence") or finding.get("next_step") or "")
             if failed_calls:
                 severity = "medium" if severity in {"critical", "high"} else severity
-                detail = (
-                    "Collection was incomplete; treat this derived finding as unverified. "
-                    f"{detail}"
-                )
+                detail = f"Collection was incomplete; treat this derived finding as unverified. {detail}"
             values.append(
                 cls._signal(
                     "finding",
@@ -306,10 +295,7 @@ class AssuranceResponseService:
                         "collection",
                         "high",
                         "Assurance collection path failed",
-                        (
-                            f"The bounded read-only collection path failed: {subject}. "
-                            f"{error}"
-                        ).strip(),
+                        (f"The bounded read-only collection path failed: {subject}. {error}").strip(),
                         subject,
                         "",
                         [subject],

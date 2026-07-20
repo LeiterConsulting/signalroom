@@ -276,6 +276,14 @@ async def test_forecast_baselines_are_isolated_by_splunk_identity_revision(tmp_p
 
     assert first["source"]["connection_alias"] == "soc-east"
     assert second["source"]["connection_alias"] == "soc-west"
+    east_record = experiments.get(first["run_id"], "tenant-east")
+    assert east_record is not None
+    assert east_record["connection_alias"] == "soc-east"
+    assert east_record["connection_fingerprint"] == "a" * 64
+    assert east_record["tenant_scope_id"] == "tenant-east"
+    assert experiments.get(first["run_id"], "tenant-west") is None
+    assert [item["id"] for item in experiments.list(tenant_scope_id="tenant-east")] == [first["run_id"]]
+    assert [item["id"] for item in experiments.list(tenant_scope_id="tenant-west")] == [second["run_id"]]
     assert first["experiment"]["series_key"] != second["experiment"]["series_key"]
     assert second["experiment"]["comparison"]["decision"] == "no-baseline"
 

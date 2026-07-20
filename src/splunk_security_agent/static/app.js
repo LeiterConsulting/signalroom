@@ -779,8 +779,12 @@ function activeScope() {
 function scopePayload() { return activeScope(); }
 
 function scopedUrl(path, params = {}) {
+  return scopedBindingUrl(path, params, scopePayload());
+}
+
+function scopedBindingUrl(path, params = {}, binding = {}) {
   const target = new URL(path, location.origin);
-  Object.entries({...params, ...scopePayload()}).forEach(([key,value]) => target.searchParams.set(key, value));
+  Object.entries({...params, ...binding}).forEach(([key,value]) => target.searchParams.set(key, value));
   return `${target.pathname}${target.search}`;
 }
 
@@ -1728,6 +1732,7 @@ function openTimeSeriesWorkbench() {
     $('#startBundledTimeSeries').addEventListener('click', startBundledTimeSeriesRuntime);
   }
   $('#refreshTimeSeriesExperiments').addEventListener('click', loadTimeSeriesExperiments);
+  $('#forecastTarget').addEventListener('change', loadTimeSeriesExperiments);
   $('#refreshTimeSeriesSchedules').addEventListener('click', loadTimeSeriesSchedules);
   loadTimeSeriesExperiments();
   loadTimeSeriesSchedules();
@@ -1998,7 +2003,8 @@ async function loadTimeSeriesExperiments(event) {
   const button = event?.currentTarget?.id === 'refreshTimeSeriesExperiments' ? event.currentTarget : null;
   if (button) { button.disabled = true; button.textContent = 'Refreshing…'; }
   try {
-    state.timeSeriesExperiments = await api('/api/model-capabilities/time-series/experiments?limit=40');
+    const target = $('#forecastTarget') ? selectedScope('#forecastTarget') : state.activeScope;
+    state.timeSeriesExperiments = await api(scopedBindingUrl('/api/model-capabilities/time-series/experiments', {limit:40}, bindingPayload(target || {})));
     renderTimeSeriesExperiments();
   } catch (error) {
     const panel = $('#timeSeriesExperimentHistory');
@@ -2107,7 +2113,8 @@ async function acceptTimeSeriesBaseline(event) {
   const form = event.currentTarget; const button = form.querySelector('button[type="submit"]');
   button.disabled = true; button.textContent = 'Accepting exact run…';
   try {
-    await api(`/api/model-capabilities/time-series/experiments/${encodeURIComponent(form.dataset.timeSeriesBaselineForm)}/baseline`, {
+    const run = (state.timeSeriesExperiments?.runs || []).find(item => item.id === form.dataset.timeSeriesBaselineForm);
+    await api(scopedBindingUrl(`/api/model-capabilities/time-series/experiments/${encodeURIComponent(form.dataset.timeSeriesBaselineForm)}/baseline`, {}, bindingPayload(run || {})), {
       method:'POST',
       body:JSON.stringify({
         expected_run_fingerprint:form.dataset.runFingerprint,
@@ -2128,7 +2135,8 @@ async function createTimeSeriesAlertCandidate(event) {
   const values = new FormData(form);
   button.disabled = true; button.textContent = 'Staging validation draft…';
   try {
-    const result = await api(`/api/model-capabilities/time-series/experiments/${encodeURIComponent(form.dataset.timeSeriesCandidateForm)}/alert-candidates`, {
+    const run = (state.timeSeriesExperiments?.runs || []).find(item => item.id === form.dataset.timeSeriesCandidateForm);
+    const result = await api(scopedBindingUrl(`/api/model-capabilities/time-series/experiments/${encodeURIComponent(form.dataset.timeSeriesCandidateForm)}/alert-candidates`, {}, bindingPayload(run || {})), {
       method:'POST',
       body:JSON.stringify({
         expected_run_fingerprint:form.dataset.runFingerprint,
@@ -3341,7 +3349,8 @@ function caseAssurancePackage(packageId) {
 }
 
 async function closeAssurancePackage(packageId) {
-  try { await api(`/api/assurance/packages/${encodeURIComponent(packageId)}/close`, {method:'POST'}); await loadAssurance(); toast('Assurance response package closed'); }
+  const item = assurancePackage(packageId);
+  try { await api(scopedBindingUrl(`/api/assurance/packages/${encodeURIComponent(packageId)}/close`, {}, bindingPayload(item || {})), {method:'POST'}); await loadAssurance(); toast('Assurance response package closed'); }
   catch (error) { toast(error.message); }
 }
 
@@ -3695,7 +3704,7 @@ function renderDelivery(value) {
       ? `<div class="delivery-external-record"><a href="${escapeHtml(job.external_record.url)}" target="_blank" rel="noopener noreferrer">${job.destination_kind === 'splunk-soar' ? `Open correlated Splunk SOAR ${escapeHtml(job.external_record.key)}` : `Open correlated Jira issue ${escapeHtml(job.external_record.key)}`} ↗</a></div>`
       : '';
     const reconciliation = job.destination_kind === 'jira-cloud' && job.external_record ? renderJiraReconciliation(job) : '';
-    return `<article class="delivery-job ${escapeHtml(job.status)}"><header><span>${escapeHtml(job.approval_mode.replaceAll('-', ' '))}</span><b>${escapeHtml(job.status)}</b></header><p>Package <code>${escapeHtml(job.package_id.slice(0,8))}</code> → ${escapeHtml(job.destination_label)}</p><div><span>${escapeHtml(deliveryAdapterName(job.destination_kind))}</span><span>${job.attempt_count}/${job.max_attempts} attempts</span><span>HTTP ${job.http_status || '—'}</span><span>Hash <code>${escapeHtml(job.payload_sha256.slice(0,12))}</code></span></div>${externalRecord}${reconciliation}${job.last_error ? `<small>${escapeHtml(job.last_error)}</small>` : ''}<footer><time>${escapeHtml(timing)}</time><div>${action}</div></footer></article>`;
+    return `<article class="delivery-job ${escapeHtml(job.status)}"><header><span>${escapeHtml(job.approval_mode.replaceAll('-', ' '))} · ${escapeHtml(job.connection_alias || 'primary')} · ${escapeHtml(job.tenant_scope_id || 'workspace-primary')}</span><b>${escapeHtml(job.status)}</b></header><p>Package <code>${escapeHtml(job.package_id.slice(0,8))}</code> → ${escapeHtml(job.destination_label)}</p><div><span>${escapeHtml(deliveryAdapterName(job.destination_kind))}</span><span>${job.attempt_count}/${job.max_attempts} attempts</span><span>HTTP ${job.http_status || '—'}</span><span>Hash <code>${escapeHtml(job.payload_sha256.slice(0,12))}</code></span><span>Splunk revision <code>${escapeHtml((job.connection_fingerprint || 'legacy').slice(0,12))}</code></span></div>${externalRecord}${reconciliation}${job.last_error ? `<small>${escapeHtml(job.last_error)}</small>` : ''}<footer><time>${escapeHtml(timing)}</time><div>${action}</div></footer></article>`;
   }).join('') : '<div class="empty-inline compact-empty">No outbound package has been approved. Preview an eligible response package to start.</div>';
   const audit = value.audit || {}; const chain = audit.chain || {};
   $('#auditChainStatus').textContent = chain.valid ? `${chain.event_count || 0} events · chain valid` : `Integrity break at event ${chain.broken_sequence || 'unknown'}`;
@@ -3899,7 +3908,8 @@ async function exportAuditOperations() {
 
 async function previewAssuranceDelivery(packageId) {
   try {
-    const preview = await api(`/api/assurance/packages/${encodeURIComponent(packageId)}/delivery/preview`, {method:'POST'});
+    const item = assurancePackage(packageId);
+    const preview = await api(scopedBindingUrl(`/api/assurance/packages/${encodeURIComponent(packageId)}/delivery/preview`, {}, bindingPayload(item || {})), {method:'POST'});
     state.deliveryPreview = preview;
     const authority = preview.authority?.external_create
       ? preview.destination.kind === 'splunk-soar'
@@ -3919,19 +3929,21 @@ async function approveDeliveryPreview() {
   const preview = state.deliveryPreview; if (!preview) return;
   const button = $('#approveDelivery'); button.disabled = true; button.textContent = 'Queueing…';
   try {
-    await api(`/api/assurance/packages/${encodeURIComponent(preview.package_id)}/delivery/approve`, {method:'POST',body:JSON.stringify({expected_payload_sha256:preview.payload_sha256})});
+    await api(`/api/assurance/packages/${encodeURIComponent(preview.package_id)}/delivery/approve`, {method:'POST',body:JSON.stringify({expected_payload_sha256:preview.payload_sha256,...bindingPayload(preview)})});
     $('#deliveryPreviewModal').hidden = true; state.deliveryPreview = null; await loadAssurance(); toast('Exact redacted payload approved and queued');
   } catch (error) { toast(error.message); }
   finally { button.disabled = false; }
 }
 
 async function retryDelivery(jobId) {
-  try { await api(`/api/delivery/jobs/${encodeURIComponent(jobId)}/retry`, {method:'POST'}); await loadAssurance(); toast('Bounded delivery retry queued'); }
+  const job = (state.assurance?.delivery?.jobs || []).find(item => item.id === jobId);
+  try { await api(scopedBindingUrl(`/api/delivery/jobs/${encodeURIComponent(jobId)}/retry`, {}, bindingPayload(job || {})), {method:'POST'}); await loadAssurance(); toast('Bounded delivery retry queued'); }
   catch (error) { toast(error.message); }
 }
 
 async function cancelDelivery(jobId) {
-  try { await api(`/api/delivery/jobs/${encodeURIComponent(jobId)}/cancel`, {method:'POST'}); await loadAssurance(); toast('Outbound delivery cancelled'); }
+  const job = (state.assurance?.delivery?.jobs || []).find(item => item.id === jobId);
+  try { await api(scopedBindingUrl(`/api/delivery/jobs/${encodeURIComponent(jobId)}/cancel`, {}, bindingPayload(job || {})), {method:'POST'}); await loadAssurance(); toast('Outbound delivery cancelled'); }
   catch (error) { toast(error.message); }
 }
 
@@ -3941,7 +3953,8 @@ async function reconcileDelivery(button) {
   button.disabled = true;
   button.textContent = 'Reading Jira…';
   try {
-    const result = await api(`/api/delivery/jobs/${encodeURIComponent(jobId)}/reconcile`, {method:'POST'});
+    const job = (state.assurance?.delivery?.jobs || []).find(item => item.id === jobId);
+    const result = await api(scopedBindingUrl(`/api/delivery/jobs/${encodeURIComponent(jobId)}/reconcile`, {}, bindingPayload(job || {})), {method:'POST'});
     await loadAssurance();
     if (result.outcome === 'observed') {
       const count = result.drift?.changes?.length || 0;

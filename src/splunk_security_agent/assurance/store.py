@@ -76,7 +76,10 @@ class AssuranceStore:
                     source_ref TEXT NOT NULL, status TEXT NOT NULL,
                     occurrence_count INTEGER NOT NULL, consecutive_count INTEGER NOT NULL,
                     first_run_id TEXT NOT NULL, last_run_id TEXT NOT NULL,
-                    first_seen_at TEXT NOT NULL, last_seen_at TEXT NOT NULL, resolved_at TEXT
+                    first_seen_at TEXT NOT NULL, last_seen_at TEXT NOT NULL, resolved_at TEXT,
+                    connection_alias TEXT NOT NULL DEFAULT 'primary',
+                    connection_fingerprint TEXT NOT NULL DEFAULT '',
+                    tenant_scope_id TEXT NOT NULL DEFAULT ''
                 );
                 CREATE INDEX IF NOT EXISTS idx_assurance_signals_state
                     ON assurance_signals(status, last_seen_at DESC);
@@ -85,29 +88,32 @@ class AssuranceStore:
                     status TEXT NOT NULL, title TEXT NOT NULL, summary TEXT NOT NULL,
                     signal_fingerprints TEXT NOT NULL, validation_task_ids TEXT NOT NULL,
                     expires_at TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
-                    closed_at TEXT
+                    closed_at TEXT,
+                    connection_alias TEXT NOT NULL DEFAULT 'primary',
+                    connection_fingerprint TEXT NOT NULL DEFAULT '',
+                    tenant_scope_id TEXT NOT NULL DEFAULT ''
                 );
                 CREATE INDEX IF NOT EXISTS idx_assurance_packages_state
                     ON assurance_packages(status, created_at DESC);
                 """
             )
-            self._ensure_column(
-                db, "assurance_policy", "connection_alias", "TEXT NOT NULL DEFAULT 'primary'"
+            self._ensure_column(db, "assurance_policy", "connection_alias", "TEXT NOT NULL DEFAULT 'primary'")
+            self._ensure_column(db, "assurance_policy", "connection_fingerprint", "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column(db, "assurance_policy", "tenant_scope_id", "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column(db, "assurance_runs", "connection_alias", "TEXT NOT NULL DEFAULT 'primary'")
+            self._ensure_column(db, "assurance_runs", "connection_fingerprint", "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column(db, "assurance_runs", "tenant_scope_id", "TEXT NOT NULL DEFAULT ''")
+            for table in ("assurance_signals", "assurance_packages"):
+                self._ensure_column(db, table, "connection_alias", "TEXT NOT NULL DEFAULT 'primary'")
+                self._ensure_column(db, table, "connection_fingerprint", "TEXT NOT NULL DEFAULT ''")
+                self._ensure_column(db, table, "tenant_scope_id", "TEXT NOT NULL DEFAULT ''")
+            db.execute(
+                """CREATE INDEX IF NOT EXISTS idx_assurance_signals_tenant_state
+                ON assurance_signals(tenant_scope_id,status,last_seen_at DESC)"""
             )
-            self._ensure_column(
-                db, "assurance_policy", "connection_fingerprint", "TEXT NOT NULL DEFAULT ''"
-            )
-            self._ensure_column(
-                db, "assurance_policy", "tenant_scope_id", "TEXT NOT NULL DEFAULT ''"
-            )
-            self._ensure_column(
-                db, "assurance_runs", "connection_alias", "TEXT NOT NULL DEFAULT 'primary'"
-            )
-            self._ensure_column(
-                db, "assurance_runs", "connection_fingerprint", "TEXT NOT NULL DEFAULT ''"
-            )
-            self._ensure_column(
-                db, "assurance_runs", "tenant_scope_id", "TEXT NOT NULL DEFAULT ''"
+            db.execute(
+                """CREATE INDEX IF NOT EXISTS idx_assurance_packages_tenant_state
+                ON assurance_packages(tenant_scope_id,status,created_at DESC)"""
             )
             db.execute(
                 """INSERT OR IGNORE INTO assurance_policy
@@ -139,12 +145,8 @@ class AssuranceStore:
     def update_policy(self, value: AssurancePolicyUpdate) -> dict[str, Any]:
         now = _now()
         current = self.policy()
-        reset_schedule = (
-            value.enabled
-            and (
-                not current["enabled"]
-                or value.interval_minutes != current["interval_minutes"]
-            )
+        reset_schedule = value.enabled and (
+            not current["enabled"] or value.interval_minutes != current["interval_minutes"]
         )
         next_run_at = current.get("next_run_at")
         if not value.enabled:
@@ -172,7 +174,7 @@ class AssuranceStore:
         return self.policy()
 
     def bind_unbound(self, binding: dict[str, Any]) -> dict[str, int]:
-        """One-time migration for policy and runs created before identity binding."""
+        """One-time migration for legacy assurance roots and their response records."""
         values = (
             str(binding["alias"]),
             str(binding["fingerprint"]),
@@ -191,7 +193,34 @@ class AssuranceStore:
                 WHERE connection_fingerprint=''""",
                 values,
             )
-        return {"policy": int(policy.rowcount), "runs": int(runs.rowcount)}
+            signals = db.execute(
+                """UPDATE assurance_signals SET
+                connection_alias=COALESCE((SELECT connection_alias FROM assurance_runs
+                    WHERE assurance_runs.id=assurance_signals.last_run_id),?),
+                connection_fingerprint=COALESCE((SELECT connection_fingerprint FROM assurance_runs
+                    WHERE assurance_runs.id=assurance_signals.last_run_id),?),
+                tenant_scope_id=COALESCE((SELECT tenant_scope_id FROM assurance_runs
+                    WHERE assurance_runs.id=assurance_signals.last_run_id),?)
+                WHERE connection_fingerprint='' OR tenant_scope_id=''""",
+                values,
+            )
+            packages = db.execute(
+                """UPDATE assurance_packages SET
+                connection_alias=COALESCE((SELECT connection_alias FROM assurance_runs
+                    WHERE assurance_runs.id=assurance_packages.source_run_id),?),
+                connection_fingerprint=COALESCE((SELECT connection_fingerprint FROM assurance_runs
+                    WHERE assurance_runs.id=assurance_packages.source_run_id),?),
+                tenant_scope_id=COALESCE((SELECT tenant_scope_id FROM assurance_runs
+                    WHERE assurance_runs.id=assurance_packages.source_run_id),?)
+                WHERE connection_fingerprint='' OR tenant_scope_id=''""",
+                values,
+            )
+        return {
+            "policy": int(policy.rowcount),
+            "runs": int(runs.rowcount),
+            "signals": int(signals.rowcount),
+            "packages": int(packages.rowcount),
+        }
 
     def rebind_policy(
         self,
@@ -544,6 +573,15 @@ class AssuranceStore:
     ) -> list[dict[str, Any]]:
         """Correlate deterministic signals while protecting partial reads from false resolution."""
         now = _now().isoformat()
+        run = self.get_run(run_id)
+        parsed_scope = scope_key.split("|", 2) if scope_key else []
+        binding = (
+            run.connection_alias if run else (parsed_scope[0] if len(parsed_scope) == 3 else "primary"),
+            run.connection_fingerprint if run else (parsed_scope[1] if len(parsed_scope) == 3 else ""),
+            run.tenant_scope_id
+            if run
+            else (parsed_scope[2] if len(parsed_scope) == 3 else "workspace-primary"),
+        )
         signals = [
             {
                 **item,
@@ -556,11 +594,11 @@ class AssuranceStore:
         ]
         seen = {item["fingerprint"] for item in signals if item.get("fingerprint")}
         with self._lock, self.connect() as db:
-            if scope_key:
+            if binding[2]:
                 active_rows = db.execute(
                     """SELECT * FROM assurance_signals
-                    WHERE status!='resolved' AND fingerprint LIKE ?""",
-                    (f"{self._scope_prefix(scope_key)}%",),
+                    WHERE status!='resolved' AND tenant_scope_id=?""",
+                    (binding[2],),
                 ).fetchall()
             else:
                 active_rows = db.execute(
@@ -575,9 +613,7 @@ class AssuranceStore:
                 ).fetchone()
                 if existing and existing["last_run_id"] == run_id:
                     continue
-                observation_authoritative = (
-                    str(item.get("authoritative", "true")).lower() != "false"
-                )
+                observation_authoritative = str(item.get("authoritative", "true")).lower() != "false"
                 occurrence_count = int(existing["occurrence_count"]) + 1 if existing else 1
                 if observation_authoritative:
                     consecutive_count = (
@@ -600,7 +636,8 @@ class AssuranceStore:
                     db.execute(
                         """UPDATE assurance_signals SET kind=?, severity=?, title=?, detail=?,
                         subject=?, source_ref=?, status=?, occurrence_count=?, consecutive_count=?,
-                        last_run_id=?, last_seen_at=?, resolved_at=NULL WHERE fingerprint=?""",
+                        last_run_id=?, last_seen_at=?, resolved_at=NULL,connection_alias=?,
+                        connection_fingerprint=?,tenant_scope_id=? WHERE fingerprint=?""",
                         (
                             item.get("kind", "finding"),
                             severity,
@@ -613,6 +650,7 @@ class AssuranceStore:
                             consecutive_count,
                             run_id,
                             now,
+                            *binding,
                             fingerprint,
                         ),
                     )
@@ -621,8 +659,9 @@ class AssuranceStore:
                         """INSERT INTO assurance_signals
                         (fingerprint,kind,severity,title,detail,subject,source_ref,status,
                         occurrence_count,consecutive_count,first_run_id,last_run_id,
-                        first_seen_at,last_seen_at,resolved_at)
-                        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL)""",
+                        first_seen_at,last_seen_at,resolved_at,connection_alias,
+                        connection_fingerprint,tenant_scope_id)
+                        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL,?,?,?)""",
                         (
                             fingerprint,
                             item.get("kind", "finding"),
@@ -638,6 +677,7 @@ class AssuranceStore:
                             run_id,
                             now,
                             now,
+                            *binding,
                         ),
                     )
             if authoritative:
@@ -650,11 +690,7 @@ class AssuranceStore:
                             consecutive_count=0, resolved_at=? WHERE fingerprint=?""",
                             (now, row["fingerprint"]),
                         )
-        return [
-            item
-            for fingerprint in seen
-            if (item := self.get_signal(fingerprint)) is not None
-        ]
+        return [item for fingerprint in seen if (item := self.get_signal(fingerprint)) is not None]
 
     @staticmethod
     def _scope_prefix(scope_key: str) -> str:
@@ -669,16 +705,23 @@ class AssuranceStore:
 
     def get_signal(self, fingerprint: str) -> dict[str, Any] | None:
         with self.connect() as db:
-            row = db.execute(
-                "SELECT * FROM assurance_signals WHERE fingerprint=?", (fingerprint,)
-            ).fetchone()
+            row = db.execute("SELECT * FROM assurance_signals WHERE fingerprint=?", (fingerprint,)).fetchone()
         return self._signal(row) if row else None
 
-    def signals(self, limit: int = 50, *, scope_key: str = "") -> list[dict[str, Any]]:
+    def signals(
+        self,
+        limit: int = 50,
+        *,
+        scope_key: str = "",
+        tenant_scope_id: str = "",
+    ) -> list[dict[str, Any]]:
         with self.connect() as db:
             query = """SELECT * FROM assurance_signals"""
             parameters: tuple[Any, ...]
-            if scope_key:
+            if tenant_scope_id:
+                query += " WHERE tenant_scope_id=?"
+                parameters = (tenant_scope_id, limit)
+            elif scope_key:
                 query += " WHERE fingerprint LIKE ?"
                 parameters = (f"{self._scope_prefix(scope_key)}%", limit)
             else:
@@ -690,17 +733,15 @@ class AssuranceStore:
             rows = db.execute(query, parameters).fetchall()
         return [self._signal(row) for row in rows]
 
-    def signal_counts(self, *, scope_key: str = "") -> dict[str, int]:
-        signals = self.signals(limit=10000, scope_key=scope_key)
+    def signal_counts(self, *, scope_key: str = "", tenant_scope_id: str = "") -> dict[str, int]:
+        signals = self.signals(limit=10000, scope_key=scope_key, tenant_scope_id=tenant_scope_id)
         counts = {
             "actionable": sum(item["status"] == "persistent" for item in signals),
             "repeated": sum(
-                item["status"] == "persistent" and item["consecutive_count"] >= 2
-                for item in signals
+                item["status"] == "persistent" and item["consecutive_count"] >= 2 for item in signals
             ),
             "severity_elevated": sum(
-                item["status"] == "persistent" and item["consecutive_count"] < 2
-                for item in signals
+                item["status"] == "persistent" and item["consecutive_count"] < 2 for item in signals
             ),
             "watching": sum(item["status"] == "watching" for item in signals),
             "resolved": sum(item["status"] == "resolved" for item in signals),
@@ -718,12 +759,39 @@ class AssuranceStore:
     ) -> dict[str, Any]:
         package_id = str(uuid4())
         now = _now().isoformat()
+        source_run = self.get_run(source_run_id)
+        source_signal = next(
+            (
+                signal
+                for fingerprint in signal_fingerprints
+                if (signal := self.get_signal(fingerprint)) is not None
+            ),
+            None,
+        )
+        binding = {
+            "connection_alias": (
+                source_run.connection_alias
+                if source_run
+                else str((source_signal or {}).get("connection_alias") or "primary")
+            ),
+            "connection_fingerprint": (
+                source_run.connection_fingerprint
+                if source_run
+                else str((source_signal or {}).get("connection_fingerprint") or "")
+            ),
+            "tenant_scope_id": (
+                source_run.tenant_scope_id
+                if source_run
+                else str((source_signal or {}).get("tenant_scope_id") or "workspace-primary")
+            ),
+        }
         with self._lock, self.connect() as db:
             db.execute(
                 """INSERT INTO assurance_packages
                 (id,source_run_id,severity,status,title,summary,signal_fingerprints,
-                validation_task_ids,expires_at,created_at,updated_at,closed_at)
-                VALUES (?,?,?,'review',?,?,?,?,?,?,?,NULL)""",
+                validation_task_ids,expires_at,created_at,updated_at,closed_at,
+                connection_alias,connection_fingerprint,tenant_scope_id)
+                VALUES (?,?,?,'review',?,?,?,?,?,?,?,NULL,?,?,?)""",
                 (
                     package_id,
                     source_run_id,
@@ -735,6 +803,9 @@ class AssuranceStore:
                     expires_at,
                     now,
                     now,
+                    binding["connection_alias"],
+                    binding["connection_fingerprint"],
+                    binding["tenant_scope_id"],
                 ),
             )
         result = self.get_package(package_id)
@@ -763,37 +834,53 @@ class AssuranceStore:
             )
         return int(result.rowcount)
 
-    def get_package(self, package_id: str) -> dict[str, Any] | None:
+    def get_package(self, package_id: str, tenant_scope_id: str = "") -> dict[str, Any] | None:
         self.expire_packages()
         with self.connect() as db:
-            row = db.execute(
-                "SELECT * FROM assurance_packages WHERE id=?", (package_id,)
-            ).fetchone()
+            if tenant_scope_id:
+                row = db.execute(
+                    """SELECT * FROM assurance_packages
+                    WHERE id=? AND tenant_scope_id=?""",
+                    (package_id, tenant_scope_id),
+                ).fetchone()
+            else:
+                row = db.execute("SELECT * FROM assurance_packages WHERE id=?", (package_id,)).fetchone()
         return self._package_with_signals(row) if row else None
 
-    def packages(self, limit: int = 20) -> list[dict[str, Any]]:
+    def packages(self, limit: int = 20, *, tenant_scope_id: str = "") -> list[dict[str, Any]]:
         self.expire_packages()
         with self.connect() as db:
-            rows = db.execute(
-                """SELECT * FROM assurance_packages ORDER BY
-                CASE status WHEN 'review' THEN 0 WHEN 'expired' THEN 1 ELSE 2 END,
-                created_at DESC LIMIT ?""",
-                (limit,),
-            ).fetchall()
+            if tenant_scope_id:
+                rows = db.execute(
+                    """SELECT * FROM assurance_packages WHERE tenant_scope_id=? ORDER BY
+                    CASE status WHEN 'review' THEN 0 WHEN 'expired' THEN 1 ELSE 2 END,
+                    created_at DESC LIMIT ?""",
+                    (tenant_scope_id, limit),
+                ).fetchall()
+            else:
+                rows = db.execute(
+                    """SELECT * FROM assurance_packages ORDER BY
+                    CASE status WHEN 'review' THEN 0 WHEN 'expired' THEN 1 ELSE 2 END,
+                    created_at DESC LIMIT ?""",
+                    (limit,),
+                ).fetchall()
         return [self._package_with_signals(row) for row in rows]
 
-    def covered_signal_fingerprints(self) -> set[str]:
+    def covered_signal_fingerprints(self, *, tenant_scope_id: str = "") -> set[str]:
         self.expire_packages()
         with self.connect() as db:
-            rows = db.execute(
-                """SELECT signal_fingerprints FROM assurance_packages
-                WHERE status='review'"""
-            ).fetchall()
-        return {
-            fingerprint
-            for row in rows
-            for fingerprint in json.loads(row["signal_fingerprints"])
-        }
+            if tenant_scope_id:
+                rows = db.execute(
+                    """SELECT signal_fingerprints FROM assurance_packages
+                    WHERE status='review' AND tenant_scope_id=?""",
+                    (tenant_scope_id,),
+                ).fetchall()
+            else:
+                rows = db.execute(
+                    """SELECT signal_fingerprints FROM assurance_packages
+                    WHERE status='review'"""
+                ).fetchall()
+        return {fingerprint for row in rows for fingerprint in json.loads(row["signal_fingerprints"])}
 
     def close_package(self, package_id: str) -> dict[str, Any] | None:
         self.expire_packages()
@@ -905,6 +992,9 @@ class AssuranceStore:
             "first_seen_at": row["first_seen_at"],
             "last_seen_at": row["last_seen_at"],
             "resolved_at": row["resolved_at"],
+            "connection_alias": row["connection_alias"],
+            "connection_fingerprint": row["connection_fingerprint"],
+            "tenant_scope_id": row["tenant_scope_id"],
         }
 
     def _package_with_signals(self, row: sqlite3.Row) -> dict[str, Any]:
@@ -917,7 +1007,6 @@ class AssuranceStore:
         return value
 
     def _package(self, row: sqlite3.Row) -> dict[str, Any]:
-        run = self.get_run(str(row["source_run_id"]))
         return {
             "id": row["id"],
             "source_run_id": row["source_run_id"],
@@ -931,7 +1020,7 @@ class AssuranceStore:
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
             "closed_at": row["closed_at"],
-            "connection_alias": run.connection_alias if run else "primary",
-            "connection_fingerprint": run.connection_fingerprint if run else "",
-            "tenant_scope_id": run.tenant_scope_id if run else "",
+            "connection_alias": row["connection_alias"],
+            "connection_fingerprint": row["connection_fingerprint"],
+            "tenant_scope_id": row["tenant_scope_id"],
         }
