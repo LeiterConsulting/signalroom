@@ -25,6 +25,7 @@ This is a focused reimplementation inspired by [LeiterConsulting/splunk-discover
 - Audit-first model publisher allowlists and local Ed25519 approvals bound to exact model revisions and content digests
 - Opt-in generic JSON and Slack Incoming Webhook adapters with exact redaction previews, hash-bound approval, guarded routing, and a tamper-evident local audit chain
 - Opt-in export of the verified audit chain to a dedicated Splunk HEC index with a durable cursor, bounded retries, and optional indexer acknowledgement
+- A destination-bound Splunk audit operations kit with review-only retention, dashboard, disabled alerts, stable-ID deduplication, and local export-lag health
 - Evidence-bound detection-as-code projects with immutable versions, exact-hash review, case linkage, and disabled-by-default Splunk packages
 - Ollama chat and tool-capable model support
 - Hugging Face chat, embedding, and token-classification adapters
@@ -606,6 +607,19 @@ uncommitted cursor; a broken local chain blocks export. See Splunk's
 and [indexer acknowledgement](https://help.splunk.com/en/splunk-enterprise/get-data-in/get-started-with-getting-data-in/9.1/get-data-with-http-event-collector/about-http-event-collector-indexer-acknowledgment)
 documentation.
 
+**Destination operations** turns that delivery contract into a reviewable Splunk deployment kit. An administrator
+sets the searchable-retention expectation, canonical retry policy, local export-lag expectation, source-silence
+threshold, denied-request threshold, and default dashboard window. Preview exposes every alert search and its
+schedule before export. The ZIP contains separate search-head and indexer apps, an accessible Simple XML dashboard,
+raw and canonical macros, four disabled alert definitions, the dedicated-index retention stanza, deployment
+guidance, and a SHA-256 file manifest bound to the current index and sourcetype.
+
+Generating the kit does not call Splunk or install anything. All schedules remain `disabled = 1`, no alert action is
+configured, and retention changes only if a Splunk administrator deploys the indexer component. The raw macro
+preserves retry evidence; the canonical macro can deduplicate by `signalroom_event_id` without deleting indexed
+events. The Discovery page independently reports local cursor lag and cannot claim that destination content is
+installed or healthy.
+
 Splunk SOAR now has a duplicate-safe, create-container-only adapter with exact-payload approval, automation disabled,
 no artifacts, durable correlation, self-signed/private-CA transport support, and a read-only container-options test.
 Correlated Jira issues retain explicit read-only reconciliation and immutable local drift history. Optional local
@@ -616,9 +630,10 @@ Investigate, Discovery, Validation, Assurance, and MLTK traffic with live queue 
 per-instance concurrency, and audit-first risk and UTC-day budget policy. Operator-authored evaluation suites now
 extend the durable golden and tournament authorities. Verified audit events can now be exported to a dedicated
 Splunk index under an explicit HEC delivery policy. Optional single-issuer OIDC now adds PKCE, provider MFA
-evidence, exact tenant/group admission, immutable-subject binding, and host-only local-account recovery. The next
-production increment is deployment-specific audit retention, dashboards, alerts, destination-side deduplication,
-and deeper tenant/data-boundary design.
+evidence, exact tenant/group admission, immutable-subject binding, and host-only local-account recovery.
+Deployment-specific audit operations now add a destination-bound, disabled-by-default Splunk content pack and a
+local export-lag contract. The next production increment is multi-instance tenancy, per-connection authorization,
+and identity lifecycle provisioning/deprovisioning.
 
 ### Operator-authored evaluation suites
 
@@ -682,8 +697,8 @@ open tickets, or change Splunk; external workflow automation remains an explicit
 
 This release is an operator-grade prototype with optional local RBAC, not a complete multi-tenant security product.
 Before external exposure, enable RBAC and add HTTPS, trusted proxy configuration, centralized identity and recovery,
-configure the dedicated audit export with destination-side retention and alerting, add broader rate limiting, and
-complete a deployment-specific threat model.
+configure the dedicated audit export, review and deploy the generated destination controls through the appropriate
+Splunk topology, add broader rate limiting, and complete a deployment-specific threat model.
 Keep local single-user mode bound to localhost.
 
 ## License and attribution

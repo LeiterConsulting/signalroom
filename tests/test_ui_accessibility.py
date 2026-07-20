@@ -26,6 +26,21 @@ def test_ui_uses_readable_system_type_scale() -> None:
 
     assert pixel_sizes
     assert min(pixel_sizes) >= 12
+
+
+def test_mobile_navigation_keeps_accessible_names_and_discovery_contains_width() -> None:
+    for label in (
+        "Investigate",
+        "Discovery",
+        "Cases",
+        "Detections",
+        "Context",
+        "Models",
+        "Setup",
+    ):
+        assert f'aria-label="{label}"' in INDEX_HTML
+    assert ".discovery-grid>*,.purpose-grid>*" in STYLES_CSS
+    assert ".run-controls select,.run-controls .button" in STYLES_CSS
     assert "DM Mono" not in STYLES_CSS
     assert '"Segoe UI Variable Text"' in STYLES_CSS
     assert "--font-mono:" in STYLES_CSS
@@ -156,3 +171,11 @@ def test_remote_audit_export_is_explicit_and_accessible() -> None:
     assert "async function runAuditExportNow" in APP_JS
     assert "renderAuditExport(value.audit_export || {})" in APP_JS
     assert ".audit-export-workspace" in STYLES_CSS
+    assert 'id="auditOperationsForm"' in INDEX_HTML
+    assert 'id="auditDeduplicationMode"' in INDEX_HTML
+    assert 'id="previewAuditOperations"' in INDEX_HTML
+    assert 'id="exportAuditOperations"' in INDEX_HTML
+    assert "async function previewAuditOperations" in APP_JS
+    assert "async function exportAuditOperations" in APP_JS
+    assert "renderAuditOperations(value.audit_operations || {})" in APP_JS
+    assert ".audit-operations-workspace" in STYLES_CSS

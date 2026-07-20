@@ -337,6 +337,24 @@ durable. A crash before cursor commit can resend a batch, so delivery remains at
 hashes provide a destination deduplication key. Enabling or changing the destination begins with the next event
 unless the administrator explicitly requests verified-chain backfill.
 
+## Audit operations is a review-only promotion boundary
+
+`AuditOperationsService` converts the delivery contract into a destination-bound, locally generated Splunk
+deployment kit. Its durable policy records searchable retention, canonical stable-ID deduplication, local
+export-lag expectation, destination-silence threshold, denied-request threshold, and dashboard range. Policy
+updates and pack exports are appended to the same local audit chain.
+
+The generator emits two topology-specific apps. The search-head app provides a Simple XML dashboard, a raw macro,
+a configurable canonical macro, and disabled duplicate-ID, chain-discontinuity, authorization-denial, and
+source-silence searches. The indexer app provides only `frozenTimePeriodInSecs` for the dedicated audit index.
+Every file is SHA-256 hashed in a manifest bound to the operations-policy and destination fingerprints. A previous
+export remains downloadable but loses the current-policy marker when either binding changes.
+
+SignalRoom does not install these apps, call Splunk while previewing or exporting, enable schedules, configure alert
+actions, or claim destination health. The local health calculation is intentionally narrower: it verifies the local
+chain, cursor state, pending count, oldest pending event, and the configured export-lag expectation. Destination
+observation begins only after an operator reviews and deploys the generated content.
+
 ### MCP exists on both sides
 
 SignalRoom is an MCP client of a Splunk MCP server and an MCP server to agent hosts. That lets another agent call the controlled, domain-specific workflows without receiving raw Splunk credentials.
@@ -361,5 +379,7 @@ there is deliberately no remote recovery route.
 
 ## Next production increments
 
-1. Deployment-specific audit retention, dashboards, alerts, and destination-side deduplication policy
-2. Multi-instance tenancy, per-connection authorization, and identity lifecycle provisioning/deprovisioning
+1. Multi-instance tenancy and data-plane isolation
+2. Per-connection authorization and identity lifecycle provisioning/deprovisioning
+3. Read-only deployment reconciliation for the audit operations pack when the Splunk MCP contract exposes the
+   required index and knowledge-object configuration fields

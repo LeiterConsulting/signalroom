@@ -6,7 +6,7 @@
   <meta name="description" content="Local-first Splunk security agent with model routing, discovery, and evidence-backed chat.">
   <title>SignalRoom · Splunk Security Agent</title>
   <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 64 64%22><rect width=%2264%22 height=%2264%22 rx=%2214%22 fill=%22%2314251d%22/><path d=%22M17 40l10-10 8 8 13-15%22 fill=%22none%22 stroke=%22%233ed387%22 stroke-width=%226%22 stroke-linecap=%22round%22 stroke-linejoin=%22round%22/></svg>">
-  <link rel="stylesheet" href="/static/styles.css?v=20260719-oidc">
+  <link rel="stylesheet" href="/static/styles.css?v=20260719-audit-ops">
 </head>
 <body class="chat-active">
   <div class="app-shell">
@@ -16,12 +16,12 @@
         <div><strong>SignalRoom</strong><small>Splunk security agent</small></div>
       </div>
       <nav class="nav" aria-label="Primary navigation">
-        <button class="nav-item active" data-view="chat"><span class="nav-icon">⌁</span><span>Investigate</span></button>
-        <button class="nav-item" data-view="discovery"><span class="nav-icon">◎</span><span>Discovery</span></button>
-        <button class="nav-item" data-view="cases"><span class="nav-icon">▰</span><span>Cases</span><em id="caseCount">0</em></button>
-        <button class="nav-item" data-view="detections"><span class="nav-icon">⌾</span><span>Detections</span><em id="detectionCount">0</em></button>
-        <button class="nav-item" data-view="context"><span class="nav-icon">▱</span><span>Context</span><em id="artifactCount">0</em></button>
-        <button class="nav-item" data-view="models"><span class="nav-icon">◇</span><span>Models</span></button>
+        <button class="nav-item active" data-view="chat" aria-label="Investigate"><span class="nav-icon">⌁</span><span>Investigate</span></button>
+        <button class="nav-item" data-view="discovery" aria-label="Discovery"><span class="nav-icon">◎</span><span>Discovery</span></button>
+        <button class="nav-item" data-view="cases" aria-label="Cases"><span class="nav-icon">▰</span><span>Cases</span><em id="caseCount">0</em></button>
+        <button class="nav-item" data-view="detections" aria-label="Detections"><span class="nav-icon">⌾</span><span>Detections</span><em id="detectionCount">0</em></button>
+        <button class="nav-item" data-view="context" aria-label="Context"><span class="nav-icon">▱</span><span>Context</span><em id="artifactCount">0</em></button>
+        <button class="nav-item" data-view="models" aria-label="Models"><span class="nav-icon">◇</span><span>Models</span></button>
       </nav>
       <div class="rail-footer">
         <div class="access-card" id="accessCard">
@@ -33,7 +33,7 @@
           <span class="status-dot" id="connectionDot"></span>
           <div><strong id="connectionLabel">Primary Splunk</strong><small id="connectionDetail">Endpoint missing</small></div>
         </div>
-        <button class="nav-item" id="openSettings"><span class="nav-icon">⚙</span><span>Setup</span></button>
+        <button class="nav-item" id="openSettings" aria-label="Setup"><span class="nav-icon">⚙</span><span>Setup</span></button>
       </div>
     </aside>
 
@@ -244,6 +244,34 @@
                     <div class="audit-export-actions"><span id="auditExportRuntimeHint">Local chain remains authoritative while export is disabled.</span><button class="button ghost small" id="runAuditExport" type="button">Export pending now</button></div>
                     <div class="audit-export-attempts" id="auditExportAttempts"><div class="empty-inline compact-empty">No remote audit export has been attempted.</div></div>
                   </div>
+                  <section class="audit-operations-workspace" aria-labelledby="auditOperationsTitle">
+                    <header>
+                      <div><span>DESTINATION OPERATIONS</span><h5 id="auditOperationsTitle">Review-gated Splunk retention, dashboards, and alerts</h5><p>Generate a deployment-specific kit bound to this audit index. SignalRoom previews and hashes the content; it does not install apps, change retention, enable schedules, or configure alert actions.</p></div>
+                      <span class="subtle-pill" id="auditOperationsStatus">Local only</span>
+                    </header>
+                    <details class="audit-operations-policy">
+                      <summary>Configure destination expectations</summary>
+                      <form id="auditOperationsForm">
+                        <div class="audit-operations-grid">
+                          <label><span>Searchable retention</span><select id="auditRetentionDays"><option value="30">30 days</option><option value="90">90 days</option><option value="180">180 days</option><option value="365" selected>1 year</option><option value="730">2 years</option><option value="1095">3 years</option><option value="2555">7 years</option><option value="3650">10 years</option></select><small>Creates a review-only <code>frozenTimePeriodInSecs</code> stanza for the dedicated index.</small></label>
+                          <label><span>Canonical event policy</span><select id="auditDeduplicationMode"><option value="stable-event-id" selected>Deduplicate retries by stable event ID</option><option value="preserve-retries">Preserve retries in canonical views</option></select><small>The raw macro always preserves every indexed copy.</small></label>
+                          <label><span>Expected local export lag</span><select id="auditExpectedLag"><option value="5">5 minutes</option><option value="15" selected>15 minutes</option><option value="30">30 minutes</option><option value="60">1 hour</option><option value="240">4 hours</option><option value="1440">1 day</option></select></label>
+                          <label><span>Destination silence threshold</span><select id="auditSourceSilence"><option value="15">15 minutes</option><option value="60" selected>1 hour</option><option value="240">4 hours</option><option value="1440">1 day</option><option value="10080">7 days</option></select><small>Keep the generated alert disabled in low-activity deployments.</small></label>
+                          <label><span>Denied requests per 15 minutes</span><input id="auditDeniedThreshold" type="number" min="1" max="1000" value="5"></label>
+                          <label><span>Default dashboard range</span><select id="auditDashboardEarliest"><option value="-24h" selected>Last 24 hours</option><option value="-7d">Last 7 days</option><option value="-30d">Last 30 days</option></select></label>
+                        </div>
+                        <div class="audit-export-contract" role="note"><b>Promotion boundary</b><span>Two split Splunk apps · alert schedules disabled · no alert actions · no Splunk API call · retention changes only if an administrator deploys the indexer package</span></div>
+                        <footer><span>Changing this policy invalidates the “current kit” marker until a new archive is exported.</span><button class="button primary small" type="submit">Save operations policy</button></footer>
+                      </form>
+                    </details>
+                    <div class="audit-operations-health">
+                      <div class="audit-export-metrics" id="auditOperationsMetrics"></div>
+                      <p id="auditOperationsHealth" aria-live="polite">Evaluating local export health.</p>
+                      <div class="audit-operations-actions"><button class="button ghost small" id="previewAuditOperations" type="button">Preview controls</button><button class="button primary small" id="exportAuditOperations" type="button">Export review kit</button></div>
+                    </div>
+                    <div class="audit-operations-preview" id="auditOperationsPreview" hidden></div>
+                    <div class="audit-operations-exports" id="auditOperationsExports"><div class="empty-inline compact-empty">No audit operations kit has been exported.</div></div>
+                  </section>
                 </section>
               </section>
             </section>
@@ -705,6 +733,6 @@
     </aside>
   </div>
   <div class="toast" id="toast" role="status"></div>
-  <script src="/static/app.js?v=20260719-oidc" defer></script>
+  <script src="/static/app.js?v=20260719-audit-ops" defer></script>
 </body>
 </html>

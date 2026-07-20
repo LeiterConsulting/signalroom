@@ -7,7 +7,7 @@ from threading import RLock
 from typing import Any
 from uuid import uuid4
 
-from ..schemas import AuditExportPolicyUpdate
+from ..schemas import AuditExportPolicyUpdate, AuditOperationsPolicyUpdate
 
 
 def _now() -> str:
@@ -84,6 +84,27 @@ class AuditExportStore:
                 );
                 CREATE INDEX IF NOT EXISTS idx_audit_export_attempts_created
                     ON audit_export_attempts(completed_at DESC);
+                CREATE TABLE IF NOT EXISTS audit_operations_policy (
+                    id INTEGER PRIMARY KEY CHECK (id=1),
+                    retention_days INTEGER NOT NULL,
+                    deduplication_mode TEXT NOT NULL,
+                    expected_export_lag_minutes INTEGER NOT NULL,
+                    source_silence_minutes INTEGER NOT NULL,
+                    denied_request_threshold INTEGER NOT NULL,
+                    dashboard_earliest TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS audit_operations_exports (
+                    id TEXT PRIMARY KEY,
+                    filename TEXT NOT NULL UNIQUE,
+                    archive_sha256 TEXT NOT NULL,
+                    manifest_sha256 TEXT NOT NULL,
+                    policy_sha256 TEXT NOT NULL,
+                    destination_fingerprint TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_audit_operations_exports_created
+                    ON audit_operations_exports(created_at DESC);
                 """
             )
             db.execute(
@@ -102,6 +123,14 @@ class AuditExportStore:
                 last_batch_event_count,last_payload_sha256,last_ack_id,last_ack_confirmed,
                 last_success_at,updated_at)
                 VALUES (1,0,'disabled',0,NULL,'',NULL,NULL,NULL,0,'',NULL,0,NULL,?)""",
+                (now,),
+            )
+            db.execute(
+                """INSERT OR IGNORE INTO audit_operations_policy
+                (id,retention_days,deduplication_mode,expected_export_lag_minutes,
+                source_silence_minutes,denied_request_threshold,dashboard_earliest,
+                updated_at)
+                VALUES (1,365,'stable-event-id',15,60,5,'-24h',?)""",
                 (now,),
             )
 
@@ -360,6 +389,103 @@ class AuditExportStore:
                 "error": row["error"],
                 "started_at": row["started_at"],
                 "completed_at": row["completed_at"],
+            }
+            for row in rows
+        ]
+
+    def operations_policy(self) -> dict[str, Any]:
+        with self.connect() as db:
+            row = db.execute(
+                "SELECT * FROM audit_operations_policy WHERE id=1"
+            ).fetchone()
+        assert row is not None
+        return {
+            "retention_days": int(row["retention_days"]),
+            "deduplication_mode": row["deduplication_mode"],
+            "expected_export_lag_minutes": int(
+                row["expected_export_lag_minutes"]
+            ),
+            "source_silence_minutes": int(row["source_silence_minutes"]),
+            "denied_request_threshold": int(row["denied_request_threshold"]),
+            "dashboard_earliest": row["dashboard_earliest"],
+            "updated_at": row["updated_at"],
+        }
+
+    def update_operations_policy(
+        self, value: AuditOperationsPolicyUpdate
+    ) -> dict[str, Any]:
+        now = _now()
+        with self._lock, self.connect() as db:
+            db.execute(
+                """UPDATE audit_operations_policy SET retention_days=?,
+                deduplication_mode=?,expected_export_lag_minutes=?,
+                source_silence_minutes=?,denied_request_threshold=?,
+                dashboard_earliest=?,updated_at=? WHERE id=1""",
+                (
+                    value.retention_days,
+                    value.deduplication_mode,
+                    value.expected_export_lag_minutes,
+                    value.source_silence_minutes,
+                    value.denied_request_threshold,
+                    value.dashboard_earliest,
+                    now,
+                ),
+            )
+        return self.operations_policy()
+
+    def record_operations_export(
+        self,
+        *,
+        export_id: str,
+        filename: str,
+        archive_sha256: str,
+        manifest_sha256: str,
+        policy_sha256: str,
+        destination_fingerprint: str,
+    ) -> dict[str, Any]:
+        created_at = _now()
+        with self._lock, self.connect() as db:
+            db.execute(
+                """INSERT INTO audit_operations_exports
+                (id,filename,archive_sha256,manifest_sha256,policy_sha256,
+                destination_fingerprint,created_at)
+                VALUES (?,?,?,?,?,?,?)""",
+                (
+                    export_id,
+                    filename,
+                    archive_sha256,
+                    manifest_sha256,
+                    policy_sha256,
+                    destination_fingerprint,
+                    created_at,
+                ),
+            )
+        return {
+            "id": export_id,
+            "filename": filename,
+            "archive_sha256": archive_sha256,
+            "manifest_sha256": manifest_sha256,
+            "policy_sha256": policy_sha256,
+            "destination_fingerprint": destination_fingerprint,
+            "created_at": created_at,
+        }
+
+    def operations_exports(self, limit: int = 10) -> list[dict[str, Any]]:
+        with self.connect() as db:
+            rows = db.execute(
+                """SELECT * FROM audit_operations_exports
+                ORDER BY created_at DESC LIMIT ?""",
+                (min(max(limit, 1), 100),),
+            ).fetchall()
+        return [
+            {
+                "id": row["id"],
+                "filename": row["filename"],
+                "archive_sha256": row["archive_sha256"],
+                "manifest_sha256": row["manifest_sha256"],
+                "policy_sha256": row["policy_sha256"],
+                "destination_fingerprint": row["destination_fingerprint"],
+                "created_at": row["created_at"],
             }
             for row in rows
         ]

@@ -183,6 +183,12 @@ async def test_audit_export_sends_verified_events_and_advances_durable_cursor(
     assert envelope["event"]["event_type"] == "audit.export.policy.updated"
     assert envelope["event"]["sequence"] == old["sequence"] + 1
     assert envelope["event"]["chain_algorithm"] == "sha256"
+    assert envelope["fields"]["signalroom_event_id"] == envelope["event"]["id"]
+    assert (
+        envelope["fields"]["signalroom_previous_hash"]
+        == envelope["event"]["previous_hash"]
+    )
+    assert envelope["fields"]["signalroom_schema"] == "signalroom.audit.v1"
     assert envelope["fields"]["signalroom_event_hash"] == envelope["event"]["event_hash"]
     assert store.state()["cursor_sequence"] == envelope["event"]["sequence"]
     assert store.state()["status"] == "pending"

@@ -16,7 +16,11 @@ from fastapi.staticfiles import StaticFiles
 from .agents import SecurityAgent
 from .assurance import AssuranceResponseService, AssuranceService, AssuranceStore
 from .audit import AuditStore, bind_audit_actor, reset_audit_actor
-from .audit_export import AuditExportStore, SplunkAuditExportService
+from .audit_export import (
+    AuditExportStore,
+    AuditOperationsService,
+    SplunkAuditExportService,
+)
 from .auth import AuthService, AuthStore, OIDCError, OIDCService
 from .auth.oidc import OIDC_STATE_COOKIE
 from .auth.service import CSRF_COOKIE, SESSION_COOKIE
@@ -53,6 +57,7 @@ from .schemas import (
     AssurancePolicyUpdate,
     AssuranceRunCreate,
     AuditExportPolicyUpdate,
+    AuditOperationsPolicyUpdate,
     AuthBootstrapRequest,
     AuthDisableRequest,
     AuthLoginRequest,
@@ -191,6 +196,12 @@ class Services:
             self.audit_export_store,
             self.audit,
             self.config,
+        )
+        self.audit_operations = AuditOperationsService(
+            self.audit_export_store,
+            self.audit_export,
+            self.audit,
+            DATA / "audit_operations_exports",
         )
         self.auth_store = AuthStore(DATA / "auth.db")
         self.auth = AuthService(self.auth_store, self.audit)
@@ -1556,6 +1567,9 @@ async def assurance_overview() -> dict[str, Any]:
     result["delivery"] = services.delivery.overview()
     result["audit"] = services.audit.overview(20)
     result["audit_export"] = services.audit_export.overview()
+    result["audit_operations"] = services.audit_operations.overview(
+        result["audit_export"]
+    )
     return result
 
 
@@ -1746,6 +1760,39 @@ async def run_audit_export() -> dict[str, Any]:
         return await services.audit_export.run_now()
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from exc
+
+
+@app.get("/api/audit-operations")
+async def audit_operations_overview() -> dict[str, Any]:
+    return services.audit_operations.overview()
+
+
+@app.put("/api/audit-operations/policy")
+async def update_audit_operations_policy(
+    request: AuditOperationsPolicyUpdate,
+) -> dict[str, Any]:
+    return services.audit_operations.update_policy(request)
+
+
+@app.post("/api/audit-operations/preview")
+async def preview_audit_operations() -> dict[str, Any]:
+    return services.audit_operations.preview()
+
+
+@app.post("/api/audit-operations/export", status_code=201)
+async def export_audit_operations() -> dict[str, Any]:
+    return services.audit_operations.export()
+
+
+@app.get("/api/audit-operations/exports/{filename}")
+async def download_audit_operations_export(filename: str) -> FileResponse:
+    if Path(filename).name != filename or Path(filename).suffix != ".zip":
+        raise HTTPException(404, "Audit operations export not found")
+    root = (DATA / "audit_operations_exports").resolve()
+    path = (root / filename).resolve()
+    if path.parent != root or not path.is_file():
+        raise HTTPException(404, "Audit operations export not found")
+    return FileResponse(path, filename=filename, media_type="application/zip")
 
 
 @app.get("/api/validations")

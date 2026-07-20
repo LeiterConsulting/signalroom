@@ -8,7 +8,7 @@ const state = {
   assurance: null, assurancePolicyDirty: false, connectionDiagnostics: null, queryIntelligence: null,
   workload: null,
   feedbackBenchmarks: null, goldenBenchmarks: null, selectedTournamentId: null, deliveryPolicyDirty: false,
-  auditExportPolicyDirty: false,
+  auditExportPolicyDirty: false, auditOperationsPolicyDirty: false, auditOperationsPreview: null,
   evaluationDraft: null, evaluationScenarioIndex: 0,
   deliveryPreview: null, detections: [], activeDetection: null, detectionGitExport: null,
   repositoryStatus: null, repositoryHandoff: null, auth: null, authUsers: [],
@@ -256,7 +256,8 @@ function applyAccessPermissions() {
   const mutationSelectors = [
     '#chatInput', '#chatForm .send-button', '#runDiscovery', '#cancelDiscoveryJob', '#runConnectionDiagnostics',
     '#runAssuranceNow', '#assuranceForm button', '#deliveryForm button', '#auditExportForm button',
-    '#runAuditExport', '#scanSplunkModels',
+    '#auditOperationsForm button', '#runAuditExport', '#previewAuditOperations',
+    '#exportAuditOperations', '#scanSplunkModels',
     '#runModelTournament', '#runGoldenBenchmark', '#addArtifact', '#uploadArtifact',
     '#newCase', '#newDetection'
   ];
@@ -283,7 +284,9 @@ function applyAccessPermissions() {
     '#assuranceForm input', '#assuranceForm select', '#assuranceForm button[type="submit"]',
     '#deliveryForm input', '#deliveryForm select', '#deliveryForm button',
     '#auditExportForm input', '#auditExportForm select', '#auditExportForm button',
-    '#runAuditExport',
+    '#auditOperationsForm input', '#auditOperationsForm select',
+    '#auditOperationsForm button', '#runAuditExport', '#previewAuditOperations',
+    '#exportAuditOperations',
     '[data-pull-profile]', '[data-activate-model]', '[data-promote-tournament]',
     '#modelTrustPolicyForm input', '#modelTrustPolicyForm select',
     '#modelTrustPolicyForm button', '[data-approve-model-artifact]',
@@ -2382,6 +2385,69 @@ function renderAuditExport(value) {
   }).join('') : '<div class="empty-inline compact-empty">No remote audit export has been attempted.</div>';
 }
 
+function hydrateAuditOperations(value) {
+  if (!value?.policy || state.auditOperationsPolicyDirty) return;
+  const policy = value.policy;
+  $('#auditRetentionDays').value = String(policy.retention_days ?? 365);
+  $('#auditDeduplicationMode').value = policy.deduplication_mode || 'stable-event-id';
+  $('#auditExpectedLag').value = String(policy.expected_export_lag_minutes ?? 15);
+  $('#auditSourceSilence').value = String(policy.source_silence_minutes ?? 60);
+  $('#auditDeniedThreshold').value = policy.denied_request_threshold ?? 5;
+  $('#auditDashboardEarliest').value = policy.dashboard_earliest || '-24h';
+}
+
+function renderAuditOperationsPreview(preview) {
+  const holder = $('#auditOperationsPreview');
+  if (!preview) {
+    holder.hidden = true;
+    holder.innerHTML = '';
+    return;
+  }
+  const files = Object.entries(preview.files || {});
+  holder.hidden = false;
+  holder.innerHTML = `
+    <header><div><span>EXACT REVIEW PREVIEW</span><h5>${files.length} generated files · ${escapeHtml(preview.schema_version)}</h5></div><code>${escapeHtml((preview.policy_sha256 || '').slice(0,16))}</code></header>
+    <div class="audit-operations-binding"><span><b>Index</b><code>${escapeHtml(preview.binding?.index || '')}</code></span><span><b>Sourcetype</b><code>${escapeHtml(preview.binding?.sourcetype || '')}</code></span><span><b>Retention</b>${Number(preview.retention?.days || 0).toLocaleString()} days</span><span><b>Authority</b>Preview and local archive only</span></div>
+    <div class="audit-operations-control-list">${(preview.controls || []).map(control => `<details><summary><span>${escapeHtml(control.title)}</span><small>Disabled · ${escapeHtml(control.schedule)}</small></summary><p>${escapeHtml(control.purpose)}</p><pre>${escapeHtml(control.search)}</pre></details>`).join('')}</div>
+    <details class="audit-operations-file-list"><summary>Manifest-bound file inventory</summary><ul>${files.map(([name, item]) => `<li><code>${escapeHtml(name)}</code><span>${Number(item.bytes || 0).toLocaleString()} bytes · ${escapeHtml((item.sha256 || '').slice(0,12))}</span></li>`).join('')}</ul></details>
+    <ol class="audit-operations-review-steps">${(preview.review_steps || []).map(step => `<li>${escapeHtml(step)}</li>`).join('')}</ol>
+    <p class="audit-operations-warning">${escapeHtml(preview.retention?.warning || '')}</p>`;
+}
+
+function renderAuditOperations(value) {
+  hydrateAuditOperations(value);
+  const policy = value?.policy || {};
+  const health = value?.health || {};
+  const pack = value?.pack || {};
+  const statusLabels = {
+    current:'Current',
+    'catching-up':'Catching up',
+    breached:'Needs attention',
+    'chain-invalid':'Chain invalid',
+    'local-only':'Local only'
+  };
+  const statusNode = $('#auditOperationsStatus');
+  statusNode.textContent = statusLabels[health.status] || 'Not evaluated';
+  statusNode.className = `subtle-pill ${health.status === 'current' ? 'ok' : ['breached','chain-invalid'].includes(health.status) ? 'warn' : ''}`;
+  $('#auditOperationsMetrics').innerHTML = `
+    <article><span>SEARCHABLE RETENTION</span><b>${Number(policy.retention_days || 0).toLocaleString()} days</b><small>Time policy · size policy remains external</small></article>
+    <article><span>CANONICAL VIEW</span><b>${policy.deduplication_mode === 'stable-event-id' ? 'Stable-ID dedup' : 'Preserve retries'}</b><small>Raw retry evidence is always retained</small></article>
+    <article><span>LOCAL LAG SLO</span><b>${Number(policy.expected_export_lag_minutes || 0).toLocaleString()} min</b><small>Oldest pending ${Number(health.oldest_pending_minutes || 0).toLocaleString()} min</small></article>
+    <article><span>DEPLOYMENT KIT</span><b>${pack.current_export ? 'Current' : 'Review needed'}</b><small>${Number(pack.file_count || 0)} files · ${Number(pack.controls?.length || 0)} disabled alerts</small></article>`;
+  $('#auditOperationsHealth').textContent = health.detail || 'No audit operations status is available.';
+  $('#auditOperationsHealth').className = ['breached','chain-invalid'].includes(health.status) ? 'warn' : health.status === 'current' ? 'ok' : '';
+  const lacksAdmin = Boolean(state.auth?.authenticated && !state.auth?.permissions?.can_administer);
+  $('#previewAuditOperations').disabled = lacksAdmin;
+  $('#exportAuditOperations').disabled = lacksAdmin;
+  const exports = value?.exports || [];
+  $('#auditOperationsExports').innerHTML = exports.length ? exports.map(item => `
+    <article class="${item.policy_sha256 === pack.policy_sha256 && item.destination_fingerprint === pack.destination_fingerprint ? 'current' : ''}">
+      <div><b>${item.policy_sha256 === pack.policy_sha256 && item.destination_fingerprint === pack.destination_fingerprint ? 'Current policy kit' : 'Superseded kit'}</b><a href="/api/audit-operations/exports/${encodeURIComponent(item.filename)}" download>${escapeHtml(item.filename)}</a></div>
+      <span>${escapeHtml(assuranceTime(item.created_at))}</span><code>${escapeHtml(item.archive_sha256.slice(0,12))}</code>
+    </article>`).join('') : '<div class="empty-inline compact-empty">No audit operations kit has been exported.</div>';
+  renderAuditOperationsPreview(state.auditOperationsPreview);
+}
+
 function renderDelivery(value) {
   const delivery = value.delivery || {}; const policy = delivery.policy || {}; const destination = delivery.destination || {};
   hydrateDeliveryPolicy(delivery);
@@ -2416,6 +2482,7 @@ function renderDelivery(value) {
   $('#auditChainStatus').className = chain.valid ? 'audit-valid' : 'audit-invalid';
   $('#auditEvents').innerHTML = (audit.events || []).length ? audit.events.slice(0,12).map(item => `<article class="audit-event ${escapeHtml(item.outcome)}"><header><span>#${item.sequence} · ${escapeHtml(item.event_type)}</span><b>${escapeHtml(item.outcome)}</b></header><p>${escapeHtml(item.summary || item.action)}</p><footer><time>${escapeHtml(assuranceTime(item.created_at))}</time><code>${escapeHtml(item.event_hash.slice(0,12))}</code></footer></article>`).join('') : '<div class="empty-inline compact-empty">Audit events appear when control-plane decisions are made.</div>';
   renderAuditExport(value.audit_export || {});
+  renderAuditOperations(value.audit_operations || {});
 }
 
 async function saveDeliveryPolicy(event) {
@@ -2551,6 +2618,62 @@ async function runAuditExportNow() {
   } catch (error) {
     toast(error.message);
     await loadAssurance();
+  }
+}
+
+async function saveAuditOperationsPolicy(event) {
+  event.preventDefault();
+  const payload = {
+    retention_days:Number($('#auditRetentionDays').value),
+    deduplication_mode:$('#auditDeduplicationMode').value,
+    expected_export_lag_minutes:Number($('#auditExpectedLag').value),
+    source_silence_minutes:Number($('#auditSourceSilence').value),
+    denied_request_threshold:Number($('#auditDeniedThreshold').value),
+    dashboard_earliest:$('#auditDashboardEarliest').value
+  };
+  try {
+    const result = await api('/api/audit-operations/policy', {method:'PUT',body:JSON.stringify(payload)});
+    state.auditOperationsPolicyDirty = false;
+    state.auditOperationsPreview = null;
+    if (state.assurance) state.assurance.audit_operations = result;
+    renderAuditOperations(result);
+    toast('Audit destination expectations saved');
+  } catch (error) { toast(error.message); }
+}
+
+async function previewAuditOperations() {
+  const button = $('#previewAuditOperations');
+  button.disabled = true;
+  button.textContent = 'Building preview…';
+  try {
+    state.auditOperationsPreview = await api('/api/audit-operations/preview', {method:'POST'});
+    renderAuditOperationsPreview(state.auditOperationsPreview);
+    $('#auditOperationsPreview').scrollIntoView({behavior:'smooth',block:'nearest'});
+  } catch (error) { toast(error.message); }
+  finally {
+    button.disabled = false;
+    button.textContent = 'Preview controls';
+  }
+}
+
+async function exportAuditOperations() {
+  const button = $('#exportAuditOperations');
+  button.disabled = true;
+  button.textContent = 'Building kit…';
+  try {
+    const result = await api('/api/audit-operations/export', {method:'POST'});
+    const link = document.createElement('a');
+    link.href = result.url;
+    link.download = result.filename;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    await loadAssurance();
+    toast('Review-only Splunk operations kit exported');
+  } catch (error) { toast(error.message); }
+  finally {
+    button.disabled = false;
+    button.textContent = 'Export review kit';
   }
 }
 
@@ -4165,11 +4288,14 @@ $('#runConnectionDiagnostics').addEventListener('click', runConnectionDiagnostic
 $('#assuranceForm').addEventListener('submit', saveAssurancePolicy);
 $('#deliveryForm').addEventListener('submit', saveDeliveryPolicy);
 $('#auditExportForm').addEventListener('submit', saveAuditExportPolicy);
+$('#auditOperationsForm').addEventListener('submit', saveAuditOperationsPolicy);
 $('#modelTrustPolicyForm').addEventListener('submit', saveModelTrustPolicy);
 $('#approveDelivery').addEventListener('click', approveDeliveryPreview);
 $('#testDeliveryDestination').addEventListener('click', testDeliveryDestination);
 $('#testSoarDeliveryDestination').addEventListener('click', testDeliveryDestination);
 $('#runAuditExport').addEventListener('click', runAuditExportNow);
+$('#previewAuditOperations').addEventListener('click', previewAuditOperations);
+$('#exportAuditOperations').addEventListener('click', exportAuditOperations);
 $('#runAssuranceNow').addEventListener('click', runAssuranceNow);
 $('#cancelAssuranceRun').addEventListener('click', cancelAssuranceRun);
 $('#assuranceDepth').addEventListener('change', updateAssuranceBudgetHelp);
@@ -4181,6 +4307,11 @@ $('#deliveryKind').addEventListener('change', () => {
 $$('#assuranceForm input,#assuranceForm select').forEach(node => node.addEventListener('change', () => { state.assurancePolicyDirty = true; }));
 $$('#deliveryForm input,#deliveryForm select').forEach(node => node.addEventListener('change', () => { state.deliveryPolicyDirty = true; }));
 $$('#auditExportForm input,#auditExportForm select').forEach(node => node.addEventListener('change', () => { state.auditExportPolicyDirty = true; }));
+$$('#auditOperationsForm input,#auditOperationsForm select').forEach(node => node.addEventListener('change', () => {
+  state.auditOperationsPolicyDirty = true;
+  state.auditOperationsPreview = null;
+  renderAuditOperationsPreview(null);
+}));
 $('#scanSplunkModels').addEventListener('click', scanSplunkModels);
 $('#newEvaluationSuite').addEventListener('click', createEvaluationSuite);
 $('#addEvaluationScenario').addEventListener('click', () => {

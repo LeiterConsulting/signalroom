@@ -154,8 +154,36 @@ SIGNALROOM_AUDIT_HEC_URL=https://hec.example.com:8088
 SIGNALROOM_AUDIT_HEC_TOKEN=…
 ```
 
-Grant the token event-ingest access only to the dedicated index. Apply index retention, role access, dashboards,
-alerts, and stable-ID deduplication in Splunk; SignalRoom does not create or administer those destination controls.
+Grant the token event-ingest access only to the dedicated index.
+
+### Audit operations deployment kit
+
+**Discovery → Remote audit authority → Destination operations** generates a review-only ZIP bound to the current
+index, sourcetype, source, and host. Configure the retention expectation, stable-ID canonical-view policy, local
+export-lag expectation, destination-silence threshold, denied-request threshold, and dashboard time range. Use
+**Preview controls** to inspect the four exact searches and schedules before export.
+
+The archive deliberately separates topology roles:
+
+- `search-head/signalroom_audit_operations` contains the dashboard, macros, metadata, and scheduled-alert
+  definitions. Every definition has `disabled = 1`; no alert action is configured.
+- `indexer/signalroom_audit_retention` contains only the dedicated-index `frozenTimePeriodInSecs` stanza. Deploy it
+  to the indexer tier or indexer-cluster manager path appropriate to the environment. Splunk Cloud customers should
+  use their supported app-review and retention-administration process.
+
+Review role access, search cost, scheduler placement, storage sizing, cold-to-frozen archival, and each alert action
+before enabling a schedule. `frozenTimePeriodInSecs` controls the age at which buckets freeze, but a size limit can
+roll data earlier; without an archive configuration, frozen data is deleted. The generated source-silence alert
+assumes regular SignalRoom activity and should remain disabled for a quiet POC unless that expectation is valid.
+Splunk documents the relevant settings in
+[indexes.conf](https://help.splunk.com/en/splunk-enterprise/administer/admin-manual/10.4/configuration-file-reference/10.4.0-configuration-file-reference/indexes.conf),
+[savedsearches.conf](https://help.splunk.com/en/data-management/splunk-enterprise-admin-manual/10.2/configuration-file-reference/10.2.2-configuration-file-reference/savedsearches.conf),
+and the
+[Simple XML reference](https://help.splunk.com/en/splunk-enterprise/create-dashboards-and-reports/simple-xml-dashboards/9.0/simple-xml-reference/simple-xml-reference).
+
+The ZIP manifest hashes every generated file and binds the pack to the destination and operations-policy
+fingerprints. SignalRoom records exports in its local hash chain, but does not call Splunk, install either app,
+verify the installed configuration, enable a search, or configure an alert action.
 
 ## Windows
 

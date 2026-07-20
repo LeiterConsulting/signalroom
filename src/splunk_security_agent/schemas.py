@@ -483,6 +483,17 @@ class AuditExportPolicyUpdate(BaseModel):
     clear_hec_token: bool = False
 
 
+class AuditOperationsPolicyUpdate(BaseModel):
+    retention_days: int = Field(default=365, ge=30, le=3650)
+    deduplication_mode: Literal["stable-event-id", "preserve-retries"] = (
+        "stable-event-id"
+    )
+    expected_export_lag_minutes: int = Field(default=15, ge=5, le=1440)
+    source_silence_minutes: int = Field(default=60, ge=15, le=10080)
+    denied_request_threshold: int = Field(default=5, ge=1, le=1000)
+    dashboard_earliest: Literal["-24h", "-7d", "-30d"] = "-24h"
+
+
 class AssuranceRunCreate(BaseModel):
     depth: AssuranceDepth | None = None
 

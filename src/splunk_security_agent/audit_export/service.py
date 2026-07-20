@@ -423,12 +423,15 @@ class SplunkAuditExportService:
             "sourcetype": policy["sourcetype"],
             "index": policy["index_name"],
             "fields": {
+                "signalroom_event_id": event["id"],
                 "signalroom_sequence": int(event["sequence"]),
                 "signalroom_event_type": event["event_type"],
                 "signalroom_outcome": event["outcome"],
                 "signalroom_actor": event["actor"],
                 "signalroom_target_type": event["target_type"],
+                "signalroom_previous_hash": event["previous_hash"],
                 "signalroom_event_hash": event["event_hash"],
+                "signalroom_schema": "signalroom.audit.v1",
             },
             "event": {
                 "schema": "signalroom.audit.v1",
