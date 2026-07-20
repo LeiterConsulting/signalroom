@@ -106,6 +106,26 @@ def test_roles_and_connection_assignment_are_independent(tmp_path) -> None:
         True,
         "",
     )
+    assert (
+        service.authorize(
+            analyst,
+            "POST",
+            "/api/model-capabilities/time-series/runtime/start/stream",
+        )[0]
+        is False
+    )
+    assert service.authorize(
+        admin,
+        "POST",
+        "/api/model-capabilities/time-series/runtime/start/stream",
+    ) == (True, "")
+    allowed, reason = service.authorize(
+        analyst,
+        "POST",
+        "/api/model-capabilities/time-series/forecast/stream",
+    )
+    assert allowed is False
+    assert "Primary Splunk" in reason
     assert service.authorize(analyst, "PUT", "/api/audit-export/policy")[0] is False
     assert service.authorize(admin, "PUT", "/api/audit-export/policy") == (True, "")
     assert service.authorize(analyst, "POST", "/api/audit-export/run")[0] is False

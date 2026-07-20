@@ -15,5 +15,12 @@ The default configuration references model repositories but does not redistribut
 - `cisco-ai/SecureBERT2.0-biencoder`, Cisco AI, Apache-2.0 according to its model card.
 - `cisco-ai/SecureBERT2.0-cross_encoder`, Cisco AI, Apache-2.0 according to its model card.
 - `cisco-ai/SecureBERT2.0-NER`, Cisco AI, Apache-2.0 according to its model card.
+- `cisco-ai/SecureBERT2.0-code-vuln-detection`, Cisco AI, Apache-2.0 according to its model card.
+- `cisco-ai/cisco-time-series-model-1.0`, Cisco AI / Splunk, Apache-2.0.
+
+The optional forecasting sidecar installs `cisco-tsm==1.0.2`, published by the Cisco/Splunk team under
+Apache-2.0. Its transitive `timesfm[torch]` runtime and other Python dependencies retain their own licenses.
+SignalRoom does not redistribute the Cisco model weights; an explicit local runtime start downloads the
+operator-approved revision from Hugging Face into a persistent local Docker volume.
 
 Operators are responsible for model-license review, provenance verification, revision pinning, and compliance with Hugging Face, Ollama, and upstream model terms.

@@ -23,6 +23,7 @@ ADMIN_MUTATION_PREFIXES = (
     "/api/auth/oidc/",
     "/api/model-setup/pull",
     "/api/model-setup/activate",
+    "/api/model-capabilities/time-series/runtime",
     "/api/model-trust",
     "/api/benchmarks/suites",
     "/api/detection-repository/",
@@ -42,6 +43,7 @@ CONNECTION_MUTATION_PREFIXES = (
     "/api/discovery",
     "/api/connection/diagnostics",
     "/api/splunk-models/scan",
+    "/api/model-capabilities/time-series/forecast",
     "/api/assurance/runs",
 )
 

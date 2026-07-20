@@ -64,9 +64,13 @@ Profiles declare a model source, identifier, task, endpoint, provenance label, a
 Capability admission is stricter than model installation. The SecureBERT code classifier has one explicit
 local-only endpoint that accepts code-shaped C, C++, or Python input, rejects Splunk objects and SPL, exposes
 truncation and confidence, persists no source, and never participates in automatic routing. The Cisco Time Series
-Model remains outside the profile router until a dedicated adapter can bind numeric-series preparation, imputation,
-forecast provenance, backtesting, and promotion controls. The model catalog reports these gates rather than
-presenting a publisher checkpoint as a finished SignalRoom workflow.
+Model also remains outside the chat profile router, but has a dedicated bounded workflow. SignalRoom checks the
+local/private Python 3.11 service before spending a Splunk query, validates exact read-only timechart provenance,
+regularizes one numeric series, reports last-value imputation, withholds known points for a naive-baseline
+backtest, and exposes mean plus p10/p50/p90 forecasts. The bundled sidecar attests the immutable checkpoint
+revision; an existing publisher-compatible service may run forecasts, but missing revision attestation holds
+promotion. Forecast output cannot automatically modify an alert, threshold, capacity decision, Context artifact,
+or case.
 
 `ModelTrustService` forms a separate local supply-chain authority. It observes the publisher, immutable source
 revision, runtime, and local content digest for each enabled profile. Explicit approvals sign that canonical
@@ -390,5 +394,5 @@ there is deliberately no remote recovery route.
 2. Per-connection authorization and identity lifecycle provisioning/deprovisioning
 3. Read-only deployment reconciliation for the audit operations pack when the Splunk MCP contract exposes the
    required index and knowledge-object configuration fields
-4. Dedicated Cisco Time Series Model adapter with read-only series extraction, resampling quality, quantile
-   forecasts, backtesting, and a forecast-specific promotion gate
+4. Durable time-series experiment registry with repeatable per-series backtests, baseline drift, span/window
+   comparison, and an explicit reviewed handoff from forecast evidence to an alert candidate

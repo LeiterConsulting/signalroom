@@ -222,11 +222,22 @@ preserved to a case only by an explicit analyst action. Discovery, RAG, and Inve
 this classifier automatically. When model trust enforcement is active, installation is not execution authority:
 the exact local artifact must also have a current operator-signed approval before the screening action is enabled.
 
-Cisco Time Series Model 1.0 remains visible as the next dedicated adapter instead of a fake generic model install.
-Admission requires a local `cisco-tsm` runtime, read-only Splunk numeric-series extraction, regular resampling and
-imputation reporting, mean and quantile output provenance, backtesting, and a forecast-specific promotion gate.
-Until those controls exist, SignalRoom can stage the read-only series-design investigation but does not claim to
-execute a forecast.
+Cisco Time Series Model 1.0 is admitted as a dedicated local forecasting preview—not a generic chat profile.
+The Models workbench accepts an exact read-only `timechart`, verifies one regular numeric series, last-value
+imputes missing buckets, excludes a still-open final bucket, and stops before inference when more than 30% of the
+context would be imputed. It withholds
+known points for a backtest against a naive last-value baseline, then returns mean, p10, p50, and p90 forecasts with
+the source SPL, time bounds, query fingerprint, prepared-series SHA-256, runtime revision, and local execution
+boundary. A result becomes eligible only for analyst review; it cannot automatically change an alert, threshold,
+or capacity decision. Source rows and forecasts are not added to Context unless the analyst explicitly preserves
+a bounded review to a case.
+
+SignalRoom itself supports modern Python releases, while the publisher's `cisco-tsm` package requires Python 3.11.
+The bundled runtime therefore uses an isolated Python 3.11 Docker sidecar. From the Cisco card, **Build and start
+bundled local runtime** performs that explicit setup, generates an encrypted local bearer token, pins the publisher
+checkpoint revision, streams build/model-load status, and retains weights in a Docker volume. Existing Cisco
+self-hosted services can instead be configured by endpoint, bearer token, TLS verification, and optional private
+CA path. Public inference endpoints are rejected.
 
 ### Golden investigation promotion gate
 

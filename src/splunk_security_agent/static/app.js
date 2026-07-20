@@ -12,7 +12,7 @@ const state = {
   evaluationDraft: null, evaluationScenarioIndex: 0,
   deliveryPreview: null, detections: [], activeDetection: null, detectionGitExport: null,
   repositoryStatus: null, repositoryHandoff: null, auth: null, authUsers: [],
-  codeScreenResult: null,
+  codeScreenResult: null, timeSeriesStatus: null, timeSeriesResult: null,
   workspaceLoaded: false, assuranceTimer: null, discoveryJobs: null,
   activeDiscoveryJob: null, discoveryPollTimer: null, discoveryPollBusy: false,
   discoveryWatchingJobId: null
@@ -260,7 +260,7 @@ function applyAccessPermissions() {
     '#auditOperationsForm button', '#runAuditExport', '#previewAuditOperations',
     '#exportAuditOperations', '#scanSplunkModels',
     '#runModelTournament', '#runGoldenBenchmark', '#addArtifact', '#uploadArtifact',
-    '#newCase', '#newDetection'
+    '#newCase', '#newDetection', '#runTimeSeriesForecast'
   ];
   $$(mutationSelectors.join(',')).forEach(node => {
     if (!canChange) { node.disabled = true; node.dataset.roleDisabled = 'true'; }
@@ -271,7 +271,8 @@ function applyAccessPermissions() {
   });
   const connectionSelectors = [
     '#chatInput', '#chatForm .send-button', '#runDiscovery', '#cancelDiscoveryJob',
-    '#runConnectionDiagnostics', '#runAssuranceNow', '#scanSplunkModels'
+    '#runConnectionDiagnostics', '#runAssuranceNow', '#scanSplunkModels',
+    '#runTimeSeriesForecast'
   ];
   $$(connectionSelectors.join(',')).forEach(node => {
     if (authenticated && !canUseConnection) {
@@ -292,6 +293,8 @@ function applyAccessPermissions() {
     '#modelTrustPolicyForm input', '#modelTrustPolicyForm select',
     '#modelTrustPolicyForm button', '[data-approve-model-artifact]',
     '[data-revoke-model-attestation]',
+    '#timeSeriesRuntimeForm input', '#timeSeriesRuntimeForm button',
+    '#startBundledTimeSeries',
     '[data-rollback-promotion]', '[data-preview-repository]', '[data-apply-repository]',
     '[data-push-repository]', '[data-pull-request-repository]',
     '[data-refresh-repository-review]', '[data-preserve-repository-review]',
@@ -955,6 +958,15 @@ async function loadModelCatalog() {
   }
 }
 
+async function loadTimeSeriesStatus() {
+  try {
+    state.timeSeriesStatus = await api('/api/model-capabilities/time-series/status');
+  } catch (error) {
+    state.timeSeriesStatus = {ok:false, ready:false, error:error.message};
+  }
+  renderModelCatalog();
+}
+
 async function checkModelUpdates(button) {
   const original = button?.textContent || 'Check for updates';
   if (button) { button.disabled = true; button.textContent = 'Checking sources…'; }
@@ -1072,19 +1084,29 @@ function renderModelCatalog() {
           : trustEnforced && !trust?.trusted
           ? `<li class="blocked"><i></i><span><b>Exact local artifact approval</b><small>${escapeHtml(trust?.detail || 'Approve the installed artifact before execution.')}</small></span><em>blocked</em></li>`
           : `<li class="pass"><i></i><span><b>Exact local artifact policy</b><small>${escapeHtml(trust?.trusted ? 'The installed artifact has a valid operator-signed approval.' : 'Audit mode permits evaluation while reporting the unapproved artifact.')}</small></span><em>${trust?.trusted ? 'pass' : 'audit'}</em></li>`
+        : item.id === 'cisco-time-series-1'
+        ? state.timeSeriesStatus?.ok
+          ? `<li class="pass"><i></i><span><b>Connected local runtime</b><small>${escapeHtml(state.timeSeriesStatus.inference_backend || 'local backend')} · revision ${escapeHtml(shortDigest(state.timeSeriesStatus.model_revision || ''))}</small></span><em>pass</em></li>`
+          : `<li class="blocked"><i></i><span><b>Connected local runtime</b><small>${escapeHtml(state.timeSeriesStatus?.load_error || state.timeSeriesStatus?.error || 'Start or connect the dedicated Python 3.11 service.')}</small></span><em>setup</em></li>`
         : '';
       const gates = (item.admission_gates || []).map(gate => `<li class="${escapeHtml(gate.status)}"><i></i><span><b>${escapeHtml(gate.name)}</b><small>${escapeHtml(gate.detail)}</small></span><em>${escapeHtml(gate.status)}</em></li>`).join('') + artifactGate;
-      const codeActions = item.id === 'securebert-code-vulnerability'
+      const candidateActions = item.id === 'securebert-code-vulnerability'
         ? runnable
           ? '<button class="button primary small" type="button" data-open-code-screen>Screen source code locally</button>'
           : readiness?.installed
           ? '<span class="candidate-actions"><button class="button ghost small" type="button" data-open-code-screen>Review workflow</button><button class="button primary small" type="button" data-review-model-trust>Review artifact approval</button></span>'
           : `<span class="candidate-actions"><button class="button ghost small" type="button" data-open-code-screen>Review workflow</button><button class="button primary small" type="button" data-pull-profile="${escapeHtml(item.profile_id)}">Install local classifier</button></span>`
-        : '<button class="button ghost small" type="button" data-candidate-forecast-plan>Stage a forecasting investigation</button>';
+        : item.id === 'cisco-time-series-1'
+        ? `<button class="button ${state.timeSeriesStatus?.ok ? 'primary' : 'ghost'} small" type="button" data-open-time-series>${state.timeSeriesStatus?.ok ? 'Forecast a Splunk series' : 'Configure local forecast runtime'}</button>`
+        : '';
       const stage = item.id === 'securebert-code-vulnerability' && runnable
         ? 'runnable local'
         : item.id === 'securebert-code-vulnerability' && readiness?.installed
         ? 'artifact approval required'
+        : item.id === 'cisco-time-series-1' && state.timeSeriesStatus?.ok
+        ? 'runnable local'
+        : item.id === 'cisco-time-series-1'
+        ? 'local runtime setup'
         : item.status.replaceAll('-', ' ');
       return `<article class="${escapeHtml(item.status)}">
         <div><span>${escapeHtml(item.owner)} · ${escapeHtml(item.runtime.replaceAll('-', ' '))}</span><b>${escapeHtml(stage)}</b></div>
@@ -1093,10 +1115,190 @@ function renderModelCatalog() {
         <ul class="candidate-gates">${gates}</ul>
         <div class="candidate-boundary"><b>Boundary</b><span>${escapeHtml(item.constraint)}</span></div>
         ${source ? `<div class="candidate-source-state ${escapeHtml(source.status)}"><b>${escapeHtml(source.status.replaceAll('-', ' '))}</b><span>${escapeHtml(source.pipeline_tag || 'source metadata')} · ${escapeHtml(shortDigest(source.revision || ''))}</span><small>${escapeHtml(source.detail || '')}</small></div>` : ''}
-        <footer><a href="${escapeHtml(item.source_url)}" target="_blank" rel="noopener">First-party model card ↗</a>${codeActions}</footer>
+        <footer><a href="${escapeHtml(item.source_url)}" target="_blank" rel="noopener">First-party model card ↗</a>${candidateActions}</footer>
       </article>`;
     }).join('')}</div>`;
   applyAccessPermissions();
+}
+
+function openTimeSeriesWorkbench() {
+  state.timeSeriesResult = null;
+  const runtime = state.timeSeriesStatus || {};
+  const configured = state.settings?.time_series_runtime || {};
+  const runtimeMessage = runtime.ok
+    ? `<div class="forecast-runtime-state ready"><b>Runtime ready</b><span>${escapeHtml(runtime.inference_backend || 'local')} · ${escapeHtml(runtime.model_revision ? `revision ${shortDigest(runtime.model_revision)}` : 'revision not attested')}</span></div>`
+    : `<div class="forecast-runtime-state"><b>Runtime setup required</b><span>${escapeHtml(runtime.load_error || runtime.error || 'The dedicated Cisco TSM service is not ready.')}</span><code>docker compose --profile forecasting up --build -d cisco-tsm</code><button class="button primary small" id="startBundledTimeSeries" type="button">Build and start bundled local runtime</button><small>Explicit action · Docker required · generates an encrypted local bearer token · first load downloads the pinned checkpoint</small></div>`;
+  showDetail({
+    eyebrow:'LOCAL FORECAST SPECIALIST · OPT-IN',
+    title:'Forecast a bounded Splunk series',
+    summary:'<p>Extract one regular numeric timechart through read-only Splunk MCP, measure source quality, withhold known points for backtesting, then forecast locally with Cisco TSM. Results remain advisory until an analyst reviews the promotion evidence.</p>',
+    content:`<section class="forecast-workbench">
+      ${runtimeMessage}
+      <details class="forecast-runtime-config" ${runtime.ok ? '' : 'open'}>
+        <summary>Local runtime connection</summary>
+        <form id="timeSeriesRuntimeForm">
+          <label class="full"><span>Dedicated runtime endpoint</span><input id="timeSeriesEndpoint" type="url" value="${escapeHtml(runtime.endpoint || configured.endpoint || 'http://127.0.0.1:8080')}" required><small>Loopback, Docker service DNS, or a private-network host only. Public inference is blocked.</small></label>
+          <label class="full"><span>Bearer token</span><input id="timeSeriesToken" type="password" placeholder="${state.settings?.secrets?.cisco_tsm_token ? 'Leave blank to keep saved token' : 'Required by the local service'}"></label>
+          <label class="full switch-line nested-switch"><span><b>Verify TLS certificates</b><small>Keep enabled for HTTPS. Disable only for a trusted self-signed private endpoint.</small></span><input type="checkbox" id="verifyTimeSeriesTls" ${configured.verify_ssl === false ? '' : 'checked'}><span class="switch-control" aria-hidden="true"></span></label>
+          <label class="full"><span>Private CA bundle path <em>optional</em></span><input id="timeSeriesCaBundle" value="${escapeHtml(configured.ca_bundle || '')}" placeholder="C:\\certs\\organization-ca.pem or /etc/ssl/org-ca.pem"></label>
+          <footer><span id="timeSeriesRuntimeResult" role="status" aria-live="polite"></span><button class="button ghost" type="submit">Save and test runtime</button></footer>
+        </form>
+      </details>
+      <form id="timeSeriesForecastForm" class="forecast-form">
+        <label class="full"><span>Forecast title</span><input id="forecastTitle" value="Splunk event-rate forecast" maxlength="240" required></label>
+        <label class="full"><span>Read-only timechart SPL</span><textarea id="forecastSpl" rows="4" required spellcheck="false">index=_internal | timechart span=5m count as value</textarea><small>Return exactly one timestamp field and one numeric value field. SignalRoom validates the interval and rejects duplicate buckets.</small></label>
+        <label><span>Earliest</span><select id="forecastEarliest"><option value="-24h">Last 24 hours</option><option value="-7d" selected>Last 7 days</option><option value="-14d">Last 14 days</option><option value="-30d">Last 30 days</option></select></label>
+        <label><span>Bucket interval</span><select id="forecastInterval"><option value="60">1 minute</option><option value="300" selected>5 minutes</option><option value="900">15 minutes</option><option value="3600">1 hour</option></select></label>
+        <label><span>Timestamp field</span><input id="forecastTimestampField" value="_time" required></label>
+        <label><span>Numeric field</span><input id="forecastValueField" value="value" required></label>
+        <label><span>Forecast points</span><input id="forecastHorizon" type="number" value="24" min="1" max="128" required></label>
+        <label><span>Backtest holdout</span><input id="forecastBacktest" type="number" value="24" min="8" max="128" required></label>
+        <label><span>Maximum result rows</span><input id="forecastRows" type="number" value="2048" min="20" max="5000" required></label>
+        <div class="forecast-boundary full"><b>Decision boundary</b><span>A forecast can become eligible for analyst review only when data quality passes, the model beats a naive last-value baseline, and the runtime attests its revision. No alert or threshold is changed here.</span></div>
+        <button class="button primary" type="submit" id="runTimeSeriesForecast" ${runtime.ok ? '' : 'disabled'}>Run read-only forecast</button>
+      </form>
+      <article class="operation-card forecast-operation" id="timeSeriesProgress" aria-live="polite" hidden>
+        <header><div><span class="operation-kicker">LOCAL FORECAST RUN</span><h3 class="operation-label">Preparing forecast</h3></div><span class="operation-elapsed">0s</span></header>
+        <p class="operation-detail">Checking the dedicated local runtime.</p>
+        <div class="operation-progress" role="progressbar" aria-label="Time-series forecast progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><i></i></div>
+        <div class="operation-metrics"></div><ol class="operation-steps"></ol>
+      </article>
+      <div id="timeSeriesOutput" class="forecast-output" aria-live="polite"></div>
+    </section>`,
+    provenance:'<h3>Execution contract</h3><dl><div><dt>Model</dt><dd>cisco-ai/cisco-time-series-model-1.0</dd></div><div><dt>Inference</dt><dd>Local/private dedicated service</dd></div><div><dt>Splunk writes</dt><dd>None</dd></div><div><dt>Automatic routing</dt><dd>Prohibited</dd></div></dl>'
+  });
+  $('#timeSeriesRuntimeForm').addEventListener('submit', saveTimeSeriesRuntime);
+  $('#timeSeriesForecastForm').addEventListener('submit', runTimeSeriesForecast);
+  if ($('#startBundledTimeSeries')) {
+    $('#startBundledTimeSeries').addEventListener('click', startBundledTimeSeriesRuntime);
+  }
+  applyAccessPermissions();
+  (runtime.ok ? $('#forecastSpl') : $('#timeSeriesEndpoint')).focus();
+}
+
+async function startBundledTimeSeriesRuntime(event) {
+  const button = event.currentTarget; const progress = $('#timeSeriesProgress');
+  button.disabled = true; button.textContent = 'Starting Docker runtime…'; progress.hidden = false;
+  progress.querySelector('.operation-steps').innerHTML = ''; progress.querySelector('.operation-metrics').innerHTML = '';
+  progress.querySelector('.operation-progress i').style.width = '0%';
+  try {
+    state.timeSeriesStatus = await streamApi(
+      '/api/model-capabilities/time-series/runtime/start/stream',
+      {},
+      event => updateOperation(progress, event)
+    );
+    state.settings.time_series_runtime = {
+      endpoint:state.timeSeriesStatus.endpoint || 'http://127.0.0.1:8080',
+      verify_ssl:true,
+      ca_bundle:null
+    };
+    state.settings.secrets.cisco_tsm_token = true;
+    renderModelCatalog();
+    toast('Bundled Cisco TSM runtime ready');
+    openTimeSeriesWorkbench();
+  } catch (error) {
+    button.disabled = false; button.textContent = 'Build and start bundled local runtime';
+    $('#timeSeriesOutput').innerHTML = `<div class="code-screen-error"><b>Runtime start stopped</b><span>${escapeHtml(error.message)}</span></div>`;
+  }
+}
+
+async function saveTimeSeriesRuntime(event) {
+  event.preventDefault();
+  const result = $('#timeSeriesRuntimeResult'); result.textContent = 'Checking…';
+  try {
+    state.timeSeriesStatus = await api('/api/model-capabilities/time-series/runtime', {
+      method:'PUT',
+      body:JSON.stringify({
+        endpoint:$('#timeSeriesEndpoint').value.trim(),
+        token:$('#timeSeriesToken').value || null,
+        verify_ssl:$('#verifyTimeSeriesTls').checked,
+        ca_bundle:$('#verifyTimeSeriesTls').checked ? ($('#timeSeriesCaBundle').value.trim() || null) : null
+      })
+    });
+    state.settings.time_series_runtime = {
+      endpoint:state.timeSeriesStatus.endpoint,
+      verify_ssl:$('#verifyTimeSeriesTls').checked,
+      ca_bundle:$('#verifyTimeSeriesTls').checked ? ($('#timeSeriesCaBundle').value.trim() || null) : null
+    };
+    if ($('#timeSeriesToken').value) state.settings.secrets.cisco_tsm_token = true;
+    result.textContent = state.timeSeriesStatus.ok ? 'Runtime ready' : (state.timeSeriesStatus.load_error || state.timeSeriesStatus.error || 'Saved; runtime is still loading');
+    $('#runTimeSeriesForecast').disabled = !state.timeSeriesStatus.ok;
+    $('#timeSeriesToken').value = '';
+    renderModelCatalog();
+  } catch (error) {
+    result.textContent = error.message;
+  }
+}
+
+function chartPath(values, x0, x1, y0, y1, minimum, maximum) {
+  if (!values?.length) return '';
+  const span = maximum - minimum || 1;
+  return values.map((value, index) => {
+    const x = x0 + (x1 - x0) * index / Math.max(1, values.length - 1);
+    const y = y1 - (y1 - y0) * (Number(value) - minimum) / span;
+    return `${x.toFixed(1)},${y.toFixed(1)}`;
+  }).join(' ');
+}
+
+function forecastChart(result) {
+  const backtest = result.backtest || {}; const forecast = result.forecast || {};
+  const mean = forecast.mean || []; const low = forecast.quantiles?.p10 || mean; const high = forecast.quantiles?.p90 || mean;
+  const all = [...(backtest.actual || []), ...(backtest.predicted || []), ...mean, ...low, ...high].map(Number).filter(Number.isFinite);
+  if (!all.length) return '';
+  const minimum = Math.min(...all); const maximum = Math.max(...all);
+  const actualPath = chartPath(backtest.actual, 28, 337, 24, 210, minimum, maximum);
+  const predictedPath = chartPath(backtest.predicted, 28, 337, 24, 210, minimum, maximum);
+  const meanPath = chartPath(mean, 383, 692, 24, 210, minimum, maximum);
+  const lowPoints = chartPath(low, 383, 692, 24, 210, minimum, maximum);
+  const highPoints = chartPath(high, 383, 692, 24, 210, minimum, maximum).split(' ').reverse().join(' ');
+  return `<figure class="forecast-chart"><svg viewBox="0 0 720 250" role="img" aria-labelledby="forecastChartTitle forecastChartDesc"><title id="forecastChartTitle">Backtest and forecast review</title><desc id="forecastChartDesc">Left: held-out actual values versus Cisco TSM predictions. Right: future mean forecast with the tenth-to-ninetieth percentile interval.</desc><line x1="360" y1="16" x2="360" y2="218"></line><polygon points="${lowPoints} ${highPoints}"></polygon><polyline class="actual" points="${actualPath}"></polyline><polyline class="predicted" points="${predictedPath}"></polyline><polyline class="mean" points="${meanPath}"></polyline><text x="28" y="238">WITHHELD BACKTEST</text><text x="383" y="238">UNSEEN FORECAST</text></svg><figcaption><span><i class="actual"></i>Actual holdout</span><span><i class="predicted"></i>Backtest prediction</span><span><i class="mean"></i>Forecast mean</span><span><i class="band"></i>p10–p90</span></figcaption></figure>`;
+}
+
+function renderTimeSeriesResult(result) {
+  const output = $('#timeSeriesOutput'); const gate = result.promotion_gate || {};
+  if (result.status === 'blocked-data-quality') {
+    output.innerHTML = `<article class="forecast-result hold"><header><div><span>DATA-QUALITY GATE</span><h4>Forecast stopped before inference</h4></div><b>Blocked</b></header><p>${escapeHtml(gate.reasons?.[0] || 'Source quality did not pass.')}</p><div class="forecast-metrics"><span><b>${Math.round(Number(result.series.imputation_ratio || 0) * 100)}%</b>imputed</span><span><b>${Number(result.series.expected_points || 0).toLocaleString()}</b>prepared points</span><span><b>0</b>forecast calls</span></div></article>`;
+    return;
+  }
+  const backtest = result.backtest || {}; const ready = Boolean(gate.ready);
+  const mase = backtest.mase_vs_last_value == null ? 'Undefined' : Number(backtest.mase_vs_last_value).toFixed(3);
+  output.innerHTML = `<article class="forecast-result ${ready ? 'ready' : 'hold'}">
+    <header><div><span>FORECAST PROMOTION EVIDENCE</span><h4>${ready ? 'Eligible for analyst review' : 'Forecast complete · promotion held'}</h4></div><b>${escapeHtml(gate.decision || 'hold')}</b></header>
+    <p>${escapeHtml((gate.reasons || []).join(' '))}</p>
+    <div class="forecast-metrics"><span><b>${mase}</b>MASE vs naive</span><span><b>${Math.round(Number(result.series.imputation_ratio || 0) * 100)}%</b>imputed</span><span><b>${Number(result.series.expected_points || 0).toLocaleString()}</b>context points</span><span><b>${Number(result.forecast?.horizon || 0)}</b>forecast points</span></div>
+    ${forecastChart(result)}
+    <details><summary>Exact provenance and boundary</summary><dl><div><dt>Query fingerprint</dt><dd><code>${escapeHtml(result.source.query_fingerprint)}</code></dd></div><div><dt>Series SHA-256</dt><dd><code>${escapeHtml(result.series_sha256)}</code></dd></div><div><dt>Model revision</dt><dd><code>${escapeHtml(result.runtime.source_revision || 'not attested')}</code></dd></div><div><dt>Runtime</dt><dd>${escapeHtml(`${result.runtime.network_scope || 'local'} · ${result.runtime.backend || 'backend not reported'}`)}</dd></div></dl></details>
+    <footer><button class="button ghost small" type="button" data-time-series-case>Preserve review to case</button><button class="button ghost small" type="button" data-time-series-investigate>Investigate the operational meaning</button></footer>
+  </article>`;
+}
+
+async function runTimeSeriesForecast(event) {
+  event.preventDefault();
+  const button = $('#runTimeSeriesForecast'); const progress = $('#timeSeriesProgress');
+  button.disabled = true; button.textContent = 'Forecasting locally…'; progress.hidden = false;
+  progress.querySelector('.operation-steps').innerHTML = ''; progress.querySelector('.operation-metrics').innerHTML = '';
+  progress.querySelector('.operation-progress i').style.width = '0%';
+  $('#timeSeriesOutput').innerHTML = '';
+  try {
+    state.timeSeriesResult = await streamApi('/api/model-capabilities/time-series/forecast/stream', {
+      title:$('#forecastTitle').value.trim(),
+      spl:$('#forecastSpl').value.trim(),
+      earliest_time:$('#forecastEarliest').value,
+      latest_time:'now',
+      row_limit:Number($('#forecastRows').value),
+      timestamp_field:$('#forecastTimestampField').value.trim(),
+      value_field:$('#forecastValueField').value.trim(),
+      interval_seconds:Number($('#forecastInterval').value),
+      horizon:Number($('#forecastHorizon').value),
+      backtest_points:Number($('#forecastBacktest').value)
+    }, event => updateOperation(progress, event));
+    renderTimeSeriesResult(state.timeSeriesResult);
+  } catch (error) {
+    state.timeSeriesResult = null;
+    $('#timeSeriesOutput').innerHTML = `<div class="code-screen-error"><b>Forecast stopped</b><span>${escapeHtml(error.message)}</span></div>`;
+  } finally {
+    button.disabled = !state.timeSeriesStatus?.ok; button.textContent = 'Run read-only forecast';
+  }
 }
 
 function openCodeScreening() {
@@ -4305,13 +4507,28 @@ document.addEventListener('click', async event => {
   const test = event.target.closest('[data-test-model]');
   if (test) { const dot = $(`#status-${CSS.escape(test.dataset.testModel)}`); dot.classList.remove('ok'); const holder = document.createElement('span'); const result = await testConnection('model', test.dataset.testModel, holder); dot.classList.toggle('ok', result.ok); toast(holder.textContent); }
   if (event.target.closest('[data-open-code-screen]')) openCodeScreening();
+  if (event.target.closest('[data-open-time-series]')) openTimeSeriesWorkbench();
   if (event.target.closest('[data-review-model-trust]')) {
     if (!$('#detailModal').hidden) closeDetail();
     $('#modelTrustPanel').scrollIntoView({behavior:'smooth', block:'start'});
     toast('Review and approve the exact installed artifact in the local supply-chain panel');
   }
-  if (event.target.closest('[data-candidate-forecast-plan]')) {
-    openInvestigation('discovery', 'Identify one high-value security or ingestion event-rate series in the connected Splunk environment that would benefit from forecasting. Use only read-only metadata and bounded searches. Propose the exact timechart SPL, interval, history window, missing-value checks, backtest plan, forecast horizon, and analyst decision this forecast could inform. Do not claim that the Cisco Time Series Model has executed; its SignalRoom runtime adapter is not admitted yet.', false);
+  if (event.target.closest('[data-time-series-case]') && state.timeSeriesResult) {
+    const result = state.timeSeriesResult; const gate = result.promotion_gate || {}; const backtest = result.backtest || {};
+    openCasePicker({
+      kind:'observation',
+      title:result.title,
+      content:`Local Cisco TSM forecast: ${gate.decision}\nMASE vs naive: ${backtest.mase_vs_last_value == null ? 'undefined' : Number(backtest.mase_vs_last_value).toFixed(3)}\nImputation: ${Math.round(Number(result.series.imputation_ratio || 0) * 100)}%\nContext points: ${result.series.expected_points}\nForecast horizon: ${result.forecast?.horizon || 0}\n\nSPL: ${result.source.spl}\nWindow: ${result.source.earliest_time} to ${result.source.latest_time}\nQuery fingerprint: ${result.source.query_fingerprint}\nSeries SHA-256: ${result.series_sha256}\nModel revision: ${result.runtime.source_revision || 'not attested'}\n\nThis is advisory forecast evidence. It did not change an alert, threshold, or capacity decision.`,
+      source:'SignalRoom · local Cisco Time Series Model',
+      confidence:gate.ready ? 'medium' : 'low',
+      status:'needs-validation',
+      metadata:{forecast_run_id:result.run_id,query_fingerprint:result.source.query_fingerprint,series_sha256:result.series_sha256,model_revision:result.runtime.source_revision || '',promotion_decision:gate.decision,network_inference:false}
+    });
+  }
+  if (event.target.closest('[data-time-series-investigate]') && state.timeSeriesResult) {
+    const result = state.timeSeriesResult; const gate = result.promotion_gate || {}; const backtest = result.backtest || {};
+    closeDetail();
+    openInvestigation('discovery', `Interpret this local time-series forecast as advisory operational evidence. Explain plausible security or ingestion meanings, separate seasonality and collection artifacts from actionable change, and propose the single safest bounded validation step. Do not treat the forecast as an alert.\n\nTitle: ${result.title}\nSource SPL: ${result.source.spl}\nWindow: ${result.source.earliest_time} to ${result.source.latest_time}\nInterval: ${result.source.interval_seconds} seconds\nContext: ${result.series.expected_points} points; ${Math.round(Number(result.series.imputation_ratio || 0) * 100)}% imputed\nBacktest MASE vs last-value: ${backtest.mase_vs_last_value == null ? 'undefined' : Number(backtest.mase_vs_last_value).toFixed(3)}\nPromotion decision: ${gate.decision}\nReasons: ${(gate.reasons || []).join(' ')}`, false);
   }
   if (event.target.closest('[data-code-screen-case]') && state.codeScreenResult) {
     const result = state.codeScreenResult; const prediction = result.prediction || {};
@@ -4533,7 +4750,7 @@ const accessObserver = new MutationObserver(() => {
 accessObserver.observe(document.body, { childList:true, subtree:true });
 
 async function loadWorkspace() {
-  await Promise.all([loadSettings(), loadWorkload(), loadArtifacts(), loadCases(), loadLatestDiscovery(), loadDiscoveryJobs(), loadValidations(), loadDetections(), loadModelCatalog(), loadModelTrust(), loadSplunkModels(), loadAssurance(), loadConnectionDiagnostics(), loadFeedbackBenchmarks(), loadGoldenBenchmarks()]);
+  await Promise.all([loadSettings(), loadWorkload(), loadArtifacts(), loadCases(), loadLatestDiscovery(), loadDiscoveryJobs(), loadValidations(), loadDetections(), loadModelCatalog(), loadTimeSeriesStatus(), loadModelTrust(), loadSplunkModels(), loadAssurance(), loadConnectionDiagnostics(), loadFeedbackBenchmarks(), loadGoldenBenchmarks()]);
   renderPromptTree(); renderValidations(); renderDetections(); handleDeepLink(); renderAuth();
   state.workspaceLoaded = true;
   if (!state.assuranceTimer) state.assuranceTimer = setInterval(() => {

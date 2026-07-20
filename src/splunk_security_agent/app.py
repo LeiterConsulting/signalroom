@@ -45,6 +45,7 @@ from .detections import (
 )
 from .discovery import DiscoveryJobService, DiscoveryJobStore, DiscoveryPipeline
 from .feedback import AnalystFeedbackStore
+from .forecasting import TimeSeriesForecastService
 from .mcp_server import MCPServer
 from .model_setup import ModelSetupService
 from .model_trust import ModelTrustService, ModelTrustStore
@@ -107,6 +108,8 @@ from .schemas import (
     ModelTrustPolicyUpdate,
     QueryIntelligenceRequest,
     SettingsUpdate,
+    TimeSeriesForecastRequest,
+    TimeSeriesRuntimeUpdate,
     ValidationTaskCreate,
     ValidationTaskUpdate,
     WorkloadPolicyUpdate,
@@ -216,6 +219,9 @@ class Services:
         self.benchmark_lock = asyncio.Lock()
         self.model_setup = ModelSetupService(
             self.config, self.evidence, self.model_trust
+        )
+        self.time_series = TimeSeriesForecastService(
+            self.config, lambda: self.splunk, ROOT
         )
         self._fingerprint = ""
         self._splunk: Any = None
@@ -731,6 +737,7 @@ async def put_settings(update: SettingsUpdate) -> dict[str, Any]:
     services.config.update_secrets(
         splunk_token=update.splunk_token,
         huggingface_token=update.huggingface_token,
+        cisco_tsm_token=update.cisco_tsm_token,
     )
     services.refresh(force=True)
     services.audit.record(
@@ -932,6 +939,120 @@ async def screen_code_vulnerability(
         actor=str(principal.get("username") or "local-operator"),
     )
     return result
+
+
+@app.get("/api/model-capabilities/time-series/status")
+async def time_series_status() -> dict[str, Any]:
+    return await services.time_series.status()
+
+
+@app.put("/api/model-capabilities/time-series/runtime")
+async def configure_time_series_runtime(
+    value: TimeSeriesRuntimeUpdate, request: Request
+) -> dict[str, Any]:
+    try:
+        result = await services.time_series.configure(value)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    principal = getattr(request.state, "principal", {}) or {}
+    services.audit.record(
+        "model.capability.time-series.runtime-configured",
+        "update",
+        target_type="model-runtime",
+        target_id="cisco-time-series-1",
+        summary="The dedicated local Cisco TSM runtime connection was updated.",
+        metadata={
+            "endpoint": result.get("endpoint"),
+            "network_scope": result.get("network_scope"),
+            "verify_tls": result.get("verify_ssl"),
+            "token_configured": result.get("token_configured"),
+        },
+        actor=str(principal.get("username") or "local-operator"),
+    )
+    return result
+
+
+@app.post("/api/model-capabilities/time-series/runtime/start/stream")
+async def start_time_series_runtime(request: Request) -> StreamingResponse:
+    principal = getattr(request.state, "principal", {}) or {}
+
+    async def run(progress: Any) -> dict[str, Any]:
+        try:
+            result = await services.time_series.start_bundled_runtime(progress)
+        except RuntimeError as exc:
+            services.audit.record(
+                "model.capability.time-series.runtime-start-failed",
+                "install",
+                target_type="model-runtime",
+                target_id="cisco-time-series-1",
+                outcome="error",
+                summary="The bundled local Cisco TSM runtime did not become ready.",
+                metadata={"error": str(exc)[:1000]},
+                actor=str(principal.get("username") or "local-operator"),
+            )
+            raise
+        services.audit.record(
+            "model.capability.time-series.runtime-started",
+            "install",
+            target_type="model-runtime",
+            target_id="cisco-time-series-1",
+            summary="The bundled local Cisco TSM runtime became ready.",
+            metadata={
+                "endpoint": result.get("endpoint"),
+                "model_revision": result.get("model_revision"),
+                "inference_backend": result.get("inference_backend"),
+                "network_inference": False,
+            },
+            actor=str(principal.get("username") or "local-operator"),
+        )
+        return result
+
+    return _stream_response(run)
+
+
+@app.post("/api/model-capabilities/time-series/forecast/stream")
+async def run_time_series_forecast(
+    value: TimeSeriesForecastRequest, request: Request
+) -> StreamingResponse:
+    principal = getattr(request.state, "principal", {}) or {}
+
+    async def run(progress: Any) -> dict[str, Any]:
+        try:
+            result = await services.time_series.run(value, progress)
+        except (ValueError, PermissionError, RuntimeError) as exc:
+            services.audit.record(
+                "model.capability.time-series.forecast-failed",
+                "forecast",
+                target_type="model-profile",
+                target_id="cisco-time-series-1",
+                outcome="error",
+                summary="A bounded local time-series forecast did not complete.",
+                metadata={"error": str(exc)[:1000]},
+                actor=str(principal.get("username") or "local-operator"),
+            )
+            raise
+        services.audit.record(
+            "model.capability.time-series.forecasted",
+            "forecast",
+            target_type="model-profile",
+            target_id="cisco-time-series-1",
+            summary="A read-only Splunk series was forecast through the local Cisco TSM runtime.",
+            metadata={
+                "run_id": result["run_id"],
+                "query_fingerprint": result["source"]["query_fingerprint"],
+                "series_sha256": result["series_sha256"],
+                "source_rows": result["series"]["source_rows"],
+                "points": result["series"]["expected_points"],
+                "imputation_ratio": result["series"]["imputation_ratio"],
+                "promotion_decision": result["promotion_gate"]["decision"],
+                "network_inference": False,
+                "source_persisted": False,
+            },
+            actor=str(principal.get("username") or "local-operator"),
+        )
+        return result
+
+    return _stream_response(run)
 
 
 @app.get("/api/model-trust")

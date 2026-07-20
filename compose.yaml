@@ -6,6 +6,8 @@ services:
     environment:
       SPLUNK_MCP_TOKEN: ${SPLUNK_MCP_TOKEN:-}
       HF_TOKEN: ${HF_TOKEN:-}
+      SIGNALROOM_CISCO_TSM_ENDPOINT: ${SIGNALROOM_CISCO_TSM_ENDPOINT:-}
+      SIGNALROOM_CISCO_TSM_TOKEN: ${SIGNALROOM_CISCO_TSM_TOKEN:-}
       SIGNALROOM_WEBHOOK_URL: ${SIGNALROOM_WEBHOOK_URL:-}
       SIGNALROOM_WEBHOOK_AUTHORIZATION: ${SIGNALROOM_WEBHOOK_AUTHORIZATION:-}
       SIGNALROOM_JIRA_EMAIL: ${SIGNALROOM_JIRA_EMAIL:-}
@@ -15,3 +17,28 @@ services:
       - ./data:/app/data
     extra_hosts:
       - "host.docker.internal:host-gateway"
+
+  cisco-tsm:
+    profiles: ["forecasting"]
+    build:
+      context: ./services/cisco_tsm
+    ports:
+      - "127.0.0.1:${SIGNALROOM_CISCO_TSM_PORT:-8080}:8080"
+    environment:
+      CTS_AUTH_TOKEN: ${SIGNALROOM_CISCO_TSM_TOKEN:-}
+      CTS_MODEL_REPO: cisco-ai/cisco-time-series-model-1.0
+      CTS_MODEL_REVISION: ${CISCO_TSM_MODEL_REVISION:-038831104abace772bd50bffe76da0c77c364c51}
+      CTS_TORCH_BACKEND: ${CISCO_TSM_TORCH_BACKEND:-auto}
+    volumes:
+      - cisco_tsm_cache:/models/huggingface
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+
+volumes:
+  cisco_tsm_cache:

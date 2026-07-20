@@ -85,7 +85,7 @@ EVALUATED_MODEL_CANDIDATES: tuple[dict[str, Any], ...] = (
         "label": "Cisco Time Series Model 1.0",
         "model": "cisco-ai/cisco-time-series-model-1.0",
         "owner": "Cisco AI",
-        "status": "adapter-next",
+        "status": "admitted-preview",
         "runtime": "dedicated-time-series",
         "profile_id": "",
         "purpose": (
@@ -93,8 +93,9 @@ EVALUATED_MODEL_CANDIDATES: tuple[dict[str, Any], ...] = (
             "observability time series."
         ),
         "constraint": (
-            "Requires a cisco-tsm runtime, numeric series extraction, regular resampling, missing-value "
-            "quality checks, backtesting, and a forecast-specific promotion gate."
+            "Runs only through a dedicated local/private cisco-tsm service. Public inference is "
+            "blocked, source rows are not persisted, and no forecast can automatically change an "
+            "alert, threshold, or capacity decision."
         ),
         "input_contract": (
             "Regular univariate numeric series · coarse/fine history · explicit interval and horizon"
@@ -111,18 +112,27 @@ EVALUATED_MODEL_CANDIDATES: tuple[dict[str, Any], ...] = (
             },
             {
                 "name": "Local forecast runtime adapter",
-                "status": "next",
-                "detail": "Add an isolated cisco-tsm adapter and immutable checkpoint tracking",
+                "status": "pass",
+                "detail": (
+                    "Isolated Python 3.11 sidecar · local/private endpoints only · immutable "
+                    "checkpoint revision reported when using the bundled runtime"
+                ),
             },
             {
                 "name": "Splunk numeric-series preparation",
-                "status": "next",
-                "detail": "Bind read-only SPL, regular resampling, imputation ratio, and source provenance",
+                "status": "pass",
+                "detail": (
+                    "Exact read-only timechart · regular-interval validation · last-value "
+                    "imputation ratio · query and series fingerprints"
+                ),
             },
             {
                 "name": "Backtest and promotion gate",
-                "status": "blocked",
-                "detail": "Required before a forecast can influence an alert threshold or capacity decision",
+                "status": "pass",
+                "detail": (
+                    "Withheld holdout compared with a naive last-value baseline; eligible output "
+                    "still requires analyst review and cannot auto-promote"
+                ),
             },
         ],
         "source_url": "https://huggingface.co/cisco-ai/cisco-time-series-model-1.0",

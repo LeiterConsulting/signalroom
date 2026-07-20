@@ -177,6 +177,7 @@ class ConfigStore:
         env_names = {
             "splunk_token": "SPLUNK_MCP_TOKEN",
             "huggingface_token": "HF_TOKEN",
+            "cisco_tsm_token": "SIGNALROOM_CISCO_TSM_TOKEN",
             "delivery_webhook_url": "SIGNALROOM_WEBHOOK_URL",
             "delivery_authorization": "SIGNALROOM_WEBHOOK_AUTHORIZATION",
             "delivery_jira_email": "SIGNALROOM_JIRA_EMAIL",
@@ -193,6 +194,7 @@ class ConfigStore:
         env_names = {
             "splunk_token": "SPLUNK_MCP_TOKEN",
             "huggingface_token": "HF_TOKEN",
+            "cisco_tsm_token": "SIGNALROOM_CISCO_TSM_TOKEN",
             "delivery_webhook_url": "SIGNALROOM_WEBHOOK_URL",
             "delivery_authorization": "SIGNALROOM_WEBHOOK_AUTHORIZATION",
             "delivery_jira_email": "SIGNALROOM_JIRA_EMAIL",
@@ -221,6 +223,7 @@ class ConfigStore:
         settings["secrets"] = {
             "splunk_token": bool(self.secret("splunk_token")),
             "huggingface_token": bool(self.secret("huggingface_token")),
+            "cisco_tsm_token": bool(self.secret("cisco_tsm_token")),
             "audit_hec_url": bool(self.secret("audit_hec_url")),
             "audit_hec_token": bool(self.secret("audit_hec_token")),
         }

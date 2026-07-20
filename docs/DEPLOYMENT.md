@@ -313,6 +313,30 @@ docker compose up --build -d
 
 The published port is bound to localhost and `./data` is mounted for persistence. When Ollama runs on the host, configure its endpoint as `http://host.docker.internal:11434` in Setup.
 
+The Cisco Time Series Model runtime is optional and remains stopped unless its profile is selected. The easiest
+process-install path is **Models → Cisco Time Series Model → Build and start bundled local runtime**. SignalRoom
+generates and encrypts the bearer token, builds the isolated Python 3.11 service, streams checkpoint loading, and
+waits for readiness.
+
+For a container-first deployment, provide a strong shared token to both services and start the forecasting
+profile explicitly:
+
+```bash
+export SIGNALROOM_CISCO_TSM_TOKEN="$(python -c 'import secrets; print(secrets.token_urlsafe(36))')"
+docker compose --profile forecasting up --build -d
+```
+
+The sidecar is published only on loopback, uses a persistent `cisco_tsm_cache` volume, installs
+`cisco-tsm==1.0.2` under Python 3.11, and defaults to the pinned
+`038831104abace772bd50bffe76da0c77c364c51` checkpoint revision. Override
+`CISCO_TSM_MODEL_REVISION` only through a deliberate model intake and regression review. `auto` selects CUDA when
+available; set `CISCO_TSM_TORCH_BACKEND=cpu` or `gpu` to require a specific backend. The in-app process launcher
+selects the first available port from 8080–8099 and saves the exact endpoint. Container operators can set
+`SIGNALROOM_CISCO_TSM_PORT`; service-to-service traffic still uses port 8080 inside the Compose network.
+The container runs as a non-root user with a read-only root filesystem, no Linux capabilities, and
+`no-new-privileges`; only its checkpoint cache and temporary filesystem are writable. Inference remains local,
+but the first model load contacts Hugging Face to download the approved checkpoint.
+
 ## Manual development setup
 
 The installer is recommended for operators. Developers can still use:

@@ -167,7 +167,7 @@ async def test_update_check_is_read_only_and_does_not_claim_untracked_ollama_is_
     assert FakeClient.last_instance.posts == []
 
 
-def test_candidate_catalog_distinguishes_admitted_and_adapter_required(tmp_path):
+def test_candidate_catalog_distinguishes_bounded_admitted_capabilities(tmp_path):
     catalog = ModelSetupService(ConfigStore(tmp_path)).catalog()
     candidates = {item["id"]: item for item in catalog["evaluated_candidates"]}
 
@@ -178,8 +178,12 @@ def test_candidate_catalog_distinguishes_admitted_and_adapter_required(tmp_path)
 
     forecast = candidates["cisco-time-series-1"]
     assert forecast["configured"] is False
-    assert forecast["status"] == "adapter-next"
-    assert any(gate["name"] == "Backtest and promotion gate" for gate in forecast["admission_gates"])
+    assert forecast["status"] == "admitted-preview"
+    assert {gate["status"] for gate in forecast["admission_gates"]} == {"pass"}
+    assert any(
+        gate["name"] == "Backtest and promotion gate"
+        for gate in forecast["admission_gates"]
+    )
 
 
 @pytest.mark.asyncio

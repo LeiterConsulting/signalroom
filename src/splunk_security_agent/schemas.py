@@ -15,6 +15,12 @@ class SplunkConnection(BaseModel):
     ca_bundle: str | None = None
 
 
+class TimeSeriesRuntimeSettings(BaseModel):
+    endpoint: str = Field(default="http://127.0.0.1:8080", max_length=2048)
+    verify_ssl: bool = True
+    ca_bundle: str | None = Field(default=None, max_length=4000)
+
+
 class ModelProfile(BaseModel):
     id: str
     label: str
@@ -63,6 +69,9 @@ class AppSettings(BaseModel):
     allow_write_tools: bool = False
     max_agent_steps: int = 4
     demo_mode: bool = False
+    time_series_runtime: TimeSeriesRuntimeSettings = Field(
+        default_factory=TimeSeriesRuntimeSettings
+    )
     detection_repository: DetectionRepositorySettings = Field(default_factory=DetectionRepositorySettings)
 
 
@@ -70,6 +79,27 @@ class SettingsUpdate(BaseModel):
     settings: AppSettings
     splunk_token: str | None = None
     huggingface_token: str | None = None
+    cisco_tsm_token: str | None = None
+
+
+class TimeSeriesRuntimeUpdate(BaseModel):
+    endpoint: str = Field(min_length=8, max_length=2048)
+    verify_ssl: bool = True
+    ca_bundle: str | None = Field(default=None, max_length=4000)
+    token: str | None = Field(default=None, max_length=4096)
+
+
+class TimeSeriesForecastRequest(BaseModel):
+    title: str = Field(default="Splunk event-rate forecast", min_length=1, max_length=240)
+    spl: str = Field(min_length=1, max_length=20000)
+    earliest_time: str = Field(default="-7d", min_length=2, max_length=64)
+    latest_time: str = Field(default="now", min_length=1, max_length=64)
+    row_limit: int = Field(default=2048, ge=20, le=5000)
+    timestamp_field: str = Field(default="_time", min_length=1, max_length=160)
+    value_field: str = Field(default="value", min_length=1, max_length=160)
+    interval_seconds: int = Field(default=300, ge=60, le=86400)
+    horizon: int = Field(default=24, ge=1, le=128)
+    backtest_points: int = Field(default=24, ge=8, le=128)
 
 
 AccessRole = Literal["viewer", "analyst", "admin"]
