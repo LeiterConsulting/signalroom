@@ -86,6 +86,7 @@ async def test_readiness_reports_each_ollama_profile(monkeypatch, tmp_path):
         "securebert-embed",
         "securebert-ner",
         "securebert-rerank",
+        "securebert-code-vulnerability",
     }
 
 
@@ -159,7 +160,78 @@ async def test_update_check_is_read_only_and_does_not_claim_untracked_ollama_is_
     assert profiles["ollama-general"]["status"] == "check-unavailable"
     assert profiles["foundation-sec"]["status"] == "untracked"
     assert profiles["securebert-rerank"]["status"] == "not-installed"
+    candidate_sources = {
+        item["candidate_id"]: item for item in result["candidate_sources"]
+    }
+    assert candidate_sources["cisco-time-series-1"]["status"] == "source-observed"
     assert FakeClient.last_instance.posts == []
+
+
+def test_candidate_catalog_distinguishes_admitted_and_adapter_required(tmp_path):
+    catalog = ModelSetupService(ConfigStore(tmp_path)).catalog()
+    candidates = {item["id"]: item for item in catalog["evaluated_candidates"]}
+
+    code = candidates["securebert-code-vulnerability"]
+    assert code["configured"] is True
+    assert code["automatic_use"] is False
+    assert {gate["status"] for gate in code["admission_gates"]} == {"pass", "blocked"}
+
+    forecast = candidates["cisco-time-series-1"]
+    assert forecast["configured"] is False
+    assert forecast["status"] == "adapter-next"
+    assert any(gate["name"] == "Backtest and promotion gate" for gate in forecast["admission_gates"])
+
+
+@pytest.mark.asyncio
+async def test_code_screen_rejects_splunk_text_before_model_load(tmp_path):
+    service = ModelSetupService(ConfigStore(tmp_path))
+
+    with pytest.raises(ValueError, match="source-code contract"):
+        await service.screen_code_vulnerability(
+            "index=main sourcetype=syslog | stats count by host", "python"
+        )
+
+
+@pytest.mark.asyncio
+async def test_code_screen_is_local_bounded_and_does_not_return_source(
+    monkeypatch, tmp_path
+):
+    class FakeCodeProvider:
+        def __init__(self, profile, model_path):
+            assert profile.id == "securebert-code-vulnerability"
+            assert model_path.name == "securebert-code-vulnerability"
+
+        async def health(self):
+            return {"ok": True, "network_inference": False}
+
+        async def classify(self, code):
+            assert "strcpy" in code
+            return {
+                "predictions": [
+                    {"class_id": 1, "label": "LABEL_1", "score": 0.91},
+                    {"class_id": 0, "label": "LABEL_0", "score": 0.09},
+                ],
+                "input_tokens": 48,
+                "evaluated_tokens": 48,
+                "token_limit": 1024,
+                "truncated": False,
+            }
+
+    monkeypatch.setattr(
+        "splunk_security_agent.model_setup.LocalTransformersProvider",
+        FakeCodeProvider,
+    )
+    result = await ModelSetupService(ConfigStore(tmp_path)).screen_code_vulnerability(
+        "#include <string.h>\nint copy(char *dst, char *src) { strcpy(dst, src); return 0; }",
+        "c",
+    )
+
+    assert result["prediction"]["signal"] == "potential-vulnerability-review"
+    assert result["network_inference"] is False
+    assert result["contract"]["source_persisted"] is False
+    assert result["contract"]["finding"] is False
+    assert "code" not in result
+    assert len(result["input_sha256"]) == 64
 
 
 def test_pull_accepts_securebert_as_local_transformers_install(monkeypatch, tmp_path):

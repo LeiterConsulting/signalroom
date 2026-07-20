@@ -59,7 +59,14 @@ request-scoped audit events inherit the named username.
 
 ### Models are capabilities
 
-Profiles declare a model source, identifier, task, endpoint, provenance label, and context limit. The router chooses a security reasoning profile only for security-domain work. Embedding, reranking, and NER models are separate capabilities rather than pretend chat models. Broad FTS5 + bi-encoder candidates can be rescored by the optional local SecureBERT cross-encoder before evidence reaches chat or discovery synthesis. Hugging Face is the source for SecureBERT snapshots; `specialist_runtime` determines whether those capabilities execute locally through Transformers or through optional hosted inference.
+Profiles declare a model source, identifier, task, endpoint, provenance label, and context limit. The router chooses a security reasoning profile only for security-domain work. Embedding, reranking, NER, and classification models are separate capabilities rather than pretend chat models. Broad FTS5 + bi-encoder candidates can be rescored by the optional local SecureBERT cross-encoder before evidence reaches chat or discovery synthesis. Hugging Face is the source for SecureBERT snapshots; `specialist_runtime` determines whether retrieval, reranking, and NER execute locally through Transformers or through optional hosted inference.
+
+Capability admission is stricter than model installation. The SecureBERT code classifier has one explicit
+local-only endpoint that accepts code-shaped C, C++, or Python input, rejects Splunk objects and SPL, exposes
+truncation and confidence, persists no source, and never participates in automatic routing. The Cisco Time Series
+Model remains outside the profile router until a dedicated adapter can bind numeric-series preparation, imputation,
+forecast provenance, backtesting, and promotion controls. The model catalog reports these gates rather than
+presenting a publisher checkpoint as a finished SignalRoom workflow.
 
 `ModelTrustService` forms a separate local supply-chain authority. It observes the publisher, immutable source
 revision, runtime, and local content digest for each enabled profile. Explicit approvals sign that canonical
@@ -383,3 +390,5 @@ there is deliberately no remote recovery route.
 2. Per-connection authorization and identity lifecycle provisioning/deprovisioning
 3. Read-only deployment reconciliation for the audit operations pack when the Splunk MCP contract exposes the
    required index and knowledge-object configuration fields
+4. Dedicated Cisco Time Series Model adapter with read-only series extraction, resampling quality, quantile
+   forecasts, backtesting, and a forecast-specific promotion gate

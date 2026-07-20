@@ -12,6 +12,7 @@ const state = {
   evaluationDraft: null, evaluationScenarioIndex: 0,
   deliveryPreview: null, detections: [], activeDetection: null, detectionGitExport: null,
   repositoryStatus: null, repositoryHandoff: null, auth: null, authUsers: [],
+  codeScreenResult: null,
   workspaceLoaded: false, assuranceTimer: null, discoveryJobs: null,
   activeDiscoveryJob: null, discoveryPollTimer: null, discoveryPollBusy: false,
   discoveryWatchingJobId: null
@@ -1015,9 +1016,11 @@ function renderModelTrust() {
 async function loadModelTrust(verifyFiles = false) {
   try {
     state.modelTrust = await api(`/api/model-trust${verifyFiles ? '?verify_files=true' : ''}`);
-    renderModelTrust();
+    renderModelTrust(); renderModelCatalog();
   } catch (error) {
+    state.modelTrust = {policy:{mode:'unavailable'},profiles:[],error:error.message};
     $('#modelTrustProfiles').innerHTML = `<div class="empty-inline compact-empty">Model trust check failed: ${escapeHtml(error.message)}</div>`;
+    renderModelCatalog();
   }
 }
 
@@ -1055,12 +1058,102 @@ async function revokeModelAttestation(button) {
 function renderModelCatalog() {
   const panel = $('#candidateModels'); const candidates = state.modelCatalog?.evaluated_candidates || [];
   if (!candidates.length) { panel.innerHTML = ''; return; }
-  panel.innerHTML = `<header><div><span>EVALUATED NEXT</span><h3>Useful models with honest integration boundaries</h3></div><p>${escapeHtml(state.modelCatalog.policy || '')}</p></header>
-    <div class="candidate-model-grid">${candidates.map(item => `<article>
-      <div><span>${escapeHtml(item.owner)} · ${escapeHtml(item.runtime.replaceAll('-', ' '))}</span><b>${escapeHtml(item.status.replaceAll('-', ' '))}</b></div>
-      <h4>${escapeHtml(item.label)}</h4><p>${escapeHtml(item.purpose)}</p><small>${escapeHtml(item.constraint)}</small>
-      <a href="${escapeHtml(item.source_url)}" target="_blank" rel="noopener">Review first-party source ↗</a>
-    </article>`).join('')}</div>`;
+  const localProfiles = state.modelReadiness?.local_transformers?.profiles || [];
+  panel.innerHTML = `<header><div><span>CAPABILITY ADMISSION</span><h3>Useful publisher models, bounded by the job they can safely do</h3></div><p>${escapeHtml(state.modelCatalog.policy || '')}</p></header>
+    <div class="candidate-model-grid">${candidates.map(item => {
+      const readiness = localProfiles.find(profile => profile.id === item.profile_id);
+      const trust = (state.modelTrust?.profiles || []).find(profile => profile.profile_id === item.profile_id);
+      const trustEnforced = state.modelTrust?.policy?.mode !== 'audit';
+      const runnable = Boolean(readiness?.installed && (!trustEnforced || trust?.trusted));
+      const source = state.modelUpdates?.candidate_sources?.find(candidate => candidate.candidate_id === item.id);
+      const artifactGate = item.id === 'securebert-code-vulnerability'
+        ? !readiness?.installed
+          ? '<li class="next"><i></i><span><b>Exact local artifact</b><small>Install explicitly, then observe its immutable revision and local digest.</small></span><em>next</em></li>'
+          : trustEnforced && !trust?.trusted
+          ? `<li class="blocked"><i></i><span><b>Exact local artifact approval</b><small>${escapeHtml(trust?.detail || 'Approve the installed artifact before execution.')}</small></span><em>blocked</em></li>`
+          : `<li class="pass"><i></i><span><b>Exact local artifact policy</b><small>${escapeHtml(trust?.trusted ? 'The installed artifact has a valid operator-signed approval.' : 'Audit mode permits evaluation while reporting the unapproved artifact.')}</small></span><em>${trust?.trusted ? 'pass' : 'audit'}</em></li>`
+        : '';
+      const gates = (item.admission_gates || []).map(gate => `<li class="${escapeHtml(gate.status)}"><i></i><span><b>${escapeHtml(gate.name)}</b><small>${escapeHtml(gate.detail)}</small></span><em>${escapeHtml(gate.status)}</em></li>`).join('') + artifactGate;
+      const codeActions = item.id === 'securebert-code-vulnerability'
+        ? runnable
+          ? '<button class="button primary small" type="button" data-open-code-screen>Screen source code locally</button>'
+          : readiness?.installed
+          ? '<span class="candidate-actions"><button class="button ghost small" type="button" data-open-code-screen>Review workflow</button><button class="button primary small" type="button" data-review-model-trust>Review artifact approval</button></span>'
+          : `<span class="candidate-actions"><button class="button ghost small" type="button" data-open-code-screen>Review workflow</button><button class="button primary small" type="button" data-pull-profile="${escapeHtml(item.profile_id)}">Install local classifier</button></span>`
+        : '<button class="button ghost small" type="button" data-candidate-forecast-plan>Stage a forecasting investigation</button>';
+      const stage = item.id === 'securebert-code-vulnerability' && runnable
+        ? 'runnable local'
+        : item.id === 'securebert-code-vulnerability' && readiness?.installed
+        ? 'artifact approval required'
+        : item.status.replaceAll('-', ' ');
+      return `<article class="${escapeHtml(item.status)}">
+        <div><span>${escapeHtml(item.owner)} · ${escapeHtml(item.runtime.replaceAll('-', ' '))}</span><b>${escapeHtml(stage)}</b></div>
+        <h4>${escapeHtml(item.label)}</h4><p>${escapeHtml(item.purpose)}</p>
+        <dl><div><dt>Accepted input</dt><dd>${escapeHtml(item.input_contract || '')}</dd></div><div><dt>Required output</dt><dd>${escapeHtml(item.output_contract || '')}</dd></div></dl>
+        <ul class="candidate-gates">${gates}</ul>
+        <div class="candidate-boundary"><b>Boundary</b><span>${escapeHtml(item.constraint)}</span></div>
+        ${source ? `<div class="candidate-source-state ${escapeHtml(source.status)}"><b>${escapeHtml(source.status.replaceAll('-', ' '))}</b><span>${escapeHtml(source.pipeline_tag || 'source metadata')} · ${escapeHtml(shortDigest(source.revision || ''))}</span><small>${escapeHtml(source.detail || '')}</small></div>` : ''}
+        <footer><a href="${escapeHtml(item.source_url)}" target="_blank" rel="noopener">First-party model card ↗</a>${codeActions}</footer>
+      </article>`;
+    }).join('')}</div>`;
+  applyAccessPermissions();
+}
+
+function openCodeScreening() {
+  state.codeScreenResult = null;
+  const readiness = (state.modelReadiness?.local_transformers?.profiles || []).find(profile => profile.id === 'securebert-code-vulnerability');
+  const trust = (state.modelTrust?.profiles || []).find(profile => profile.profile_id === 'securebert-code-vulnerability');
+  const trustEnforced = state.modelTrust?.policy?.mode !== 'audit';
+  const runnable = Boolean(readiness?.installed && (!trustEnforced || trust?.trusted));
+  const runAction = runnable
+    ? '<button class="button primary" type="submit" id="runCodeScreen">Run local screen</button>'
+    : readiness?.installed
+    ? `<div class="code-screen-install"><span>${escapeHtml(trust?.detail || 'Exact artifact approval is required before this classifier can execute.')}</span><button class="button primary" type="button" data-review-model-trust>Review artifact approval</button></div>`
+    : '<div class="code-screen-install"><span>The workflow is bounded, but the classifier is not installed on this host.</span><button class="button primary" type="button" data-pull-profile="securebert-code-vulnerability">Install local classifier</button></div>';
+  showDetail({
+    eyebrow:'LOCAL SPECIALIST · OPT-IN',
+    title:'Screen a source-code snippet',
+    summary:'<p>Paste source code deliberately. SignalRoom rejects SPL, event text, and prose; runs the classifier locally; hashes but does not persist the source; and returns an assistive review signal—not a vulnerability finding.</p>',
+    content:`<form id="codeScreenForm" class="code-screen-form">
+      <label><span>Language</span><select id="codeScreenLanguage"><option value="python">Python</option><option value="c">C</option><option value="cpp">C++</option></select></label>
+      <label class="full"><span>Source code</span><textarea id="codeScreenInput" rows="9" minlength="20" maxlength="50000" required spellcheck="false" placeholder="Paste one bounded function or class for assistive screening…"></textarea><small>Only the first 1,024 model tokens are evaluated. The interface reports truncation explicitly.</small></label>
+      <div class="code-screen-boundary"><b>Never automatic</b><span>This model is not used by Discovery, RAG, SPL analysis, or event triage. Corroborate any signal with static analysis and expert review.</span></div>
+      ${runAction}
+    </form><div id="codeScreenOutput" class="code-screen-output" aria-live="polite"></div>`,
+    provenance:'<h3>Execution contract</h3><dl><div><dt>Runtime</dt><dd>Local Transformers</dd></div><div><dt>Network inference</dt><dd>Disabled for this workflow</dd></div><div><dt>Source persistence</dt><dd>None</dd></div><div><dt>Model</dt><dd>cisco-ai/SecureBERT2.0-code-vuln-detection</dd></div></dl>'
+  });
+  $('#codeScreenForm').addEventListener('submit', runCodeScreening);
+  (runnable ? $('#codeScreenInput') : $('#codeScreenLanguage')).focus();
+}
+
+async function runCodeScreening(event) {
+  event.preventDefault();
+  const button = $('#runCodeScreen'); const output = $('#codeScreenOutput');
+  button.disabled = true; button.textContent = 'Running locally…';
+  output.innerHTML = '<div class="code-screen-working"><b>Loading the local classifier</b><span>No source code is being sent to Splunk or Hugging Face.</span></div>';
+  try {
+    const result = await api('/api/model-capabilities/code-vulnerability/screen', {
+      method:'POST',
+      body:JSON.stringify({code:$('#codeScreenInput').value, language:$('#codeScreenLanguage').value})
+    });
+    state.codeScreenResult = result;
+    const prediction = result.prediction || {}; const contract = result.contract || {};
+    const positive = prediction.signal === 'potential-vulnerability-review';
+    const confidence = Math.round(Number(prediction.confidence || 0) * 100);
+    output.innerHTML = `<article class="code-screen-result ${positive ? 'review' : 'clear'}">
+      <header><div><span>ASSISTIVE MODEL SIGNAL</span><h4>${positive ? 'Prioritize for vulnerability review' : 'No positive model signal'}</h4></div><b>${confidence}% confidence</b></header>
+      <p>${escapeHtml(contract.meaning || '')}</p>
+      <div><span><b>${Number(result.evaluated_tokens || 0).toLocaleString()}</b> evaluated tokens</span><span><b>${result.truncated ? 'Yes' : 'No'}</b> input truncated</span><span><b>0</b> network inference calls</span><span><b>0</b> source copies retained</span></div>
+      <code title="SHA-256 of supplied source">${escapeHtml(result.input_sha256)}</code>
+      <details><summary>Required limitations</summary><ul>${(contract.limitations || []).map(item => `<li>${escapeHtml(item)}</li>`).join('')}</ul></details>
+      <footer><button class="button ghost small" type="button" data-code-screen-case>Preserve signal to a case</button></footer>
+    </article>`;
+  } catch (error) {
+    state.codeScreenResult = null;
+    output.innerHTML = `<div class="code-screen-error"><b>Screening stopped</b><span>${escapeHtml(error.message)}</span></div>`;
+  } finally {
+    button.disabled = false; button.textContent = 'Run local screen';
+  }
 }
 
 function splunkDependencyLabel(dependency = {}) {
@@ -4211,6 +4304,27 @@ document.addEventListener('click', async event => {
   if (deleteButton) await removeArtifact(deleteButton.dataset.delete);
   const test = event.target.closest('[data-test-model]');
   if (test) { const dot = $(`#status-${CSS.escape(test.dataset.testModel)}`); dot.classList.remove('ok'); const holder = document.createElement('span'); const result = await testConnection('model', test.dataset.testModel, holder); dot.classList.toggle('ok', result.ok); toast(holder.textContent); }
+  if (event.target.closest('[data-open-code-screen]')) openCodeScreening();
+  if (event.target.closest('[data-review-model-trust]')) {
+    if (!$('#detailModal').hidden) closeDetail();
+    $('#modelTrustPanel').scrollIntoView({behavior:'smooth', block:'start'});
+    toast('Review and approve the exact installed artifact in the local supply-chain panel');
+  }
+  if (event.target.closest('[data-candidate-forecast-plan]')) {
+    openInvestigation('discovery', 'Identify one high-value security or ingestion event-rate series in the connected Splunk environment that would benefit from forecasting. Use only read-only metadata and bounded searches. Propose the exact timechart SPL, interval, history window, missing-value checks, backtest plan, forecast horizon, and analyst decision this forecast could inform. Do not claim that the Cisco Time Series Model has executed; its SignalRoom runtime adapter is not admitted yet.', false);
+  }
+  if (event.target.closest('[data-code-screen-case]') && state.codeScreenResult) {
+    const result = state.codeScreenResult; const prediction = result.prediction || {};
+    openCasePicker({
+      kind:'observation',
+      title:'Assistive code vulnerability screen',
+      content:`Signal: ${prediction.signal}\nConfidence: ${Math.round(Number(prediction.confidence || 0) * 100)}%\nLanguage: ${result.language}\nInput SHA-256: ${result.input_sha256}\nEvaluated tokens: ${result.evaluated_tokens}/${result.input_tokens}${result.truncated ? ' (truncated)' : ''}\n\nThis is a local model review priority, not a vulnerability finding. Corroborate with static analysis and expert code review.`,
+      source:`${result.model} · local Transformers`,
+      confidence:'low',
+      status:'needs-validation',
+      metadata:{model_profile:result.profile_id,input_sha256:result.input_sha256,network_inference:false,source_persisted:false}
+    });
+  }
   const pull = event.target.closest('[data-pull-profile]');
   if (pull) pullModel(pull.dataset.pullProfile, pull);
   const activate = event.target.closest('[data-activate-model]');

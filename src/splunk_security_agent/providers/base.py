@@ -46,3 +46,6 @@ class BaseModelProvider(ABC):
 
     async def rerank(self, query: str, documents: list[str]) -> list[float]:
         raise ModelProviderError(f"{self.profile.label} does not support evidence reranking")
+
+    async def classify(self, text: str) -> dict[str, Any]:
+        raise ModelProviderError(f"{self.profile.label} does not support classification")

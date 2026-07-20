@@ -80,6 +80,20 @@ DEFAULT_MODELS = [
         provenance="Cisco AI",
         context_window=1024,
     ),
+    ModelProfile(
+        id="securebert-code-vulnerability",
+        label="SecureBERT code vulnerability screen",
+        provider="huggingface",
+        model="cisco-ai/SecureBERT2.0-code-vuln-detection",
+        task="classification",
+        endpoint="https://router.huggingface.co/hf-inference/models",
+        description=(
+            "Opt-in, local-only assistive screening for explicitly pasted C, C++, or Python "
+            "source-code snippets. Never auto-routed over Splunk objects, SPL, or event text."
+        ),
+        provenance="Cisco AI",
+        context_window=1024,
+    ),
 ]
 
 

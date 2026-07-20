@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import importlib
 import json
 import os
@@ -32,19 +33,51 @@ LOCAL_RUNTIME_PACKAGES = (
     "transformers>=4.48,<6",
 )
 
-EVALUATED_MODEL_CANDIDATES: tuple[dict[str, str], ...] = (
+EVALUATED_MODEL_CANDIDATES: tuple[dict[str, Any], ...] = (
     {
         "id": "securebert-code-vulnerability",
         "label": "SecureBERT 2.0 code vulnerability detection",
         "model": "cisco-ai/SecureBERT2.0-code-vuln-detection",
         "owner": "Cisco AI",
-        "status": "evaluated-next",
+        "status": "admitted-preview",
         "runtime": "local-transformers",
-        "purpose": "Assistive binary vulnerability screening for uploaded source-code snippets.",
-        "constraint": (
-            "Not suitable for SPL, event text, dynamic analysis, or autonomous remediation; "
-            "needs a code-artifact workflow and analyst-visible confidence contract first."
+        "profile_id": "securebert-code-vulnerability",
+        "purpose": (
+            "Assistive binary vulnerability screening for explicitly pasted C, C++, or Python "
+            "source-code snippets."
         ),
+        "constraint": (
+            "Not suitable for SPL, Splunk inventory, event text, dynamic analysis, or autonomous "
+            "remediation. A positive result is a review priority, never a vulnerability finding."
+        ),
+        "input_contract": "Explicit source code only · 1,024-token evaluated window · no automatic routing",
+        "output_contract": (
+            "Class 1 is treated as the positive review signal used by the publisher's binary "
+            "evaluation. SignalRoom exposes confidence, truncation, input hash, and limitations."
+        ),
+        "automatic_use": False,
+        "admission_gates": [
+            {
+                "name": "First-party source and safetensors",
+                "status": "pass",
+                "detail": "Cisco AI · Apache-2.0 · local snapshot with immutable revision",
+            },
+            {
+                "name": "Bounded local runtime",
+                "status": "pass",
+                "detail": "Local Transformers only; hosted inference is not used by the screening workflow",
+            },
+            {
+                "name": "Analyst-visible output contract",
+                "status": "pass",
+                "detail": "Assistive review signal with confidence, truncation, source hash, and caveats",
+            },
+            {
+                "name": "Automatic Discovery / RAG routing",
+                "status": "blocked",
+                "detail": "Intentionally prohibited; model is out of scope for Splunk objects and event text",
+            },
+        ],
         "source_url": "https://huggingface.co/cisco-ai/SecureBERT2.0-code-vuln-detection",
     },
     {
@@ -52,13 +85,46 @@ EVALUATED_MODEL_CANDIDATES: tuple[dict[str, str], ...] = (
         "label": "Cisco Time Series Model 1.0",
         "model": "cisco-ai/cisco-time-series-model-1.0",
         "owner": "Cisco AI",
-        "status": "adapter-required",
+        "status": "adapter-next",
         "runtime": "dedicated-time-series",
-        "purpose": "Zero-shot forecasting for event-rate and observability time series.",
-        "constraint": (
-            "Requires numeric series extraction, resampling, evaluation, and its dedicated runtime; "
-            "it is not a chat, embedding, or standard Transformers pipeline."
+        "profile_id": "",
+        "purpose": (
+            "Zero-shot forecasting for security event-rate, alert-volume, ingestion, and "
+            "observability time series."
         ),
+        "constraint": (
+            "Requires a cisco-tsm runtime, numeric series extraction, regular resampling, missing-value "
+            "quality checks, backtesting, and a forecast-specific promotion gate."
+        ),
+        "input_contract": (
+            "Regular univariate numeric series · coarse/fine history · explicit interval and horizon"
+        ),
+        "output_contract": (
+            "Mean and quantile forecast with source SPL, time bounds, imputation ratio, and backtest error"
+        ),
+        "automatic_use": False,
+        "admission_gates": [
+            {
+                "name": "First-party source and model contract",
+                "status": "pass",
+                "detail": "Cisco AI / Splunk · Apache-2.0 · dedicated cisco-tsm package",
+            },
+            {
+                "name": "Local forecast runtime adapter",
+                "status": "next",
+                "detail": "Add an isolated cisco-tsm adapter and immutable checkpoint tracking",
+            },
+            {
+                "name": "Splunk numeric-series preparation",
+                "status": "next",
+                "detail": "Bind read-only SPL, regular resampling, imputation ratio, and source provenance",
+            },
+            {
+                "name": "Backtest and promotion gate",
+                "status": "blocked",
+                "detail": "Required before a forecast can influence an alert threshold or capacity decision",
+            },
+        ],
         "source_url": "https://huggingface.co/cisco-ai/cisco-time-series-model-1.0",
     },
 )
@@ -111,13 +177,136 @@ class ModelSetupService:
     def catalog(self) -> dict[str, Any]:
         """Describe shipped capabilities and researched candidates without overstating support."""
         settings = self.config.load()
+        configured = {profile.id for profile in settings.models}
+        candidates = []
+        for item in EVALUATED_MODEL_CANDIDATES:
+            candidate = json.loads(json.dumps(item))
+            profile_id = str(candidate.get("profile_id") or "")
+            candidate["configured"] = bool(profile_id and profile_id in configured)
+            candidate["runtime_installed"] = (
+                local_runtime_available()
+                if candidate["runtime"] == "local-transformers"
+                else importlib.util.find_spec("cisco_tsm") is not None
+            )
+            candidates.append(candidate)
         return {
             "configured": [profile.model_dump(mode="json") for profile in settings.models],
-            "evaluated_candidates": list(EVALUATED_MODEL_CANDIDATES),
+            "evaluated_candidates": candidates,
             "policy": (
-                "SignalRoom only promotes first-party model sources. Candidate status means the "
-                "runtime and analyst workflow still need validation before installation is offered."
+                "Every model must pass source, runtime, input, output, evaluation, and routing gates. "
+                "A useful publisher model is not treated as a SignalRoom capability until its exact "
+                "analyst workflow is bounded and testable."
             ),
+        }
+
+    @staticmethod
+    def _looks_like_source_code(code: str, language: str) -> bool:
+        """Reject natural language, event text, and SPL before code-only classification."""
+        value = code.strip()
+        if re.search(
+            r"(^|\s)\|\s*(stats|tstats|search|where|eval|timechart|table)\b",
+            value,
+            flags=re.IGNORECASE,
+        ) or re.search(r"\b(index|sourcetype)\s*=", value, flags=re.IGNORECASE):
+            return False
+        language_patterns = {
+            "python": (
+                r"(^|\n)\s*(def|class|from|import)\s+",
+                r"(^|\n)\s*(if|for|while|try|with)\b.*:",
+                r"(^|\n)\s*return\b",
+            ),
+            "c": (
+                r"#\s*include\b",
+                r"\b(void|int|char|size_t|struct)\s+\w+\s*\(",
+                r"[{};]",
+            ),
+            "cpp": (
+                r"#\s*include\b",
+                r"\b(namespace|template|class|std::)\b",
+                r"[{};]",
+            ),
+        }
+        return sum(
+            bool(re.search(pattern, value, flags=re.IGNORECASE | re.MULTILINE))
+            for pattern in language_patterns[language]
+        ) >= 2
+
+    async def screen_code_vulnerability(self, code: str, language: str) -> dict[str, Any]:
+        """Run the admitted code classifier locally without persisting or forwarding source."""
+        if not self._looks_like_source_code(code, language):
+            raise ValueError(
+                "The input does not match the selected source-code contract. "
+                "Splunk objects, SPL, event text, and prose are intentionally rejected."
+            )
+        profile = next(
+            (
+                item
+                for item in self.config.load().models
+                if item.id == "securebert-code-vulnerability" and item.enabled
+            ),
+            None,
+        )
+        if not profile:
+            raise KeyError("The SecureBERT code vulnerability profile is not enabled")
+        if self.model_trust is not None:
+            await self.model_trust.require_profile(
+                profile.id, "local code vulnerability screening"
+            )
+        provider = LocalTransformersProvider(
+            profile, self.config.local_model_path(profile.id)
+        )
+        health = await provider.health()
+        if not health.get("ok"):
+            raise RuntimeError(
+                "The local code screening model is not ready. Install it from Models first."
+            )
+        result = await provider.classify(code)
+        predictions = result.get("predictions") or []
+        if not predictions:
+            raise RuntimeError("The local classifier did not return a prediction")
+        top = predictions[0]
+        positive = int(top.get("class_id", -1)) == 1
+        confidence = float(top.get("score") or 0)
+        return {
+            "ok": True,
+            "capability_id": "securebert-code-vulnerability",
+            "profile_id": profile.id,
+            "model": profile.model,
+            "runtime": "local-transformers",
+            "network_inference": False,
+            "language": language,
+            "input_sha256": hashlib.sha256(code.encode("utf-8")).hexdigest(),
+            "input_characters": len(code),
+            "input_tokens": result.get("input_tokens", 0),
+            "evaluated_tokens": result.get("evaluated_tokens", 0),
+            "token_limit": result.get("token_limit", profile.context_window),
+            "truncated": bool(result.get("truncated")),
+            "prediction": {
+                "class_id": int(top.get("class_id", -1)),
+                "signal": (
+                    "potential-vulnerability-review"
+                    if positive
+                    else "no-vulnerability-signal"
+                ),
+                "confidence": confidence,
+                "scores": predictions,
+            },
+            "contract": {
+                "finding": False,
+                "automatic_routing": False,
+                "source_persisted": False,
+                "meaning": (
+                    "Prioritize this snippet for static analysis and expert review."
+                    if positive
+                    else "The model did not produce a positive signal; this does not establish safety."
+                ),
+                "limitations": [
+                    "The publisher reports 0.655 accuracy and 0.616 F1 on its evaluation data.",
+                    "False positives and false negatives are expected.",
+                    "The model does not perform dynamic analysis, data-flow proof, or remediation.",
+                    "Corroborate with a static analyzer and manual code review.",
+                ],
+            },
         }
 
     def _load_revision_state(self) -> dict[str, Any]:
@@ -161,6 +350,7 @@ class ModelSetupService:
             profile.model if profile.provider == "huggingface" else _huggingface_repo(profile.model)
             for profile in settings.models
         } - {""}
+        repos.update(str(item["model"]) for item in EVALUATED_MODEL_CANDIDATES)
         hub_metadata: dict[str, dict[str, Any]] = {}
         hub_errors: dict[str, str] = {}
 
@@ -294,9 +484,27 @@ class ModelSetupService:
                 "error",
             }
         }
+        candidate_sources = []
+        for candidate in EVALUATED_MODEL_CANDIDATES:
+            repo = str(candidate["model"])
+            remote = hub_metadata.get(repo, {})
+            candidate_sources.append(
+                {
+                    "candidate_id": candidate["id"],
+                    "model": repo,
+                    "status": "source-observed" if remote else "error",
+                    "detail": (
+                        "Observed the current immutable first-party Hub revision; no download started."
+                        if remote
+                        else hub_errors.get(repo, "The first-party source could not be observed.")
+                    ),
+                    **remote,
+                }
+            )
         return {
             "checked_at": datetime.now(UTC).isoformat(),
             "profiles": results,
+            "candidate_sources": candidate_sources,
             "counts": counts,
             "downloads_started": 0,
             "policy": "Read-only check. SignalRoom never downloads, updates, or swaps a model here.",

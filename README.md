@@ -166,7 +166,7 @@ enabled in Splunk.
 
 ## Model setup
 
-The default registry describes six local-first profiles. The installer downloads only the selected
+The default registry describes seven local-first profiles. The installer downloads only the selected
 general and security-reasoning defaults; the additional profiles remain explicit installs:
 
 | Profile | Default | Purpose |
@@ -177,6 +177,7 @@ general and security-reasoning defaults; the additional profiles remain explicit
 | Cyber retrieval | `cisco-ai/SecureBERT2.0-biencoder` through local Transformers by default | Security-domain semantic retrieval |
 | Evidence reranking | `cisco-ai/SecureBERT2.0-cross_encoder` through local Transformers by default | Second-stage ranking of retrieved security evidence |
 | Entity extraction | `cisco-ai/SecureBERT2.0-NER` through local Transformers by default | Cybersecurity entity extraction |
+| Code vulnerability screen | `cisco-ai/SecureBERT2.0-code-vuln-detection` through local Transformers | Opt-in assistive screening of explicitly pasted C, C++, or Python source code |
 
 Model identifiers are configuration, not hard-coded trust decisions. Review each model card and license, pin an approved revision, and use your organization’s model intake process before production deployment. The app works with lexical FTS retrieval when the optional embedding model is unavailable.
 
@@ -205,6 +206,27 @@ using `| listmodels | head 500`. It records new, changed, unchanged, and previou
 definitions and identifies declared Ollama dependencies. A backing model that is not observed is labeled
 for endpoint validation because the MLTK connection may intentionally use a different Ollama service.
 This scan performs no Splunk writes and does not claim to measure model accuracy or training-data freshness.
+
+### Capability admission
+
+The bottom of **Models** is an admission queue rather than a list of implied integrations. Each publisher
+model is assessed against first-party source, local runtime, accepted input, required output, evaluation, and
+automatic-routing gates. The read-only update check observes the current immutable Hub revision for admitted
+profiles and evaluated candidates without downloading them.
+
+SecureBERT code vulnerability detection is admitted as an opt-in local preview. An analyst must paste a C, C++,
+or Python snippet explicitly; SignalRoom rejects SPL, Splunk inventory, event text, and prose before inference.
+The workflow reports the evaluated token window, truncation, confidence, and a SHA-256 of the input, but does not
+persist the source. Its positive class is a review-priority signal—not a vulnerability finding—and can be
+preserved to a case only by an explicit analyst action. Discovery, RAG, and Investigate never route content to
+this classifier automatically. When model trust enforcement is active, installation is not execution authority:
+the exact local artifact must also have a current operator-signed approval before the screening action is enabled.
+
+Cisco Time Series Model 1.0 remains visible as the next dedicated adapter instead of a fake generic model install.
+Admission requires a local `cisco-tsm` runtime, read-only Splunk numeric-series extraction, regular resampling and
+imputation reporting, mean and quantile output provenance, backtesting, and a forecast-specific promotion gate.
+Until those controls exist, SignalRoom can stage the read-only series-design investigation but does not claim to
+execute a forecast.
 
 ### Golden investigation promotion gate
 

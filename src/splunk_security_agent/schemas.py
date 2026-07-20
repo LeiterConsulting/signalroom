@@ -145,6 +145,11 @@ class ModelActivateRequest(BaseModel):
     unload_other_signalroom_models: bool = True
 
 
+class CodeVulnerabilityScreenRequest(BaseModel):
+    code: str = Field(min_length=20, max_length=50_000)
+    language: Literal["c", "cpp", "python"]
+
+
 class ModelTrustPolicyUpdate(BaseModel):
     mode: Literal["audit", "enforce"] = "audit"
     allowed_publishers: list[str] = Field(

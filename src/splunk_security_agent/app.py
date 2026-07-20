@@ -70,6 +70,7 @@ from .schemas import (
     CaseItemUpdate,
     CaseUpdate,
     ChatRequest,
+    CodeVulnerabilityScreenRequest,
     ConnectionTestRequest,
     DeliveryApproval,
     DeliveryPolicyUpdate,
@@ -845,6 +846,17 @@ async def test_connection(request: ConnectionTestRequest) -> dict[str, Any]:
                 "capability_ok": len(scores) == 2 and scores[0] > scores[1],
                 "scores": scores,
             }
+        if profile.task == "classification":
+            result = await provider.classify(
+                "int copy_user_value(char *dst, const char *src) { "
+                "strcpy(dst, src); return 0; }"
+            )
+            return {
+                **health,
+                "capability_ok": bool(result.get("predictions")),
+                "classes": len(result.get("predictions") or []),
+                "truncated": result.get("truncated", False),
+            }
         if profile.provider != "ollama" or not health.get("installed"):
             return health
         result = await provider.chat(
@@ -882,6 +894,44 @@ async def model_catalog() -> dict[str, Any]:
 @app.get("/api/model-setup/updates")
 async def model_updates() -> dict[str, Any]:
     return await services.model_setup.check_updates()
+
+
+@app.post("/api/model-capabilities/code-vulnerability/screen")
+async def screen_code_vulnerability(
+    value: CodeVulnerabilityScreenRequest, request: Request
+) -> dict[str, Any]:
+    try:
+        result = await services.model_setup.screen_code_vulnerability(
+            value.code, value.language
+        )
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except (ModelProviderError, RuntimeError) as exc:
+        raise HTTPException(503, str(exc)) from exc
+    principal = getattr(request.state, "principal", {}) or {}
+    services.audit.record(
+        "model.capability.code-vulnerability.screened",
+        "classify",
+        target_type="model-profile",
+        target_id=result["profile_id"],
+        summary="An explicitly supplied source-code snippet was screened by a local specialist.",
+        metadata={
+            "input_sha256": result["input_sha256"],
+            "input_characters": result["input_characters"],
+            "language": result["language"],
+            "signal": result["prediction"]["signal"],
+            "confidence": result["prediction"]["confidence"],
+            "truncated": result["truncated"],
+            "network_inference": False,
+            "source_persisted": False,
+        },
+        actor=str(principal.get("username") or "local-operator"),
+    )
+    return result
 
 
 @app.get("/api/model-trust")

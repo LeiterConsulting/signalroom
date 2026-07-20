@@ -100,3 +100,49 @@ async def test_local_cross_encoder_reranks_security_evidence(tmp_path, monkeypat
     )
 
     assert scores == [0.91, 0.08]
+
+
+@pytest.mark.asyncio
+async def test_local_classifier_returns_all_classes_and_truncation(tmp_path, monkeypatch):
+    config = ConfigStore(tmp_path / "data")
+    profile = next(
+        item
+        for item in config.load().models
+        if item.id == "securebert-code-vulnerability"
+    )
+    provider = LocalTransformersProvider(profile, config.local_model_path(profile.id))
+
+    class FakeTokenizer:
+        model_max_length = 4
+
+        def __call__(self, text, **kwargs):
+            return {"input_ids": list(range(7))}
+
+    class FakeConfig:
+        label2id = {"LABEL_0": 0, "LABEL_1": 1}
+
+    class FakeModel:
+        config = FakeConfig()
+
+    class FakeClassifier:
+        tokenizer = FakeTokenizer()
+        model = FakeModel()
+
+        def __call__(self, text, **kwargs):
+            assert kwargs == {"top_k": None, "truncation": True, "max_length": 4}
+            return [
+                {"label": "LABEL_1", "score": 0.82},
+                {"label": "LABEL_0", "score": 0.18},
+            ]
+
+    monkeypatch.setattr(provider, "_classification_pipeline", lambda: FakeClassifier())
+    result = await provider.classify("int main() { return 0; }")
+
+    assert result["predictions"][0] == {
+        "class_id": 1,
+        "label": "LABEL_1",
+        "score": 0.82,
+    }
+    assert result["input_tokens"] == 7
+    assert result["evaluated_tokens"] == 4
+    assert result["truncated"] is True

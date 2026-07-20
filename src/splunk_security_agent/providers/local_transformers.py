@@ -108,6 +108,31 @@ class LocalTransformersProvider(BaseModelProvider):
                 )
             return self._models[cache_key]
 
+    def _classification_pipeline(self) -> Any:
+        self._require_ready()
+        cache_key = (self.profile.id, "classification")
+        with self._load_lock:
+            if cache_key not in self._models:
+                from transformers import (
+                    AutoModelForSequenceClassification,
+                    AutoTokenizer,
+                    pipeline,
+                )
+
+                tokenizer = AutoTokenizer.from_pretrained(
+                    self.model_path, local_files_only=True, trust_remote_code=False
+                )
+                model = AutoModelForSequenceClassification.from_pretrained(
+                    self.model_path, local_files_only=True, trust_remote_code=False
+                )
+                self._models[cache_key] = pipeline(
+                    "text-classification",
+                    model=model,
+                    tokenizer=tokenizer,
+                    device=0 if self._device() == "cuda" else -1,
+                )
+            return self._models[cache_key]
+
     async def chat(
         self, messages: list[dict[str, str]], tools: list[dict[str, Any]] | None = None
     ) -> dict[str, Any]:
@@ -180,6 +205,64 @@ class LocalTransformersProvider(BaseModelProvider):
             return scores
 
         return await asyncio.to_thread(score)
+
+    async def classify(self, text: str) -> dict[str, Any]:
+        """Return every sequence-classification score with bounded input provenance."""
+
+        def predict() -> dict[str, Any]:
+            classifier = self._classification_pipeline()
+            tokenizer = classifier.tokenizer
+            unbounded = tokenizer(text, add_special_tokens=True, truncation=False)
+            input_ids = unbounded.get("input_ids") or []
+            input_tokens = len(input_ids)
+            model_limit = int(
+                min(
+                    self.profile.context_window,
+                    getattr(tokenizer, "model_max_length", self.profile.context_window),
+                )
+            )
+            values = classifier(
+                text,
+                top_k=None,
+                truncation=True,
+                max_length=model_limit,
+            )
+            if values and isinstance(values[0], list):
+                values = values[0]
+            label_to_id = {
+                str(label): int(index)
+                for label, index in (
+                    getattr(classifier.model.config, "label2id", {}) or {}
+                ).items()
+            }
+            predictions: list[dict[str, Any]] = []
+            for fallback_id, value in enumerate(values or []):
+                label = str(value.get("label") or f"LABEL_{fallback_id}")
+                match = re.search(r"(\d+)$", label)
+                class_id = (
+                    label_to_id.get(label)
+                    if label in label_to_id
+                    else int(match.group(1))
+                    if match
+                    else fallback_id
+                )
+                predictions.append(
+                    {
+                        "class_id": class_id,
+                        "label": label,
+                        "score": float(value.get("score") or 0),
+                    }
+                )
+            predictions.sort(key=lambda item: item["score"], reverse=True)
+            return {
+                "predictions": predictions,
+                "input_tokens": input_tokens,
+                "evaluated_tokens": min(input_tokens, model_limit),
+                "token_limit": model_limit,
+                "truncated": input_tokens > model_limit,
+            }
+
+        return await asyncio.to_thread(predict)
 
     async def entities(self, text: str) -> list[dict[str, Any]]:
         def extract() -> list[dict[str, Any]]:
