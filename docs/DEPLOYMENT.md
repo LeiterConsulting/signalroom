@@ -253,6 +253,7 @@ All lifecycle files stay inside the repository:
 | `data/` | Configuration, encrypted secrets, evidence database, and artifacts |
 | `data/discovery_jobs.db` | Durable manual discovery queue, progress, cancellation, recovery, and compact results |
 | `data/model_trust.db` | Model publisher policy and exact artifact approval history |
+| `data/time_series_experiments.db` | Immutable forecast runs, accepted baselines, drift comparisons, and review-only alert candidates |
 | `data/model_trust_signing.key` | Local Ed25519 private key for operator artifact attestations |
 | `data/model_attestations/` | Portable canonical approval payloads, signatures, and public key |
 
@@ -336,6 +337,12 @@ selects the first available port from 8080–8099 and saves the exact endpoint. 
 The container runs as a non-root user with a read-only root filesystem, no Linux capabilities, and
 `no-new-privileges`; only its checkpoint cache and temporary filesystem are writable. Inference remains local,
 but the first model load contacts Hugging Face to download the approved checkpoint.
+
+Forecast history, baseline review notes, and alert-candidate handoffs are local control-plane state in
+`data/time_series_experiments.db`; include it in normal data-directory backups. It contains exact forecast SPL,
+aggregate time-series statistics, backtest/forecast arrays, model revisions, and fingerprints, but not the raw
+Splunk result rows. Treat it as security-sensitive investigation metadata. A restore does not start the Cisco
+sidecar or execute any retained validation draft.
 
 ## Manual development setup
 

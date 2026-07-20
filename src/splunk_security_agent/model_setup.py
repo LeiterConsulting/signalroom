@@ -134,6 +134,14 @@ EVALUATED_MODEL_CANDIDATES: tuple[dict[str, Any], ...] = (
                     "still requires analyst review and cannot auto-promote"
                 ),
             },
+            {
+                "name": "Durable experiment and alert-draft boundary",
+                "status": "pass",
+                "detail": (
+                    "Immutable run fingerprints · reviewed per-series baseline and drift · "
+                    "alert handoff creates only an unapproved validation draft"
+                ),
+            },
         ],
         "source_url": "https://huggingface.co/cisco-ai/cisco-time-series-model-1.0",
     },

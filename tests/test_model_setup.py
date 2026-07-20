@@ -184,6 +184,10 @@ def test_candidate_catalog_distinguishes_bounded_admitted_capabilities(tmp_path)
         gate["name"] == "Backtest and promotion gate"
         for gate in forecast["admission_gates"]
     )
+    assert any(
+        gate["name"] == "Durable experiment and alert-draft boundary"
+        for gate in forecast["admission_gates"]
+    )
 
 
 @pytest.mark.asyncio

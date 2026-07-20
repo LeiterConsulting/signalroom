@@ -6,12 +6,17 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from splunk_security_agent.config import ConfigStore
-from splunk_security_agent.forecasting import TimeSeriesForecastService
+from splunk_security_agent.forecasting import (
+    TimeSeriesExperimentStore,
+    TimeSeriesForecastService,
+)
 from splunk_security_agent.forecasting.provider import CiscoTimeSeriesProvider
 from splunk_security_agent.schemas import (
+    TimeSeriesAlertCandidateCreate,
     TimeSeriesForecastRequest,
     TimeSeriesRuntimeUpdate,
 )
+from splunk_security_agent.validation import ValidationStore
 
 
 class FakeSplunk:
@@ -91,25 +96,14 @@ def test_provider_builds_aligned_multiresolution_context_and_blocks_public_servi
 
     assert coarse == [39.5, 99.5]
     assert fine == values
-    assert (
-        CiscoTimeSeriesProvider.network_scope("http://127.0.0.1:8080")
-        == "loopback"
-    )
-    assert (
-        CiscoTimeSeriesProvider.network_scope("https://8.8.8.8")
-        == "public-network"
-    )
+    assert CiscoTimeSeriesProvider.network_scope("http://127.0.0.1:8080") == "loopback"
+    assert CiscoTimeSeriesProvider.network_scope("https://8.8.8.8") == "public-network"
     monkeypatch.setattr(
         socket,
         "getaddrinfo",
-        lambda *_args, **_kwargs: [
-            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443))
-        ],
+        lambda *_args, **_kwargs: [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443))],
     )
-    assert (
-        CiscoTimeSeriesProvider.network_scope("https://forecast.example")
-        == "public-network"
-    )
+    assert CiscoTimeSeriesProvider.network_scope("https://forecast.example") == "public-network"
 
 
 @pytest.mark.asyncio
@@ -154,9 +148,7 @@ async def test_forecast_stops_before_model_when_imputation_exceeds_publisher_lim
     service = TimeSeriesForecastService(ConfigStore(tmp_path), lambda: splunk)
     service.provider = lambda: model
 
-    result = await service.run(
-        request(row_limit=100, horizon=8, backtest_points=8)
-    )
+    result = await service.run(request(row_limit=100, horizon=8, backtest_points=8))
 
     assert result["status"] == "blocked-data-quality"
     assert result["series"]["imputation_ratio"] > 0.30
@@ -167,18 +159,12 @@ async def test_forecast_stops_before_model_when_imputation_exceeds_publisher_lim
 def test_forecast_contract_rejects_non_timechart_and_irregular_buckets(tmp_path):
     service = TimeSeriesForecastService(ConfigStore(tmp_path), lambda: FakeSplunk([]))
     with pytest.raises(ValueError, match="timechart"):
-        service.validate_contract(
-            request(spl="index=security | stats count as value")
-        )
+        service.validate_contract(request(spl="index=security | stats count as value"))
     with pytest.raises(ValueError, match="Selected interval"):
-        service.validate_contract(
-            request(spl="index=security | timechart span=10m count as value")
-        )
+        service.validate_contract(request(spl="index=security | timechart span=10m count as value"))
 
     source = rows(30)
-    source[8]["_time"] = (
-        datetime(2026, 7, 1, tzinfo=UTC) + timedelta(seconds=8 * 300 + 90)
-    ).isoformat()
+    source[8]["_time"] = (datetime(2026, 7, 1, tzinfo=UTC) + timedelta(seconds=8 * 300 + 90)).isoformat()
     with pytest.raises(ValueError, match="not regular"):
         service.prepare_series(source, request())
 
@@ -202,3 +188,116 @@ async def test_runtime_configuration_refuses_public_inference_endpoint(tmp_path)
                 token="secret",
             )
         )
+
+
+@pytest.mark.asyncio
+async def test_forecast_registry_accepts_exact_baseline_and_tracks_drift(tmp_path):
+    splunk = FakeSplunk(rows(96))
+    model = FakeProvider()
+    experiments = TimeSeriesExperimentStore(tmp_path / "experiments.db")
+    service = TimeSeriesForecastService(
+        ConfigStore(tmp_path / "config"),
+        lambda: splunk,
+        experiment_store=experiments,
+    )
+    service.provider = lambda: model
+
+    first = await service.run(request(), actor="forecast-analyst")
+
+    assert first["contract"]["experiment_persisted"] is True
+    assert first["experiment"]["comparison"]["decision"] == "no-baseline"
+    stored = experiments.get(first["run_id"])
+    assert stored is not None
+    assert "values" not in stored["series"]
+    with pytest.raises(ValueError, match="fingerprint"):
+        service.accept_baseline(
+            first["run_id"],
+            expected_fingerprint="0" * 64,
+            actor="forecast-analyst",
+            review_note="Known representative week",
+        )
+
+    baseline = service.accept_baseline(
+        first["run_id"],
+        expected_fingerprint=first["experiment"]["run_fingerprint"],
+        actor="forecast-analyst",
+        review_note="Known representative week",
+    )
+    assert baseline["is_baseline"] is True
+    assert baseline["baseline_accepted_by"] == "forecast-analyst"
+
+    for item in splunk.rows:
+        item["value"] = float(item["value"]) + 100
+    drifted = await service.run(
+        request(earliest_time="-14d"),
+        actor="forecast-analyst",
+    )
+
+    assert drifted["experiment"]["series_key"] == first["experiment"]["series_key"]
+    assert drifted["experiment"]["comparison"]["decision"] == "material-drift"
+    assert drifted["experiment"]["comparison"]["metrics"]["window_changed"] is True
+    assert drifted["experiment"]["comparison"]["metrics"]["series_mean_change_percent"] > 50
+    overview = service.experiments()
+    assert len(overview["runs"]) == 2
+    assert overview["series"][0]["baseline_run_id"] == first["run_id"]
+    assert overview["contract"]["source_rows_persisted"] is False
+
+
+@pytest.mark.asyncio
+async def test_reviewed_forecast_handoff_creates_draft_not_alert(tmp_path):
+    splunk = FakeSplunk(rows(96))
+    model = FakeProvider()
+    experiments = TimeSeriesExperimentStore(tmp_path / "experiments.db")
+    validations = ValidationStore(tmp_path / "validations.db")
+    service = TimeSeriesForecastService(
+        ConfigStore(tmp_path / "config"),
+        lambda: splunk,
+        experiment_store=experiments,
+        validations=validations,
+    )
+    service.provider = lambda: model
+    result = await service.run(request(), actor="tier-two")
+
+    value = TimeSeriesAlertCandidateCreate(
+        expected_run_fingerprint=result["experiment"]["run_fingerprint"],
+        title="Review elevated authentication volume",
+        rationale="Measure how often the accepted upper boundary would trigger.",
+        direction="above",
+    )
+    with pytest.raises(ValueError, match="baseline"):
+        service.create_alert_candidate(result["run_id"], value, actor="tier-two")
+    assert validations.list() == []
+
+    service.accept_baseline(
+        result["run_id"],
+        expected_fingerprint=result["experiment"]["run_fingerprint"],
+        actor="tier-two",
+        review_note="Representative source quality and backtest",
+    )
+    handoff = service.create_alert_candidate(
+        result["run_id"],
+        value,
+        actor="tier-two",
+    )
+
+    assert handoff["contract"] == {
+        "splunk_executed": False,
+        "alert_created": False,
+        "validation_status": "draft",
+        "separate_approval_required": True,
+    }
+    assert handoff["reused"] is False
+    assert handoff["candidate"]["threshold_source"] == "maximum forecast p90"
+    assert "| where value >" in handoff["candidate"]["proposed_spl"]
+    validation = validations.get(handoff["candidate"]["validation_task_id"])
+    assert validation is not None
+    assert validation.status == "draft"
+    assert validation.source_run_id == f"forecast:{result['run_id']}"
+    assert experiments.list_alert_candidates()[0]["id"] == handoff["candidate"]["id"]
+    repeated = service.create_alert_candidate(
+        result["run_id"],
+        value,
+        actor="tier-two",
+    )
+    assert repeated["reused"] is True
+    assert len(validations.list()) == 1

@@ -16,11 +16,19 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from ..cases import CaseStore
 from ..config import ConfigStore
 from ..progress import ProgressCallback, report_progress
-from ..schemas import TimeSeriesForecastRequest, TimeSeriesRuntimeUpdate
+from ..schemas import (
+    TimeSeriesAlertCandidateCreate,
+    TimeSeriesForecastRequest,
+    TimeSeriesRuntimeUpdate,
+    ValidationTaskCreate,
+)
 from ..splunk.guardrails import validate_read_only_spl
+from ..validation import ValidationStore
 from .provider import CiscoTimeSeriesProvider
+from .store import TimeSeriesExperimentStore
 
 RELATIVE_TIME = re.compile(r"^-(?P<count>\d{1,4})(?P<unit>[smhdw])$")
 UNIT_SECONDS = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800}
@@ -35,17 +43,20 @@ class TimeSeriesForecastService:
         config: ConfigStore,
         splunk_factory: Callable[[], Any],
         runtime_root: Path | None = None,
+        experiment_store: TimeSeriesExperimentStore | None = None,
+        validations: ValidationStore | None = None,
+        cases: CaseStore | None = None,
     ):
         self.config = config
         self.splunk_factory = splunk_factory
         self.runtime_root = (runtime_root or Path.cwd()).resolve()
+        self.experiment_store = experiment_store
+        self.validations = validations
+        self.cases = cases
 
     def provider(self) -> CiscoTimeSeriesProvider:
         settings = self.config.load().time_series_runtime
-        endpoint = (
-            os.getenv("SIGNALROOM_CISCO_TSM_ENDPOINT", "").strip()
-            or settings.endpoint
-        )
+        endpoint = os.getenv("SIGNALROOM_CISCO_TSM_ENDPOINT", "").strip() or settings.endpoint
         if Path("/.dockerenv").exists() and endpoint == "http://127.0.0.1:8080":
             endpoint = "http://cisco-tsm:8080"
         return CiscoTimeSeriesProvider(
@@ -69,10 +80,161 @@ class TimeSeriesForecastService:
             **health,
         }
 
+    def experiments(self, limit: int = 30) -> dict[str, Any]:
+        if self.experiment_store is None:
+            return {
+                "runs": [],
+                "series": [],
+                "alert_candidates": [],
+                "contract": {
+                    "source_rows_persisted": False,
+                    "runs_immutable": True,
+                    "baseline_requires_exact_fingerprint": True,
+                    "alert_candidate_executes_spl": False,
+                    "alert_candidate_creates_validation_draft": True,
+                },
+            }
+        return self.experiment_store.overview(limit)
+
+    def experiment(self, run_id: str) -> dict[str, Any] | None:
+        return self.experiment_store.get(run_id) if self.experiment_store is not None else None
+
+    def accept_baseline(
+        self,
+        run_id: str,
+        *,
+        expected_fingerprint: str,
+        actor: str,
+        review_note: str,
+    ) -> dict[str, Any]:
+        if self.experiment_store is None:
+            raise RuntimeError("The time-series experiment registry is unavailable")
+        return self.experiment_store.accept_baseline(
+            run_id,
+            expected_fingerprint=expected_fingerprint,
+            actor=actor,
+            review_note=review_note,
+        )
+
+    def create_alert_candidate(
+        self,
+        run_id: str,
+        value: TimeSeriesAlertCandidateCreate,
+        *,
+        actor: str,
+    ) -> dict[str, Any]:
+        if self.experiment_store is None or self.validations is None:
+            raise RuntimeError("The alert-candidate handoff is unavailable")
+        run = self.experiment_store.get(run_id)
+        if run is None:
+            raise KeyError(f"Unknown time-series run: {run_id}")
+        if run["run_fingerprint"] != value.expected_run_fingerprint:
+            raise ValueError("The forecast run changed or the reviewed fingerprint does not match")
+        if not run["is_baseline"] or not run["promotion_ready"]:
+            raise ValueError("Alert candidates require the exact current accepted baseline")
+        existing = self.experiment_store.alert_candidate(run_id, value.direction)
+        if existing is not None:
+            validation = self.validations.get(existing["validation_task_id"])
+            if validation is None:
+                raise ValueError(
+                    "This baseline already has a candidate whose validation draft is no longer available"
+                )
+            return {
+                "candidate": existing,
+                "validation": validation.model_dump(mode="json"),
+                "reused": True,
+                "contract": {
+                    "splunk_executed": False,
+                    "alert_created": False,
+                    "validation_status": validation.status,
+                    "separate_approval_required": True,
+                },
+            }
+        if value.case_id and (self.cases is None or self.cases.get(value.case_id) is None):
+            raise ValueError("Linked case not found")
+        result = run["result"]
+        request = run["request"]
+        forecast = result.get("forecast") or {}
+        quantiles = forecast.get("quantiles") or {}
+        if value.direction == "above":
+            boundary = quantiles.get("p90") or []
+            if not boundary:
+                raise ValueError("The accepted run does not contain a p90 forecast boundary")
+            threshold = max(float(item) for item in boundary)
+            comparator = ">"
+            threshold_source = "maximum forecast p90"
+        else:
+            boundary = quantiles.get("p10") or []
+            if not boundary:
+                raise ValueError("The accepted run does not contain a p10 forecast boundary")
+            threshold = min(float(item) for item in boundary)
+            comparator = "<"
+            threshold_source = "minimum forecast p10"
+        if not math.isfinite(threshold):
+            raise ValueError("The accepted run does not contain a finite forecast boundary")
+        value_field = str(request.get("value_field") or "")
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.-]{0,159}", value_field):
+            raise ValueError("The numeric field is not safe for an alert validation draft")
+        proposed_spl = (
+            f"{str(request.get('spl') or '').strip()} | where {value_field} {comparator} {threshold:.12g}"
+        )
+        validate_read_only_spl(proposed_spl)
+        validation = self.validations.create(
+            ValidationTaskCreate(
+                title=value.title,
+                rationale=(
+                    f"{value.rationale.strip()}\n\n"
+                    f"Forecast baseline {run_id} proposed a {value.direction}-range "
+                    f"threshold from the {threshold_source}. This draft measures how "
+                    "often the historical series crosses that fixed boundary. It is "
+                    "not an alert and requires separate approval before one bounded "
+                    "read-only execution."
+                ),
+                spl=proposed_spl,
+                earliest_time=str(request.get("earliest_time") or "-24h"),
+                latest_time=str(request.get("latest_time") or "now"),
+                row_limit=min(500, int(request.get("row_limit") or 100)),
+                evidence_refs=[],
+                source_run_id=f"forecast:{run_id}",
+                source_finding_ref=f"alert-{value.direction}",
+                case_id=value.case_id,
+            )
+        )
+        try:
+            candidate = self.experiment_store.create_alert_candidate(
+                run_id=run_id,
+                run_fingerprint=value.expected_run_fingerprint,
+                title=value.title.strip(),
+                rationale=value.rationale.strip(),
+                direction=value.direction,
+                threshold=threshold,
+                threshold_source=threshold_source,
+                proposed_spl=proposed_spl,
+                validation_task_id=validation.id,
+                case_id=value.case_id,
+                actor=actor,
+            )
+        except Exception:
+            self.validations.delete(validation.id)
+            raise
+        return {
+            "candidate": candidate,
+            "validation": validation.model_dump(mode="json"),
+            "reused": False,
+            "contract": {
+                "splunk_executed": False,
+                "alert_created": False,
+                "validation_status": "draft",
+                "separate_approval_required": True,
+            },
+        }
+
     async def configure(self, value: TimeSeriesRuntimeUpdate) -> dict[str, Any]:
         provider = CiscoTimeSeriesProvider(
-            value.endpoint, value.token or self.config.secret("cisco_tsm_token"),
-            value.verify_ssl, value.ca_bundle
+            value.endpoint,
+            value.token or self.config.secret("cisco_tsm_token"),
+            value.verify_ssl,
+            value.ca_bundle,
         )
         if provider.network_scope(provider.endpoint) == "public-network":
             raise ValueError(
@@ -86,9 +248,7 @@ class TimeSeriesForecastService:
         self.config.update_secrets(cisco_tsm_token=value.token)
         return await self.status()
 
-    async def start_bundled_runtime(
-        self, progress: ProgressCallback | None = None
-    ) -> dict[str, Any]:
+    async def start_bundled_runtime(self, progress: ProgressCallback | None = None) -> dict[str, Any]:
         """Explicitly build/start the isolated Docker sidecar and wait for readiness."""
         if Path("/.dockerenv").exists():
             raise RuntimeError(
@@ -111,9 +271,7 @@ class TimeSeriesForecastService:
             None,
         )
         if host_port is None:
-            raise RuntimeError(
-                "No local port is available for Cisco TSM in the 8080-8099 range."
-            )
+            raise RuntimeError("No local port is available for Cisco TSM in the 8080-8099 range.")
         settings = self.config.load()
         settings.time_series_runtime.endpoint = f"http://127.0.0.1:{host_port}"
         settings.time_series_runtime.verify_ssl = True
@@ -194,9 +352,7 @@ class TimeSeriesForecastService:
                 )
                 return last
             if last.get("model_load", {}).get("phase") == "failed":
-                raise RuntimeError(
-                    str(last.get("load_error") or "Cisco TSM failed to load")
-                )
+                raise RuntimeError(str(last.get("load_error") or "Cisco TSM failed to load"))
             if attempt and attempt % 5 == 0:
                 await report_progress(
                     progress,
@@ -233,9 +389,7 @@ class TimeSeriesForecastService:
             flags=re.IGNORECASE,
         )
         if not timechart:
-            raise ValueError(
-                "Forecast SPL must contain a timechart with an explicit span, such as span=5m"
-            )
+            raise ValueError("Forecast SPL must contain a timechart with an explicit span, such as span=5m")
         span_seconds = int(timechart.group(1)) * UNIT_SECONDS[timechart.group(2).lower()]
         if span_seconds != request.interval_seconds:
             raise ValueError(
@@ -288,9 +442,7 @@ class TimeSeriesForecastService:
         return parsed.astimezone(UTC)
 
     @classmethod
-    def prepare_series(
-        cls, rows: list[Any], request: TimeSeriesForecastRequest
-    ) -> dict[str, Any]:
+    def prepare_series(cls, rows: list[Any], request: TimeSeriesForecastRequest) -> dict[str, Any]:
         observed: dict[int, float | None] = {}
         parsed_rows = 0
         invalid_values = 0
@@ -319,11 +471,9 @@ class TimeSeriesForecastService:
             )
         raw_points.sort(key=lambda item: item[0])
         dropped_partial_last_bucket = 0
-        if (
-            len(raw_points) > 1
-            and raw_points[-1][0] + timedelta(seconds=request.interval_seconds)
-            > datetime.now(UTC)
-        ):
+        if len(raw_points) > 1 and raw_points[-1][0] + timedelta(
+            seconds=request.interval_seconds
+        ) > datetime.now(UTC):
             raw_points.pop()
             dropped_partial_last_bucket = 1
         origin = raw_points[0][0]
@@ -358,9 +508,7 @@ class TimeSeriesForecastService:
                 imputed += 1
             previous = float(numeric)
             values.append(previous)
-            timestamps.append(
-                (origin + timedelta(seconds=slot * request.interval_seconds)).isoformat()
-            )
+            timestamps.append((origin + timedelta(seconds=slot * request.interval_seconds)).isoformat())
         if len(values) < request.backtest_points + 10:
             raise ValueError(
                 "The prepared series is too short for the requested backtest; widen history or reduce holdout"
@@ -388,8 +536,7 @@ class TimeSeriesForecastService:
     @staticmethod
     def _error_metrics(predicted: list[float], actual: list[float], last_value: float) -> dict[str, Any]:
         model_mae = statistics.fmean(
-            abs(prediction - observation)
-            for prediction, observation in zip(predicted, actual, strict=True)
+            abs(prediction - observation) for prediction, observation in zip(predicted, actual, strict=True)
         )
         naive_mae = statistics.fmean(abs(last_value - observation) for observation in actual)
         if naive_mae == 0:
@@ -407,32 +554,35 @@ class TimeSeriesForecastService:
         self,
         request: TimeSeriesForecastRequest,
         progress: ProgressCallback | None = None,
+        *,
+        actor: str = "local-operator",
     ) -> dict[str, Any]:
         self.validate_contract(request)
         run_id = f"forecast-{uuid4().hex[:16]}"
         provider = self.provider()
         await report_progress(
-            progress, "forecast:runtime", "Checking the dedicated local forecast runtime",
-            "No Splunk query is spent until Cisco TSM reports ready.", progress=8
+            progress,
+            "forecast:runtime",
+            "Checking the dedicated local forecast runtime",
+            "No Splunk query is spent until Cisco TSM reports ready.",
+            progress=8,
         )
         runtime = await provider.health()
         if not runtime.get("ok"):
             runtime_detail = (
-                runtime.get("message")
-                or runtime.get("load_error")
-                or runtime.get("error")
-                or "not ready"
+                runtime.get("message") or runtime.get("load_error") or runtime.get("error") or "not ready"
             )
-            raise RuntimeError(
-                f"Cisco TSM is not ready at {provider.endpoint}: {runtime_detail}"
-            )
+            raise RuntimeError(f"Cisco TSM is not ready at {provider.endpoint}: {runtime_detail}")
         await report_progress(
-            progress, "forecast:guardrail", "Read-only forecast contract confirmed",
+            progress,
+            "forecast:guardrail",
+            "Read-only forecast contract confirmed",
             (
                 f"{request.earliest_time} to now · {request.row_limit} rows · "
                 f"{request.interval_seconds}s buckets."
             ),
-            progress=16, status="complete",
+            progress=16,
+            status="complete",
             metrics={"horizon": request.horizon, "backtest_points": request.backtest_points},
         )
         arguments = {
@@ -443,9 +593,12 @@ class TimeSeriesForecastService:
         }
         splunk = self.splunk_factory()
         await report_progress(
-            progress, "forecast:splunk", "Extracting one regular numeric series through Splunk MCP",
+            progress,
+            "forecast:splunk",
+            "Extracting one regular numeric series through Splunk MCP",
             "SignalRoom is running the exact read-only timechart shown in the workbench.",
-            progress=28, metrics={"tool": "run_query", "row_limit": request.row_limit},
+            progress=28,
+            metrics={"tool": "run_query", "row_limit": request.row_limit},
         )
         if hasattr(splunk, "scope"):
             async with splunk.scope(f"forecast:{run_id}", progress):
@@ -455,20 +608,18 @@ class TimeSeriesForecastService:
         rows = self._rows(raw)
         prepared = self.prepare_series(rows, request)
         await report_progress(
-            progress, "forecast:prepare", "Series resampled and quality-scored",
-            (
-                f"{prepared['expected_points']} points · "
-                f"{prepared['imputed_points']} last-value imputations."
-            ),
-            progress=42, status="complete",
+            progress,
+            "forecast:prepare",
+            "Series resampled and quality-scored",
+            (f"{prepared['expected_points']} points · {prepared['imputed_points']} last-value imputations."),
+            progress=42,
+            status="complete",
             metrics={
                 "points": prepared["expected_points"],
                 "imputation_percent": round(prepared["imputation_ratio"] * 100, 1),
             },
         )
-        query_fingerprint = hashlib.sha256(
-            json.dumps(arguments, sort_keys=True).encode("utf-8")
-        ).hexdigest()
+        query_fingerprint = hashlib.sha256(json.dumps(arguments, sort_keys=True).encode("utf-8")).hexdigest()
         series_fingerprint = hashlib.sha256(
             json.dumps(prepared["values"], separators=(",", ":")).encode("utf-8")
         ).hexdigest()
@@ -487,10 +638,7 @@ class TimeSeriesForecastService:
                 "interval_seconds": request.interval_seconds,
                 "query_fingerprint": query_fingerprint,
             },
-            "series": {
-                key: value for key, value in prepared.items()
-                if key not in {"values", "timestamps"}
-            },
+            "series": {key: value for key, value in prepared.items() if key not in {"values", "timestamps"}},
             "series_sha256": series_fingerprint,
             "runtime": {
                 "endpoint": provider.endpoint,
@@ -509,34 +657,37 @@ class TimeSeriesForecastService:
             },
         }
         if prepared["imputation_ratio"] > 0.30:
-            return {
-                **base,
-                "status": "blocked-data-quality",
-                "forecast": None,
-                "backtest": None,
-                "promotion_gate": {
-                    "ready": False,
-                    "decision": "blocked",
-                    "reasons": [
-                        "More than 30% of the prepared series required imputation; "
-                        "the publisher warns forecast quality deteriorates beyond this point."
-                    ],
+            return self._retain(
+                request,
+                {
+                    **base,
+                    "status": "blocked-data-quality",
+                    "forecast": None,
+                    "backtest": None,
+                    "promotion_gate": {
+                        "ready": False,
+                        "decision": "blocked",
+                        "reasons": [
+                            "More than 30% of the prepared series required imputation; "
+                            "the publisher warns forecast quality deteriorates beyond this point."
+                        ],
+                    },
                 },
-            }
+                actor,
+            )
         holdout = request.backtest_points
         training = prepared["values"][:-holdout]
         actual = prepared["values"][-holdout:]
         await report_progress(
-            progress, "forecast:backtest", "Running holdout backtest",
+            progress,
+            "forecast:backtest",
+            "Running holdout backtest",
             f"Forecasting the final {holdout} known points without showing them to the model.",
-            progress=55, metrics={"training_points": len(training), "holdout_points": holdout},
+            progress=55,
+            metrics={"training_points": len(training), "holdout_points": holdout},
         )
-        backtest_forecast = await provider.forecast(
-            training, holdout, request_id=f"{run_id}-backtest"
-        )
-        backtest = self._error_metrics(
-            backtest_forecast["mean"], actual, training[-1]
-        )
+        backtest_forecast = await provider.forecast(training, holdout, request_id=f"{run_id}-backtest")
+        backtest = self._error_metrics(backtest_forecast["mean"], actual, training[-1])
         backtest.update(
             {
                 "points": holdout,
@@ -545,17 +696,21 @@ class TimeSeriesForecastService:
             }
         )
         await report_progress(
-            progress, "forecast:forecast", "Backtest complete; forecasting the unseen horizon",
+            progress,
+            "forecast:forecast",
+            "Backtest complete; forecasting the unseen horizon",
             (
                 "Cisco TSM beat the last-value baseline."
                 if backtest["beats_naive"]
                 else "Cisco TSM did not beat the last-value baseline; promotion will be held."
             ),
-            progress=76, status="complete",
+            progress=76,
+            status="complete",
             metrics={
                 "mase": (
                     round(backtest["mase_vs_last_value"], 3)
-                    if backtest["mase_vs_last_value"] is not None else "undefined"
+                    if backtest["mase_vs_last_value"] is not None
+                    else "undefined"
                 ),
                 "beats_naive": backtest["beats_naive"],
             },
@@ -573,9 +728,7 @@ class TimeSeriesForecastService:
         mase = backtest["mase_vs_last_value"]
         reasons: list[str] = []
         if runtime_model != CiscoTimeSeriesProvider.MODEL_ID:
-            reasons.append(
-                "The runtime did not attest the expected Cisco Time Series Model repository."
-            )
+            reasons.append("The runtime did not attest the expected Cisco Time Series Model repository.")
         if not re.fullmatch(r"[0-9a-f]{40,64}", revision, flags=re.IGNORECASE):
             reasons.append("The runtime did not attest a valid immutable model revision.")
         if mase is None or mase >= 1:
@@ -583,36 +736,66 @@ class TimeSeriesForecastService:
         if prepared["imputation_ratio"] > 0.10:
             reasons.append("More than 10% of the source series required last-value imputation.")
         if prepared["row_limit_reached"]:
-            reasons.append(
-                "Splunk returned the configured row limit, so the source series may be truncated."
-            )
+            reasons.append("Splunk returned the configured row limit, so the source series may be truncated.")
         ready = not reasons
         await report_progress(
-            progress, "forecast:gate", "Forecast promotion evidence assembled",
+            progress,
+            "forecast:gate",
+            "Forecast promotion evidence assembled",
             (
                 "Eligible for analyst review; no alert or threshold has been changed."
                 if ready
                 else "Forecast is visible, but promotion is held for the documented reasons."
             ),
-            progress=96, status="complete",
+            progress=96,
+            status="complete",
             metrics={"promotion_ready": ready, "network_inference_calls": 0},
         )
-        return {
-            **base,
-            "forecast": {
-                "horizon": request.horizon,
-                "timestamps": forecast_times,
-                "mean": forecast["mean"],
-                "quantiles": forecast["quantiles"],
-                "context": forecast["context"],
+        return self._retain(
+            request,
+            {
+                **base,
+                "forecast": {
+                    "horizon": request.horizon,
+                    "timestamps": forecast_times,
+                    "mean": forecast["mean"],
+                    "quantiles": forecast["quantiles"],
+                    "context": forecast["context"],
+                },
+                "backtest": backtest,
+                "promotion_gate": {
+                    "ready": ready,
+                    "decision": ("eligible-for-analyst-review" if ready else "hold"),
+                    "reasons": reasons
+                    or [
+                        "Data quality passed, the model beat the naive baseline, and the "
+                        "runtime attested an immutable revision."
+                    ],
+                },
             },
-            "backtest": backtest,
-            "promotion_gate": {
-                "ready": ready,
-                "decision": "eligible-for-analyst-review" if ready else "hold",
-                "reasons": reasons or [
-                    "Data quality passed, the model beat the naive baseline, and the runtime "
-                    "attested an immutable revision."
-                ],
-            },
+            actor,
+        )
+
+    def _retain(
+        self,
+        request: TimeSeriesForecastRequest,
+        result: dict[str, Any],
+        actor: str,
+    ) -> dict[str, Any]:
+        if self.experiment_store is None:
+            return result
+        result.setdefault("contract", {})["experiment_persisted"] = True
+        recorded = self.experiment_store.record(
+            request.model_dump(mode="json"),
+            result,
+            actor=actor,
+        )
+        result["experiment"] = {
+            "series_key": recorded["series_key"],
+            "run_fingerprint": recorded["run_fingerprint"],
+            "comparison": recorded["comparison"],
+            "is_baseline": recorded["is_baseline"],
+            "created_by": recorded["created_by"],
+            "created_at": recorded["created_at"],
         }
+        return result

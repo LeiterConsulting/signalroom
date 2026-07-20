@@ -52,15 +52,9 @@ def test_rbac_is_optional_and_bootstrap_is_session_safe(tmp_path) -> None:
     assert "csrf_token" not in status["session"]
 
     with service.store.connect() as database:
-        stored = database.execute(
-            "SELECT token_sha256,csrf_sha256 FROM auth_sessions"
-        ).fetchone()
-    assert stored["token_sha256"] == hashlib.sha256(
-        session["token"].encode()
-    ).hexdigest()
-    assert stored["csrf_sha256"] == hashlib.sha256(
-        session["csrf_token"].encode()
-    ).hexdigest()
+        stored = database.execute("SELECT token_sha256,csrf_sha256 FROM auth_sessions").fetchone()
+    assert stored["token_sha256"] == hashlib.sha256(session["token"].encode()).hexdigest()
+    assert stored["csrf_sha256"] == hashlib.sha256(session["csrf_token"].encode()).hexdigest()
     assert session["token"] not in tuple(stored)
     assert session["csrf_token"] not in tuple(stored)
 
@@ -95,9 +89,7 @@ def test_roles_and_connection_assignment_are_independent(tmp_path) -> None:
     assert service.authorize(viewer, "POST", "/api/auth/logout") == (True, "")
     assert service.authorize(analyst, "POST", "/api/cases") == (True, "")
     assert service.authorize(analyst, "PUT", "/api/settings")[0] is False
-    allowed, reason = service.authorize(
-        analyst, "POST", "/api/discovery/stream"
-    )
+    allowed, reason = service.authorize(analyst, "POST", "/api/discovery/stream")
     assert allowed is False
     assert "Primary Splunk" in reason
     assert service.authorize(analyst, "POST", "/api/discovery/jobs")[0] is False
@@ -126,18 +118,21 @@ def test_roles_and_connection_assignment_are_independent(tmp_path) -> None:
     )
     assert allowed is False
     assert "Primary Splunk" in reason
+    assert service.authorize(
+        analyst,
+        "POST",
+        "/api/model-capabilities/time-series/experiments/run-1/baseline",
+    ) == (True, "")
+    assert service.authorize(
+        analyst,
+        "POST",
+        "/api/model-capabilities/time-series/experiments/run-1/alert-candidates",
+    ) == (True, "")
     assert service.authorize(analyst, "PUT", "/api/audit-export/policy")[0] is False
     assert service.authorize(admin, "PUT", "/api/audit-export/policy") == (True, "")
     assert service.authorize(analyst, "POST", "/api/audit-export/run")[0] is False
-    assert (
-        service.authorize(
-            analyst, "POST", "/api/audit-operations/export"
-        )[0]
-        is False
-    )
-    assert service.authorize(
-        admin, "POST", "/api/audit-operations/export"
-    ) == (True, "")
+    assert service.authorize(analyst, "POST", "/api/audit-operations/export")[0] is False
+    assert service.authorize(admin, "POST", "/api/audit-operations/export") == (True, "")
     assert service.authorize(admin, "PUT", "/api/settings") == (True, "")
 
 
@@ -155,9 +150,7 @@ def test_user_changes_revoke_sessions_and_preserve_last_admin(tmp_path) -> None:
         ),
         actor=admin,
     )
-    analyst_session = service.login(
-        "tier-two", "tier two password long", "127.0.0.1"
-    )
+    analyst_session = service.login("tier-two", "tier two password long", "127.0.0.1")
 
     service.update_user(
         analyst["id"],
@@ -209,9 +202,7 @@ def test_login_throttles_repeated_failures(tmp_path) -> None:
         )
 
 
-def test_http_gate_sets_cookies_enforces_csrf_and_admin_reads(
-    tmp_path, monkeypatch
-) -> None:
+def test_http_gate_sets_cookies_enforces_csrf_and_admin_reads(tmp_path, monkeypatch) -> None:
     store = AuthStore(tmp_path / "http-auth.db")
     service = AuthService(store, AuditStore(tmp_path / "http-audit.db"))
     monkeypatch.setattr(app_module.services, "auth_store", store)

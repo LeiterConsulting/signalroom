@@ -45,7 +45,7 @@ from .detections import (
 )
 from .discovery import DiscoveryJobService, DiscoveryJobStore, DiscoveryPipeline
 from .feedback import AnalystFeedbackStore
-from .forecasting import TimeSeriesForecastService
+from .forecasting import TimeSeriesExperimentStore, TimeSeriesForecastService
 from .mcp_server import MCPServer
 from .model_setup import ModelSetupService
 from .model_trust import ModelTrustService, ModelTrustStore
@@ -108,6 +108,8 @@ from .schemas import (
     ModelTrustPolicyUpdate,
     QueryIntelligenceRequest,
     SettingsUpdate,
+    TimeSeriesAlertCandidateCreate,
+    TimeSeriesBaselineAcceptRequest,
     TimeSeriesForecastRequest,
     TimeSeriesRuntimeUpdate,
     ValidationTaskCreate,
@@ -168,9 +170,7 @@ class Services:
         self.validation_store = ValidationStore(DATA / "validations.db")
         self.workload_store = WorkloadStore(DATA / "workload.db")
         self.workload = SplunkWorkloadService(self.workload_store)
-        self.query_intelligence = QueryIntelligenceService(
-            self.validation_store, self.workload
-        )
+        self.query_intelligence = QueryIntelligenceService(self.validation_store, self.workload)
         self.detection_store = DetectionStore(DATA / "detections.db")
         self.detections = DetectionService(
             self.detection_store,
@@ -217,11 +217,15 @@ class Services:
         self.connection_diagnostics = SplunkConnectionDiagnostics(self.connection_diagnostics_store)
         self.discovery_lock = asyncio.Lock()
         self.benchmark_lock = asyncio.Lock()
-        self.model_setup = ModelSetupService(
-            self.config, self.evidence, self.model_trust
-        )
+        self.model_setup = ModelSetupService(self.config, self.evidence, self.model_trust)
+        self.time_series_store = TimeSeriesExperimentStore(DATA / "time_series_experiments.db")
         self.time_series = TimeSeriesForecastService(
-            self.config, lambda: self.splunk, ROOT
+            self.config,
+            lambda: self.splunk,
+            ROOT,
+            self.time_series_store,
+            self.validation_store,
+            self.cases,
         )
         self._fingerprint = ""
         self._splunk: Any = None
@@ -308,9 +312,7 @@ class Services:
                 "ca_bundle": bool(settings.splunk.ca_bundle),
             }
         )
-        self._splunk = WorkloadControlledSplunkClient(
-            raw_splunk, self.workload, instance_id
-        )
+        self._splunk = WorkloadControlledSplunkClient(raw_splunk, self.workload, instance_id)
         self._agent = SecurityAgent(self.config, self.evidence, self._splunk)
         self._splunk_models = SplunkModelInventoryService(self.config, self._splunk)
         self._discovery = DiscoveryPipeline(
@@ -531,8 +533,7 @@ async def auth_status(request: Request) -> dict[str, Any]:
     result = services.auth.status(token)
     result["oidc"] = services.oidc.public_status(
         include_policy=bool(
-            result.get("authenticated")
-            and (result.get("principal") or {}).get("role") == "admin"
+            result.get("authenticated") and (result.get("principal") or {}).get("role") == "admin"
         )
     )
     return result
@@ -573,18 +574,14 @@ async def auth_login(value: AuthLoginRequest, request: Request, response: Respon
     _set_auth_cookies(response, request, session)
     response.headers["Cache-Control"] = "no-store"
     result = services.auth.status(session["token"])
-    result["oidc"] = services.oidc.public_status(
-        include_policy=session["user"]["role"] == "admin"
-    )
+    result["oidc"] = services.oidc.public_status(include_policy=session["user"]["role"] == "admin")
     return result
 
 
 @app.get("/api/auth/oidc/start")
 async def auth_oidc_start(request: Request) -> RedirectResponse:
     try:
-        result = await services.oidc.begin(
-            source=request.client.host if request.client else "unknown"
-        )
+        result = await services.oidc.begin(source=request.client.host if request.client else "unknown")
     except (OIDCError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     response = RedirectResponse(result["authorization_url"], status_code=303)
@@ -681,9 +678,7 @@ async def auth_users() -> list[dict[str, Any]]:
 
 
 @app.put("/api/auth/oidc/policy")
-async def auth_oidc_policy(
-    value: AuthOIDCPolicyUpdate, request: Request
-) -> dict[str, Any]:
+async def auth_oidc_policy(value: AuthOIDCPolicyUpdate, request: Request) -> dict[str, Any]:
     try:
         return await services.oidc.update_policy(value, actor=request.state.principal)
     except (OIDCError, ValueError) as exc:
@@ -770,9 +765,7 @@ async def workload_overview() -> dict[str, Any]:
 
 
 @app.put("/api/workload/policy")
-async def update_workload_policy(
-    value: WorkloadPolicyUpdate, request: Request
-) -> dict[str, Any]:
+async def update_workload_policy(value: WorkloadPolicyUpdate, request: Request) -> dict[str, Any]:
     result = await services.workload.update_policy(value)
     principal = getattr(request.state, "principal", None) or {}
     services.audit.record(
@@ -855,8 +848,7 @@ async def test_connection(request: ConnectionTestRequest) -> dict[str, Any]:
             }
         if profile.task == "classification":
             result = await provider.classify(
-                "int copy_user_value(char *dst, const char *src) { "
-                "strcpy(dst, src); return 0; }"
+                "int copy_user_value(char *dst, const char *src) { strcpy(dst, src); return 0; }"
             )
             return {
                 **health,
@@ -908,9 +900,7 @@ async def screen_code_vulnerability(
     value: CodeVulnerabilityScreenRequest, request: Request
 ) -> dict[str, Any]:
     try:
-        result = await services.model_setup.screen_code_vulnerability(
-            value.code, value.language
-        )
+        result = await services.model_setup.screen_code_vulnerability(value.code, value.language)
     except KeyError as exc:
         raise HTTPException(404, str(exc)) from exc
     except ValueError as exc:
@@ -947,9 +937,7 @@ async def time_series_status() -> dict[str, Any]:
 
 
 @app.put("/api/model-capabilities/time-series/runtime")
-async def configure_time_series_runtime(
-    value: TimeSeriesRuntimeUpdate, request: Request
-) -> dict[str, Any]:
+async def configure_time_series_runtime(value: TimeSeriesRuntimeUpdate, request: Request) -> dict[str, Any]:
     try:
         result = await services.time_series.configure(value)
     except ValueError as exc:
@@ -1011,14 +999,13 @@ async def start_time_series_runtime(request: Request) -> StreamingResponse:
 
 
 @app.post("/api/model-capabilities/time-series/forecast/stream")
-async def run_time_series_forecast(
-    value: TimeSeriesForecastRequest, request: Request
-) -> StreamingResponse:
+async def run_time_series_forecast(value: TimeSeriesForecastRequest, request: Request) -> StreamingResponse:
     principal = getattr(request.state, "principal", {}) or {}
+    actor = str(principal.get("username") or "local-operator")
 
     async def run(progress: Any) -> dict[str, Any]:
         try:
-            result = await services.time_series.run(value, progress)
+            result = await services.time_series.run(value, progress, actor=actor)
         except (ValueError, PermissionError, RuntimeError) as exc:
             services.audit.record(
                 "model.capability.time-series.forecast-failed",
@@ -1028,7 +1015,7 @@ async def run_time_series_forecast(
                 outcome="error",
                 summary="A bounded local time-series forecast did not complete.",
                 metadata={"error": str(exc)[:1000]},
-                actor=str(principal.get("username") or "local-operator"),
+                actor=actor,
             )
             raise
         services.audit.record(
@@ -1047,12 +1034,106 @@ async def run_time_series_forecast(
                 "promotion_decision": result["promotion_gate"]["decision"],
                 "network_inference": False,
                 "source_persisted": False,
+                "experiment_fingerprint": (result.get("experiment", {}).get("run_fingerprint", "")),
             },
-            actor=str(principal.get("username") or "local-operator"),
+            actor=actor,
         )
         return result
 
     return _stream_response(run)
+
+
+@app.get("/api/model-capabilities/time-series/experiments")
+async def list_time_series_experiments(limit: int = 30) -> dict[str, Any]:
+    return services.time_series.experiments(limit)
+
+
+@app.get("/api/model-capabilities/time-series/experiments/{run_id}")
+async def get_time_series_experiment(run_id: str) -> dict[str, Any]:
+    result = services.time_series.experiment(run_id)
+    if result is None:
+        raise HTTPException(404, "Time-series experiment not found")
+    return result
+
+
+@app.post("/api/model-capabilities/time-series/experiments/{run_id}/baseline")
+async def accept_time_series_baseline(
+    run_id: str,
+    value: TimeSeriesBaselineAcceptRequest,
+    request: Request,
+) -> dict[str, Any]:
+    principal = getattr(request.state, "principal", {}) or {}
+    actor = str(principal.get("username") or "local-operator")
+    try:
+        result = services.time_series.accept_baseline(
+            run_id,
+            expected_fingerprint=value.expected_run_fingerprint,
+            actor=actor,
+            review_note=value.review_note,
+        )
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except (ValueError, RuntimeError) as exc:
+        raise HTTPException(409, str(exc)) from exc
+    services.audit.record(
+        "model.capability.time-series.baseline-accepted",
+        "approve",
+        target_type="forecast-experiment",
+        target_id=run_id,
+        summary="An exact promotion-eligible forecast became the reviewed series baseline.",
+        metadata={
+            "series_key": result["series_key"],
+            "run_fingerprint": result["run_fingerprint"],
+            "model_revision": result["runtime"].get("source_revision", ""),
+        },
+        actor=actor,
+    )
+    return result
+
+
+@app.post(
+    "/api/model-capabilities/time-series/experiments/{run_id}/alert-candidates",
+    status_code=201,
+)
+async def create_time_series_alert_candidate(
+    run_id: str,
+    value: TimeSeriesAlertCandidateCreate,
+    request: Request,
+) -> dict[str, Any]:
+    principal = getattr(request.state, "principal", {}) or {}
+    actor = str(principal.get("username") or "local-operator")
+    try:
+        result = services.time_series.create_alert_candidate(
+            run_id,
+            value,
+            actor=actor,
+        )
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(503, str(exc)) from exc
+    candidate = result["candidate"]
+    services.audit.record(
+        "model.capability.time-series.alert-candidate-created",
+        "create",
+        target_type="forecast-alert-candidate",
+        target_id=candidate["id"],
+        summary=("A reviewed forecast baseline produced a bounded validation draft, not an alert."),
+        metadata={
+            "run_id": run_id,
+            "run_fingerprint": candidate["run_fingerprint"],
+            "direction": candidate["direction"],
+            "threshold_source": candidate["threshold_source"],
+            "validation_task_id": candidate["validation_task_id"],
+            "case_id": candidate["case_id"],
+            "splunk_executed": False,
+            "alert_created": False,
+        },
+        actor=actor,
+    )
+    return result
 
 
 @app.get("/api/model-trust")
@@ -1086,9 +1167,7 @@ async def approve_model_artifact(
     principal = getattr(request.state, "principal", {}) or {}
     actor = str(principal.get("username") or "local-operator")
     try:
-        result = await services.model_trust.approve(
-            profile_id, value.expected_fingerprint, actor
-        )
+        result = await services.model_trust.approve(profile_id, value.expected_fingerprint, actor)
     except KeyError as exc:
         raise HTTPException(404, str(exc)) from exc
     except ValueError as exc:
@@ -1305,9 +1384,7 @@ async def evaluation_suite(suite_id: str) -> dict[str, Any]:
 
 
 @app.post("/api/benchmarks/suites")
-async def create_evaluation_suite(
-    value: EvaluationSuiteCreate, request: Request
-) -> dict[str, Any]:
+async def create_evaluation_suite(value: EvaluationSuiteCreate, request: Request) -> dict[str, Any]:
     principal = getattr(request.state, "principal", {}) or {}
     actor = str(principal.get("username") or "local-operator")
     result = services.evaluation_suites.create(value, actor)
@@ -1326,9 +1403,7 @@ async def create_evaluation_suite(
 
 
 @app.patch("/api/benchmarks/suites/{suite_id}")
-async def update_evaluation_suite(
-    suite_id: str, value: EvaluationSuiteUpdate
-) -> dict[str, Any]:
+async def update_evaluation_suite(suite_id: str, value: EvaluationSuiteUpdate) -> dict[str, Any]:
     try:
         result = services.evaluation_suites.update(suite_id, value)
     except KeyError as exc:
@@ -1384,9 +1459,7 @@ async def publish_evaluation_suite(
 
 
 @app.post("/api/benchmarks/suites/{suite_id}/archive")
-async def archive_evaluation_suite(
-    suite_id: str, value: EvaluationSuiteArchiveRequest
-) -> dict[str, Any]:
+async def archive_evaluation_suite(suite_id: str, value: EvaluationSuiteArchiveRequest) -> dict[str, Any]:
     try:
         result = services.evaluation_suites.archive(suite_id, value.archived)
     except KeyError as exc:
@@ -1429,9 +1502,7 @@ async def run_golden_benchmark(request: GoldenBenchmarkRunCreate) -> StreamingRe
 
     async def run(progress: Any) -> dict[str, Any]:
         async with services.benchmark_lock:
-            return await services.benchmarks.run(
-                request.profile_id, progress, suite_id=request.suite_id
-            )
+            return await services.benchmarks.run(request.profile_id, progress, suite_id=request.suite_id)
 
     return _stream_response(run)
 
@@ -1721,9 +1792,7 @@ async def discovery_stream(request: DiscoveryRequest) -> StreamingResponse:
                 }
             )
         async with services.discovery_lock:
-            async with services.workload.scope(
-                f"discovery:{request.depth}", progress
-            ):
+            async with services.workload.scope(f"discovery:{request.depth}", progress):
                 result = await services.discovery.run(request.depth, progress=progress)
         services.agent.invalidate_context_cache()
         services.model_setup.schedule_context_index()
@@ -1738,9 +1807,7 @@ async def assurance_overview() -> dict[str, Any]:
     result["delivery"] = services.delivery.overview()
     result["audit"] = services.audit.overview(20)
     result["audit_export"] = services.audit_export.overview()
-    result["audit_operations"] = services.audit_operations.overview(
-        result["audit_export"]
-    )
+    result["audit_operations"] = services.audit_operations.overview(result["audit_export"])
     return result
 
 

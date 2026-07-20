@@ -72,6 +72,15 @@ revision; an existing publisher-compatible service may run forecasts, but missin
 promotion. Forecast output cannot automatically modify an alert, threshold, capacity decision, Context artifact,
 or case.
 
+`TimeSeriesExperimentStore` retains each completed or data-quality-blocked run as immutable local experiment
+state without raw Splunk result rows. Its logical series identity removes only the explicit `timechart` span,
+allowing deterministic window and span comparisons while keeping the rest of the SPL and field contract bound.
+Baseline acceptance requires an eligible run, its exact fingerprint, and an analyst review note. New runs compare
+performance, aggregate level, forecast center, imputation, window, span, and model revision to that accepted
+baseline. An alert-candidate handoff is allowed only from the exact current baseline and computes its p90/p10
+boundary server-side. The result is an unapproved validation draft; it does not execute SPL, create an alert, or
+bypass the existing evidence requirement for detection engineering.
+
 `ModelTrustService` forms a separate local supply-chain authority. It observes the publisher, immutable source
 revision, runtime, and local content digest for each enabled profile. Explicit approvals sign that canonical
 identity with a persistent Ed25519 key and retain both a SQLite record and portable JSON/signature files. Audit
@@ -394,5 +403,6 @@ there is deliberately no remote recovery route.
 2. Per-connection authorization and identity lifecycle provisioning/deprovisioning
 3. Read-only deployment reconciliation for the audit operations pack when the Splunk MCP contract exposes the
    required index and knowledge-object configuration fields
-4. Durable time-series experiment registry with repeatable per-series backtests, baseline drift, span/window
-   comparison, and an explicit reviewed handoff from forecast evidence to an alert candidate
+4. Opt-in shadow forecast schedules with seasonality-aware multi-baseline comparison, bounded workload budgets,
+   missed-run recovery, and analyst-owned review queues; scheduled evaluation must still have no alerting or
+   Splunk-write authority

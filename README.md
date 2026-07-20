@@ -232,6 +232,19 @@ boundary. A result becomes eligible only for analyst review; it cannot automatic
 or capacity decision. Source rows and forecasts are not added to Context unless the analyst explicitly preserves
 a bounded review to a case.
 
+Completed and data-quality-blocked runs are also retained in `data/time_series_experiments.db` as immutable local
+experiments. The registry stores the exact run contract, aggregate series statistics, backtest and forecast
+output, model identity, and fingerprints—not raw Splunk result rows. A logical series key normalizes the
+`timechart` span so analysts can compare windows and bucket sizes. Accepting a baseline requires the exact
+promotion-eligible run fingerprint and a review note. Later runs report deterministic performance, imputation,
+series-mean, forecast-center, span, window, and model-revision drift.
+
+An accepted baseline can explicitly stage an upper-p90 or lower-p10 alert candidate. SignalRoom computes the
+fixed boundary server-side from the reviewed forecast and creates an editable, single-execution validation draft
+in the existing analyst queue. It does not run the draft, create a saved search, schedule anything, or grant
+Splunk write authority. Only separately approved, completed validation evidence can enter the existing detection
+engineering workflow.
+
 SignalRoom itself supports modern Python releases, while the publisher's `cisco-tsm` package requires Python 3.11.
 The bundled runtime therefore uses an isolated Python 3.11 Docker sidecar. From the Cisco card, **Build and start
 bundled local runtime** performs that explicit setup, generates an encrypted local bearer token, pins the publisher
@@ -362,6 +375,7 @@ src/splunk_security_agent/
   discovery/       inventory, coverage analysis, and artifact packaging
   delivery/        redacted webhook policy, approval state, attempts, and retries
   detections/      evidence-bound versions, exact-hash review, and safe local exports
+  forecasting/     local Cisco TSM adapter, immutable experiments, drift, and alert-draft handoff
   cases/           durable case records, evidence cockpit, timelines, and handoff exports
   model_trust/     publisher policy, artifact identity, signed approvals, and enforcement
   providers/       Ollama, local Transformers, Hugging Face cloud, and capability routing

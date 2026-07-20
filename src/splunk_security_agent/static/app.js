@@ -13,6 +13,7 @@ const state = {
   deliveryPreview: null, detections: [], activeDetection: null, detectionGitExport: null,
   repositoryStatus: null, repositoryHandoff: null, auth: null, authUsers: [],
   codeScreenResult: null, timeSeriesStatus: null, timeSeriesResult: null,
+  timeSeriesExperiments: null,
   workspaceLoaded: false, assuranceTimer: null, discoveryJobs: null,
   activeDiscoveryJob: null, discoveryPollTimer: null, discoveryPollBusy: false,
   discoveryWatchingJobId: null
@@ -260,7 +261,11 @@ function applyAccessPermissions() {
     '#auditOperationsForm button', '#runAuditExport', '#previewAuditOperations',
     '#exportAuditOperations', '#scanSplunkModels',
     '#runModelTournament', '#runGoldenBenchmark', '#addArtifact', '#uploadArtifact',
-    '#newCase', '#newDetection', '#runTimeSeriesForecast'
+    '#newCase', '#newDetection', '#runTimeSeriesForecast',
+    '#timeSeriesExperimentHistory form input',
+    '#timeSeriesExperimentHistory form select',
+    '#timeSeriesExperimentHistory form textarea',
+    '#timeSeriesExperimentHistory form button'
   ];
   $$(mutationSelectors.join(',')).forEach(node => {
     if (!canChange) { node.disabled = true; node.dataset.roleDisabled = 'true'; }
@@ -1131,7 +1136,7 @@ function openTimeSeriesWorkbench() {
   showDetail({
     eyebrow:'LOCAL FORECAST SPECIALIST · OPT-IN',
     title:'Forecast a bounded Splunk series',
-    summary:'<p>Extract one regular numeric timechart through read-only Splunk MCP, measure source quality, withhold known points for backtesting, then forecast locally with Cisco TSM. Results remain advisory until an analyst reviews the promotion evidence.</p>',
+    summary:'<p>Extract one regular numeric timechart through read-only Splunk MCP, measure source quality, withhold known points for backtesting, then forecast locally with Cisco TSM. Runs are retained as immutable local experiments without raw Splunk rows so an analyst can compare windows, accept a baseline, and deliberately stage an alert validation draft.</p>',
     content:`<section class="forecast-workbench">
       ${runtimeMessage}
       <details class="forecast-runtime-config" ${runtime.ok ? '' : 'open'}>
@@ -1164,6 +1169,10 @@ function openTimeSeriesWorkbench() {
         <div class="operation-metrics"></div><ol class="operation-steps"></ol>
       </article>
       <div id="timeSeriesOutput" class="forecast-output" aria-live="polite"></div>
+      <section class="forecast-experiments" aria-labelledby="timeSeriesExperimentTitle">
+        <header><div><span>LOCAL EXPERIMENT REGISTRY</span><h3 id="timeSeriesExperimentTitle">Repeat, compare, then review</h3><p>Each run retains its contract, backtest, forecast, model revision, and fingerprints—not the source rows. Baselines and alert candidates require exact-run review.</p></div><button class="button ghost small" id="refreshTimeSeriesExperiments" type="button">Refresh history</button></header>
+        <div id="timeSeriesExperimentHistory" aria-live="polite"><div class="empty-inline compact-empty">Loading retained forecast history…</div></div>
+      </section>
     </section>`,
     provenance:'<h3>Execution contract</h3><dl><div><dt>Model</dt><dd>cisco-ai/cisco-time-series-model-1.0</dd></div><div><dt>Inference</dt><dd>Local/private dedicated service</dd></div><div><dt>Splunk writes</dt><dd>None</dd></div><div><dt>Automatic routing</dt><dd>Prohibited</dd></div></dl>'
   });
@@ -1172,6 +1181,8 @@ function openTimeSeriesWorkbench() {
   if ($('#startBundledTimeSeries')) {
     $('#startBundledTimeSeries').addEventListener('click', startBundledTimeSeriesRuntime);
   }
+  $('#refreshTimeSeriesExperiments').addEventListener('click', loadTimeSeriesExperiments);
+  loadTimeSeriesExperiments();
   applyAccessPermissions();
   (runtime.ok ? $('#forecastSpl') : $('#timeSeriesEndpoint')).focus();
 }
@@ -1230,6 +1241,160 @@ async function saveTimeSeriesRuntime(event) {
   }
 }
 
+async function loadTimeSeriesExperiments(event) {
+  const button = event?.currentTarget?.id === 'refreshTimeSeriesExperiments' ? event.currentTarget : null;
+  if (button) { button.disabled = true; button.textContent = 'Refreshing…'; }
+  try {
+    state.timeSeriesExperiments = await api('/api/model-capabilities/time-series/experiments?limit=40');
+    renderTimeSeriesExperiments();
+  } catch (error) {
+    const panel = $('#timeSeriesExperimentHistory');
+    if (panel) panel.innerHTML = `<div class="code-screen-error"><b>Experiment history unavailable</b><span>${escapeHtml(error.message)}</span></div>`;
+  } finally {
+    if (button) { button.disabled = false; button.textContent = 'Refresh history'; }
+  }
+}
+
+function forecastIntervalLabel(seconds) {
+  const value = Number(seconds || 0);
+  if (value % 3600 === 0) return `${value / 3600}h buckets`;
+  if (value % 60 === 0) return `${value / 60}m buckets`;
+  return `${value}s buckets`;
+}
+
+function forecastDriftMetric(value, suffix = '%') {
+  if (value == null || !Number.isFinite(Number(value))) return 'n/a';
+  const number = Number(value);
+  return `${number > 0 ? '+' : ''}${number.toFixed(1)}${suffix}`;
+}
+
+function renderTimeSeriesExperiments() {
+  const panel = $('#timeSeriesExperimentHistory'); if (!panel) return;
+  const registry = state.timeSeriesExperiments || {}; const runs = registry.runs || [];
+  const candidates = registry.alert_candidates || [];
+  if (!runs.length) {
+    panel.innerHTML = '<div class="empty-inline compact-empty">No retained runs yet. The next completed or data-quality-blocked forecast will appear here automatically.</div>';
+    return;
+  }
+  const caseOptions = `<option value="">No linked case</option>${(state.cases || []).map(item => `<option value="${escapeHtml(item.id)}">${escapeHtml(item.title)}</option>`).join('')}`;
+  const runCards = runs.map(run => {
+    const comparison = run.comparison || {}; const metrics = comparison.metrics || {};
+    const backtest = run.backtest || {}; const source = run.source || {}; const series = run.series || {};
+    const created = run.created_at ? new Date(run.created_at).toLocaleString() : 'unknown time';
+    const mase = backtest.mase_vs_last_value == null ? 'undefined' : Number(backtest.mase_vs_last_value).toFixed(3);
+    const decision = comparison.decision || 'no-baseline';
+    const baselineAction = run.promotion_ready && !run.is_baseline ? `<details class="forecast-review-action"><summary>Accept as comparison baseline</summary>
+      <form data-time-series-baseline-form="${escapeHtml(run.id)}" data-run-fingerprint="${escapeHtml(run.run_fingerprint)}">
+        <label><span>Why this run is representative</span><textarea name="review_note" rows="2" minlength="3" maxlength="4000" required placeholder="Record data quality, operating period, and why this is a defensible reference…"></textarea></label>
+        <button class="button primary small" type="submit">Accept exact run</button>
+        <small>This supersedes the prior baseline for this logical series. It does not change Splunk.</small>
+      </form></details>` : '';
+    const candidateAction = run.is_baseline ? `<details class="forecast-review-action"><summary>Stage an alert validation candidate</summary>
+      <form data-time-series-candidate-form="${escapeHtml(run.id)}" data-run-fingerprint="${escapeHtml(run.run_fingerprint)}">
+        <label><span>Candidate title</span><input name="title" value="${escapeHtml(`Validate ${run.title}`)}" maxlength="240" required></label>
+        <label><span>Boundary direction</span><select name="direction"><option value="above">Above forecast p90</option><option value="below">Below forecast p10</option></select></label>
+        <label class="full"><span>Analyst rationale</span><textarea name="rationale" rows="2" minlength="3" maxlength="4000" required placeholder="Explain the operational condition this boundary should test…"></textarea></label>
+        <label class="full"><span>Linked case <em>optional</em></span><select name="case_id">${caseOptions}</select></label>
+        <button class="button primary small" type="submit">Create review-only candidate</button>
+        <small>Creates an editable validation draft. No search runs and no alert is created.</small>
+      </form></details>` : '';
+    return `<article class="forecast-experiment ${escapeHtml(decision)} ${run.is_baseline ? 'baseline' : ''}">
+      <header><div><span>${escapeHtml(run.is_baseline ? 'ACCEPTED BASELINE' : 'RETAINED RUN')} · ${escapeHtml(created)}</span><h4>${escapeHtml(run.title)}</h4></div><b>${escapeHtml(run.is_baseline ? 'baseline' : decision.replaceAll('-', ' '))}</b></header>
+      <div class="forecast-experiment-metrics"><span><b>${mase}</b>MASE</span><span><b>${Math.round(Number(series.imputation_ratio || 0) * 100)}%</b>imputed</span><span><b>${escapeHtml(forecastIntervalLabel(source.interval_seconds))}</b>span</span><span><b>${escapeHtml(source.earliest_time || 'unknown')}</b>window</span></div>
+      <p>${escapeHtml((comparison.reasons || ['No comparison detail recorded.']).join(' '))}</p>
+      ${comparison.baseline_run_id ? `<dl class="forecast-drift"><div><dt>Series mean</dt><dd>${escapeHtml(forecastDriftMetric(metrics.series_mean_change_percent))}</dd></div><div><dt>Forecast center</dt><dd>${escapeHtml(forecastDriftMetric(metrics.forecast_center_change_percent))}</dd></div><div><dt>MASE delta</dt><dd>${escapeHtml(forecastDriftMetric(metrics.mase_delta, ''))}</dd></div><div><dt>Imputation delta</dt><dd>${escapeHtml(forecastDriftMetric(Number(metrics.imputation_delta_points || 0) * 100, ' pts'))}</dd></div></dl>` : ''}
+      <details><summary>Exact retained contract</summary><dl><div><dt>Run fingerprint</dt><dd><code>${escapeHtml(run.run_fingerprint)}</code></dd></div><div><dt>Series key</dt><dd><code>${escapeHtml(run.series_key)}</code></dd></div><div><dt>Model revision</dt><dd><code>${escapeHtml(run.runtime?.source_revision || 'not attested')}</code></dd></div><div><dt>Source rows</dt><dd>${Number(series.source_rows || 0).toLocaleString()} counted · not retained</dd></div></dl></details>
+      <footer><button class="button ghost small" type="button" data-rerun-time-series="${escapeHtml(run.id)}">Load exact contract</button></footer>
+      ${baselineAction}${candidateAction}
+    </article>`;
+  }).join('');
+  const candidateCards = candidates.length ? `<section class="forecast-candidate-history"><header><span>ALERT VALIDATION HANDOFFS</span><h4>Review-only candidates</h4></header>${candidates.map(item => `<article><div><b>${escapeHtml(item.title)}</b><span>${escapeHtml(item.status.replaceAll('-', ' '))}</span></div><p>${escapeHtml(`${item.direction} ${Number(item.threshold).toLocaleString()} · ${item.threshold_source}`)}</p><details><summary>Proposed read-only SPL</summary><code>${escapeHtml(item.proposed_spl)}</code></details><button class="button ghost small" type="button" data-open-forecast-validation="${escapeHtml(item.validation_task_id)}">Open validation draft</button></article>`).join('')}</section>` : '';
+  panel.innerHTML = `<div class="forecast-experiment-list">${runCards}</div>${candidateCards}`;
+  panel.querySelectorAll('[data-rerun-time-series]').forEach(button => button.addEventListener('click', loadRetainedTimeSeriesContract));
+  panel.querySelectorAll('[data-time-series-baseline-form]').forEach(form => form.addEventListener('submit', acceptTimeSeriesBaseline));
+  panel.querySelectorAll('[data-time-series-candidate-form]').forEach(form => form.addEventListener('submit', createTimeSeriesAlertCandidate));
+  panel.querySelectorAll('[data-open-forecast-validation]').forEach(button => button.addEventListener('click', openForecastValidationDraft));
+  applyAccessPermissions();
+}
+
+function loadRetainedTimeSeriesContract(event) {
+  const id = event.currentTarget.dataset.rerunTimeSeries;
+  const run = (state.timeSeriesExperiments?.runs || []).find(item => item.id === id);
+  if (!run) return;
+  const request = run.request || {};
+  $('#forecastTitle').value = request.title || run.title || 'Splunk event-rate forecast';
+  $('#forecastSpl').value = request.spl || '';
+  const selectValue = (selector, value, label) => {
+    const select = $(selector); if (!select) return;
+    if (![...select.options].some(option => option.value === String(value))) {
+      select.add(new Option(label, String(value)));
+    }
+    select.value = String(value);
+  };
+  selectValue('#forecastEarliest', request.earliest_time || '-7d', request.earliest_time || '-7d');
+  selectValue('#forecastInterval', request.interval_seconds || 300, forecastIntervalLabel(request.interval_seconds || 300));
+  $('#forecastTimestampField').value = request.timestamp_field || '_time';
+  $('#forecastValueField').value = request.value_field || 'value';
+  $('#forecastHorizon').value = request.horizon || 24;
+  $('#forecastBacktest').value = request.backtest_points || 24;
+  $('#forecastRows').value = request.row_limit || 2048;
+  $('#timeSeriesForecastForm').scrollIntoView({behavior:'smooth', block:'start'});
+  toast('Exact retained contract loaded; running it remains an explicit action');
+}
+
+async function acceptTimeSeriesBaseline(event) {
+  event.preventDefault();
+  const form = event.currentTarget; const button = form.querySelector('button[type="submit"]');
+  button.disabled = true; button.textContent = 'Accepting exact run…';
+  try {
+    await api(`/api/model-capabilities/time-series/experiments/${encodeURIComponent(form.dataset.timeSeriesBaselineForm)}/baseline`, {
+      method:'POST',
+      body:JSON.stringify({
+        expected_run_fingerprint:form.dataset.runFingerprint,
+        review_note:new FormData(form).get('review_note')
+      })
+    });
+    await loadTimeSeriesExperiments();
+    toast('Reviewed forecast baseline accepted');
+  } catch (error) {
+    button.disabled = false; button.textContent = 'Accept exact run'; toast(error.message);
+  }
+}
+
+async function createTimeSeriesAlertCandidate(event) {
+  event.preventDefault();
+  const form = event.currentTarget; const button = form.querySelector('button[type="submit"]');
+  const values = new FormData(form);
+  button.disabled = true; button.textContent = 'Staging validation draft…';
+  try {
+    const result = await api(`/api/model-capabilities/time-series/experiments/${encodeURIComponent(form.dataset.timeSeriesCandidateForm)}/alert-candidates`, {
+      method:'POST',
+      body:JSON.stringify({
+        expected_run_fingerprint:form.dataset.runFingerprint,
+        title:values.get('title'),
+        rationale:values.get('rationale'),
+        direction:values.get('direction'),
+        case_id:values.get('case_id') || null
+      })
+    });
+    state.validations = [result.validation, ...state.validations.filter(item => item.id !== result.validation.id)];
+    renderValidations();
+    await loadTimeSeriesExperiments();
+    toast(result.reused ? 'Existing validation draft reopened; nothing executed' : 'Alert candidate staged as an editable validation draft; nothing executed');
+  } catch (error) {
+    button.disabled = false; button.textContent = 'Create review-only candidate'; toast(error.message);
+  }
+}
+
+async function openForecastValidationDraft(event) {
+  const taskId = event.currentTarget.dataset.openForecastValidation;
+  closeDetail();
+  await loadValidations();
+  setView('discovery');
+  const card = document.querySelector(`[data-validation-id="${CSS.escape(taskId)}"]`);
+  if (card) card.scrollIntoView({behavior:'smooth', block:'center'});
+}
+
 function chartPath(values, x0, x1, y0, y1, minimum, maximum) {
   if (!values?.length) return '';
   const span = maximum - minimum || 1;
@@ -1256,8 +1421,9 @@ function forecastChart(result) {
 
 function renderTimeSeriesResult(result) {
   const output = $('#timeSeriesOutput'); const gate = result.promotion_gate || {};
+  const experiment = result.experiment || {}; const comparison = experiment.comparison || {};
   if (result.status === 'blocked-data-quality') {
-    output.innerHTML = `<article class="forecast-result hold"><header><div><span>DATA-QUALITY GATE</span><h4>Forecast stopped before inference</h4></div><b>Blocked</b></header><p>${escapeHtml(gate.reasons?.[0] || 'Source quality did not pass.')}</p><div class="forecast-metrics"><span><b>${Math.round(Number(result.series.imputation_ratio || 0) * 100)}%</b>imputed</span><span><b>${Number(result.series.expected_points || 0).toLocaleString()}</b>prepared points</span><span><b>0</b>forecast calls</span></div></article>`;
+    output.innerHTML = `<article class="forecast-result hold"><header><div><span>DATA-QUALITY GATE</span><h4>Forecast stopped before inference</h4></div><b>Blocked</b></header><p>${escapeHtml(gate.reasons?.[0] || 'Source quality did not pass.')}</p><div class="forecast-metrics"><span><b>${Math.round(Number(result.series.imputation_ratio || 0) * 100)}%</b>imputed</span><span><b>${Number(result.series.expected_points || 0).toLocaleString()}</b>prepared points</span><span><b>0</b>forecast calls</span></div>${experiment.run_fingerprint ? `<div class="forecast-retained"><b>Retained for quality comparison</b><span>Run <code>${escapeHtml(shortDigest(experiment.run_fingerprint))}</code> · no source rows stored</span></div>` : ''}</article>`;
     return;
   }
   const backtest = result.backtest || {}; const ready = Boolean(gate.ready);
@@ -1267,6 +1433,7 @@ function renderTimeSeriesResult(result) {
     <p>${escapeHtml((gate.reasons || []).join(' '))}</p>
     <div class="forecast-metrics"><span><b>${mase}</b>MASE vs naive</span><span><b>${Math.round(Number(result.series.imputation_ratio || 0) * 100)}%</b>imputed</span><span><b>${Number(result.series.expected_points || 0).toLocaleString()}</b>context points</span><span><b>${Number(result.forecast?.horizon || 0)}</b>forecast points</span></div>
     ${forecastChart(result)}
+    ${experiment.run_fingerprint ? `<div class="forecast-retained ${escapeHtml(comparison.decision || 'no-baseline')}"><b>Immutable experiment retained · ${escapeHtml((comparison.decision || 'no-baseline').replaceAll('-', ' '))}</b><span>${escapeHtml((comparison.reasons || []).join(' '))}</span><code>${escapeHtml(shortDigest(experiment.run_fingerprint))}</code></div>` : ''}
     <details><summary>Exact provenance and boundary</summary><dl><div><dt>Query fingerprint</dt><dd><code>${escapeHtml(result.source.query_fingerprint)}</code></dd></div><div><dt>Series SHA-256</dt><dd><code>${escapeHtml(result.series_sha256)}</code></dd></div><div><dt>Model revision</dt><dd><code>${escapeHtml(result.runtime.source_revision || 'not attested')}</code></dd></div><div><dt>Runtime</dt><dd>${escapeHtml(`${result.runtime.network_scope || 'local'} · ${result.runtime.backend || 'backend not reported'}`)}</dd></div></dl></details>
     <footer><button class="button ghost small" type="button" data-time-series-case>Preserve review to case</button><button class="button ghost small" type="button" data-time-series-investigate>Investigate the operational meaning</button></footer>
   </article>`;
@@ -1293,6 +1460,7 @@ async function runTimeSeriesForecast(event) {
       backtest_points:Number($('#forecastBacktest').value)
     }, event => updateOperation(progress, event));
     renderTimeSeriesResult(state.timeSeriesResult);
+    await loadTimeSeriesExperiments();
   } catch (error) {
     state.timeSeriesResult = null;
     $('#timeSeriesOutput').innerHTML = `<div class="code-screen-error"><b>Forecast stopped</b><span>${escapeHtml(error.message)}</span></div>`;

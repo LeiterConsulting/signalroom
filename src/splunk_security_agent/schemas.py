@@ -69,9 +69,7 @@ class AppSettings(BaseModel):
     allow_write_tools: bool = False
     max_agent_steps: int = 4
     demo_mode: bool = False
-    time_series_runtime: TimeSeriesRuntimeSettings = Field(
-        default_factory=TimeSeriesRuntimeSettings
-    )
+    time_series_runtime: TimeSeriesRuntimeSettings = Field(default_factory=TimeSeriesRuntimeSettings)
     detection_repository: DetectionRepositorySettings = Field(default_factory=DetectionRepositorySettings)
 
 
@@ -100,6 +98,27 @@ class TimeSeriesForecastRequest(BaseModel):
     interval_seconds: int = Field(default=300, ge=60, le=86400)
     horizon: int = Field(default=24, ge=1, le=128)
     backtest_points: int = Field(default=24, ge=8, le=128)
+
+
+class TimeSeriesBaselineAcceptRequest(BaseModel):
+    expected_run_fingerprint: str = Field(
+        min_length=64,
+        max_length=64,
+        pattern=r"^[0-9a-f]{64}$",
+    )
+    review_note: str = Field(min_length=3, max_length=4000)
+
+
+class TimeSeriesAlertCandidateCreate(BaseModel):
+    expected_run_fingerprint: str = Field(
+        min_length=64,
+        max_length=64,
+        pattern=r"^[0-9a-f]{64}$",
+    )
+    title: str = Field(min_length=1, max_length=240)
+    rationale: str = Field(min_length=3, max_length=4000)
+    direction: Literal["above", "below"] = "above"
+    case_id: str | None = Field(default=None, max_length=120)
 
 
 AccessRole = Literal["viewer", "analyst", "admin"]
@@ -520,9 +539,7 @@ class AuditExportPolicyUpdate(BaseModel):
 
 class AuditOperationsPolicyUpdate(BaseModel):
     retention_days: int = Field(default=365, ge=30, le=3650)
-    deduplication_mode: Literal["stable-event-id", "preserve-retries"] = (
-        "stable-event-id"
-    )
+    deduplication_mode: Literal["stable-event-id", "preserve-retries"] = "stable-event-id"
     expected_export_lag_minutes: int = Field(default=15, ge=5, le=1440)
     source_silence_minutes: int = Field(default=60, ge=15, le=10080)
     denied_request_threshold: int = Field(default=5, ge=1, le=1000)
