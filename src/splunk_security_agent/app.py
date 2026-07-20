@@ -128,6 +128,7 @@ from .schemas import (
     QueryIntelligenceRequest,
     SettingsUpdate,
     SplunkConnection,
+    TenantIsolationPlanRequest,
     TimeSeriesAlertCandidateCreate,
     TimeSeriesBaselineAcceptRequest,
     TimeSeriesForecastExecutionRequest,
@@ -147,6 +148,7 @@ from .splunk import (
     SplunkMCPClient,
 )
 from .splunk_models import SplunkModelInventoryService
+from .tenancy import TenantIsolationPlanner, TenantIsolationStore
 from .validation import QueryIntelligenceService, ValidationService, ValidationStore
 from .workload import (
     SplunkWorkloadService,
@@ -166,6 +168,8 @@ class Services:
     def __init__(self):
         self.config = ConfigStore(DATA)
         self.connection_registry = ConnectionRegistryStore(DATA / "connection_registry.db")
+        self.tenant_isolation_store = TenantIsolationStore(DATA / "tenant_isolation.db")
+        self.tenant_isolation = TenantIsolationPlanner(DATA, self.tenant_isolation_store)
         initial_settings = self.config.load()
         self._connection_binding = self.connection_registry.sync_primary(
             initial_settings.splunk,
@@ -730,6 +734,13 @@ def _allowed_connection_ids() -> set[str] | None:
     return set(principal.get("connection_ids") or [])
 
 
+def _admin_actor(request: Request) -> str:
+    principal = getattr(request.state, "principal", {}) or {}
+    if principal.get("role") != "admin":
+        raise HTTPException(403, "Admin access is required for tenant isolation planning.")
+    return str(principal.get("username") or "local-operator")
+
+
 def _scoped_model(value: Any, scope: dict[str, Any]) -> Any:
     return value.model_copy(
         update={
@@ -1119,6 +1130,52 @@ async def get_connections(request: Request) -> dict[str, Any]:
         allowed,
         include_all_managed=principal.get("role") == "admin",
     )
+
+
+@app.get("/api/tenant-isolation")
+async def tenant_isolation_overview(request: Request) -> dict[str, Any]:
+    _admin_actor(request)
+    result = services.tenant_isolation.overview()
+    result["available_targets"] = services.connection_overview(
+        None, include_all_managed=True
+    ).get("execution_scopes", [])
+    return result
+
+
+@app.post("/api/tenant-isolation/plans", status_code=201)
+async def create_tenant_isolation_plan(
+    value: TenantIsolationPlanRequest,
+    request: Request,
+) -> dict[str, Any]:
+    actor = _admin_actor(request)
+    scope = _request_scope(
+        value.connection_alias,
+        value.connection_fingerprint,
+        value.tenant_scope_id,
+    )
+    try:
+        result = services.tenant_isolation.create_plan(scope, actor)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    services.audit.record(
+        "tenant.isolation.plan.created",
+        "plan",
+        target_type="tenant-scope",
+        target_id=scope["tenant_scope_id"],
+        summary=(
+            "Created a content-free physical-isolation readiness plan; no tenant data moved."
+        ),
+        metadata={
+            "plan_id": result["plan_id"],
+            "connection_alias": scope["alias"],
+            "connection_fingerprint": scope["fingerprint"],
+            "blocker_count": result["blocker_count"],
+            "records_attributed": result["records_attributed"],
+            "migration_executable": False,
+        },
+        actor=actor,
+    )
+    return result
 
 
 @app.post("/api/connections/splunk", status_code=201)

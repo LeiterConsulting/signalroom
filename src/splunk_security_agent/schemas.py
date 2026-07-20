@@ -557,6 +557,10 @@ class DiscoveryComparisonRequest(BaseModel):
     right: ConnectionScopeReference
 
 
+class TenantIsolationPlanRequest(ConnectionScopeReference):
+    pass
+
+
 DiscoveryJobStatus = Literal[
     "queued",
     "running",

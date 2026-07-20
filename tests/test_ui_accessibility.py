@@ -181,6 +181,19 @@ def test_durable_analytics_expose_explicit_splunk_targets_and_provenance() -> No
     assert ".forecast-schedule-binding" in STYLES_CSS
 
 
+def test_tenant_isolation_is_readiness_only_and_keyboard_accessible() -> None:
+    assert 'id="tenantIsolationTarget"' in INDEX_HTML
+    assert 'id="buildTenantIsolationPlan"' in INDEX_HTML
+    assert "Planning reads schemas, counts, and filenames only" in INDEX_HTML
+    assert "No unsafe isolation toggle" in INDEX_HTML
+    assert "function renderTenantIsolationPlan(plan)" in APP_JS
+    assert "async function buildTenantIsolationPlan()" in APP_JS
+    assert "READINESS ONLY · NO DATA MOVED" in APP_JS
+    assert "migration authority can exist" in APP_JS
+    assert ".tenant-isolation-controls select:focus-visible" in STYLES_CSS
+    assert ".tenant-isolation-controls button:focus-visible" in STYLES_CSS
+
+
 def test_discovery_comparison_is_explicit_source_preserving_and_accessible() -> None:
     assert 'id="estateComparisonForm"' in INDEX_HTML
     assert 'aria-label="Left Splunk comparison source"' in INDEX_HTML

@@ -31,6 +31,7 @@ ADMIN_MUTATION_PREFIXES = (
     "/api/audit-export/",
     "/api/audit-operations/",
     "/api/connections/",
+    "/api/tenant-isolation/",
 )
 ADMIN_MUTATION_PATHS = {
     "/api/auth/disable",

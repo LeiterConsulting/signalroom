@@ -10,6 +10,7 @@ This is a focused reimplementation inspired by [LeiterConsulting/splunk-discover
 - Splunk MCP tool discovery and alias resolution for common server naming differences
 - Immutable Splunk connection revisions and tenant-scoped durable workflow bindings that fail closed before a call when any target moves
 - An explicit Splunk-scope selector with tenant-gated artifacts, hybrid RAG, discovery state, investigation memory, cases, exports, and SignalRoom MCP tools
+- Admin-only, content-free physical-isolation readiness plans that bind an exact Splunk revision, inventory tenant row/file counts, and expose every blocking store without moving data or changing routing
 - Layered Splunk MCP diagnostics across configuration, DNS, TCP, TLS identity, authentication, and depth-specific tool contracts
 - Parallel read-only quick, standard, and deep discovery with change detection, JSON blueprints, and briefs
 - First-class security discovery across telemetry freshness, detection health, data-model readiness, and reusable RAG knowledge
@@ -150,6 +151,13 @@ snapshot digest, run ID, connection revision, and tenant scope to each side; rep
 counts only as arithmetic; and never labels a difference as improvement or regression. Opening,
 investigating, or preserving a review item first enters that source's authorized scope. A case item
 receives only that side's observations so cross-tenant facts are not copied into a blended record.
+
+For deployments evaluating stronger data boundaries, **Setup → Physical tenant isolation readiness**
+builds a review-only plan for an admitted tenant and immutable Splunk revision. The planner reads SQLite
+schema, row counts, and artifact filenames only. It does not read evidence payload content, copy data,
+create a tenant database, or change runtime routing. Its blockers identify stores that still need a direct
+tenant key, verified parent relationship, or filesystem router. This is a migration engineering gate—not
+an isolation switch—and the shared source files remain authoritative.
 
 The client discovers available tools and resolves common aliases such as `splunk_run_query` / `run_splunk_query`, `splunk_get_indexes` / `get_indexes`, and related SAIA SPL helpers.
 

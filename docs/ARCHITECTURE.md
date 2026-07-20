@@ -429,11 +429,23 @@ there is deliberately no remote recovery route.
 
 ## Next production increments
 
-1. Optional per-tenant data-plane isolation for higher-assurance deployments
-2. OIDC group-to-alias assignment policy and credential backup/restore controls
-3. Time-aligned durable multi-estate review packets without cross-tenant fact copying
-4. Read-only deployment reconciliation for the audit operations pack when the Splunk MCP contract exposes the
+1. Add a tenant-aware store registry plus staged copy, digest verification, rollback, and explicit cutover for
+   evidence, cases, and manual discovery; the readiness planner is implemented and activation remains unavailable
+2. Add durable direct tenant ownership to validation, detection, forecast-experiment, delivery, and assurance-policy
+   roots before expanding physical migration coverage
+3. Add OIDC group-to-alias assignment policy and encrypted credential backup/restore controls
+4. Add time-aligned durable multi-estate review packets without cross-tenant fact copying
+5. Add read-only deployment reconciliation for the audit operations pack when the Splunk MCP contract exposes the
    required index and knowledge-object configuration fields
+
+### Physical isolation begins with a non-mutating plan
+
+`TenantIsolationPlanner` maintains a declared inventory of tenant-owned databases and artifact roots.
+It opens SQLite sources read-only and inspects table existence, columns, and counts; filesystem inspection
+uses filenames only. An admin binds planning to an admitted alias, tenant scope, and immutable connection
+fingerprint. The resulting plan identifies direct, inherited, missing, and filesystem scope contracts and
+is recorded in the shared audit authority. It cannot execute migration or change runtime routing. This
+prevents an incomplete toggle from falsely claiming isolation while unscoped durable records still exist.
 
 ### Durable work is bound to an immutable connection revision
 

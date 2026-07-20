@@ -24,6 +24,27 @@ tools. Every result retains the alias, immutable connection fingerprint, and ten
 produced it. This is shared-database row filtering, not a claim of separate tenant databases or
 complete multi-tenant isolation.
 
+## Physical-isolation readiness contract
+
+Administrators can create a content-free readiness plan in Setup for any admitted tenant and exact
+connection revision. The plan inventories schemas, root-row counts, and filenames. It never reads a
+payload column, moves a database row or file, creates runtime routing, or grants migration authority.
+The resulting deterministic plan ID changes when the observed topology or counts change and is retained
+in the global control plane with its actor and audit event.
+
+The current component map distinguishes four states:
+
+- **Copy contract ready:** the root record has a direct tenant key and dependent records can follow a defined parent.
+- **Relationship map required:** some children or singleton policy records need explicit ownership before copying.
+- **Direct tenant key required:** application logic currently infers scope, but the durable root record cannot prove it.
+- **Filesystem router required:** scope-aware names or reads exist, but files still share an artifact root.
+
+Authentication, encrypted secrets, connection identity, the tamper-evident audit authority, model trust,
+and global workload/outbound policy deliberately remain shared control-plane services. A future migration
+must recheck the immutable connection binding, quiesce writers, copy into a contained tenant root, verify
+digests, and retain a rollback path before an explicit cutover can exist. Until then, shared source files
+remain authoritative and the interface exposes no activation toggle.
+
 Administrators can add live Splunk aliases such as `production-us`, `production-eu`, or `security-lab`
 in Settings. Each alias has its own encrypted MCP token, tenant scope, endpoint/TLS identity, diagnostic
 state, and enable/disable lifecycle. A new or changed revision is disabled. It enters the application
@@ -104,9 +125,9 @@ preservation copies only the selected source's measures and findings, plus its c
 snapshot identifiers. It deliberately does not copy the other estate's facts into a tenant-scoped
 case item.
 
-OIDC group-to-alias mapping beyond the current Primary grant, backup and migration tooling for
-connection credentials, optional per-tenant data-plane isolation, and time-aligned durable
-multi-estate review packets remain future work.
+Tenant-aware store routing and staged copy/digest/rollback remain future work after the readiness planner.
+OIDC group-to-alias mapping beyond the current Primary grant, backup and migration tooling for connection
+credentials, and time-aligned durable multi-estate review packets also remain future work.
 
 ## Why additional MCP connections belong in SignalRoom
 

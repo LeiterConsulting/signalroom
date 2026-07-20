@@ -1,6 +1,6 @@
 const state = {
   settings: null, artifacts: [], modelReadiness: null, conversationId: null, busy: false,
-  connections: null, activeScope: null,
+  connections: null, activeScope: null, tenantIsolation: null,
   ledger: [], lastDiscovery: null, estateComparison: null, promptPath: [], contextKind: 'all', cases: [],
   activeCase: null, caseCockpit: null, pendingCaseItem: null, detailActions: [], contextPage: 1, contextPageSize: 9,
   contextItems: [], editingArtifactId: null, editingCaseItemId: null, demoTourStep: -1,
@@ -741,6 +741,7 @@ function hydrateSettings() {
 async function loadSettings() {
   state.settings = await api('/api/settings'); hydrateSettings();
   await loadConnections();
+  await loadTenantIsolation();
   if (!state.settings.configured) $('#settingsModal').hidden = false;
   else if (state.settings.demo_mode && !localStorage.getItem('signalroom-demo-tour-complete')) {
     setTimeout(startDemoTour, 250);
@@ -897,6 +898,101 @@ function renderConnections() {
   $('#futureMcpGrid').innerHTML = (catalog.suggestions || []).map(item => `<article><header><span>${escapeHtml(item.priority || 'later')}</span><b>${escapeHtml(item.label)}</b></header><p>${escapeHtml(item.purpose)}</p><dl><dt>Expected value</dt><dd>${escapeHtml(item.expected_value)}</dd><dt>Authority boundary</dt><dd>${escapeHtml(item.authority)}</dd></dl></article>`).join('');
   $('#futureMcpAdmission').innerHTML = `<b>Admission contract before any connector is enabled</b><ul>${(catalog.admission_requirements || []).map(item => `<li>${escapeHtml(item)}</li>`).join('')}</ul><small>Tenant scope now gates evidence, cases, discovery history, and investigation retrieval. Separate per-tenant database files remain a future hard-isolation option.</small>`;
   renderEstateComparisonControls();
+  renderTenantIsolation();
+}
+
+async function loadTenantIsolation() {
+  if (!state.auth?.permissions?.can_administer) {
+    state.tenantIsolation = null;
+    renderTenantIsolation();
+    return;
+  }
+  try {
+    state.tenantIsolation = await api('/api/tenant-isolation');
+  } catch (error) {
+    state.tenantIsolation = { error:error.message, available_targets:executionScopes(), latest_plans:[] };
+  }
+  renderTenantIsolation();
+}
+
+function tenantIsolationStatus(value = '') {
+  const labels = {
+    'copy-contract-ready':'Copy contract ready',
+    'relationship-map-required':'Relationship map required',
+    'scope-key-required':'Direct tenant key required',
+    'filesystem-router-required':'Filesystem router required'
+  };
+  return labels[value] || 'Readiness unknown';
+}
+
+function renderTenantIsolationPlan(plan) {
+  if (!plan) return '<div class="empty-inline compact-empty">No isolation readiness plan has been created. The current shared files remain authoritative.</div>';
+  const components = plan.components || [];
+  const blockers = plan.blockers || [];
+  return `<article class="tenant-isolation-plan">
+    <header><div><span>READINESS ONLY · NO DATA MOVED</span><h5>${escapeHtml(plan.tenant_scope_id)}</h5><p>${escapeHtml(plan.connection_alias)} · immutable revision <code>${escapeHtml(shortFingerprint(plan.connection_fingerprint))}</code></p></div><b>${blockers.length} blocker${blockers.length === 1 ? '' : 's'}</b></header>
+    <div class="tenant-isolation-metrics"><span><b>${Number(plan.records_attributed || 0)}</b>Rows/files attributed</span><span><b>${Number(plan.unbound_records || 0)}</b>Unbound rows</span><span><b>${components.length}</b>Tenant components</span><span><b>${escapeHtml(String(plan.plan_id || '').slice(0, 12))}</b>Deterministic plan</span></div>
+    <div class="tenant-component-list">${components.map(item => {
+      const ready = item.readiness === 'copy-contract-ready';
+      return `<article class="tenant-component ${ready ? 'ready' : 'blocked'}"><header><div><b>${escapeHtml(item.label)}</b><small>${escapeHtml(item.kind)} · ${escapeHtml(item.source)}</small></div><span>${escapeHtml(tenantIsolationStatus(item.readiness))}</span></header><p>${escapeHtml(item.detail || '')}</p><footer><span>${Number(item.scope_records || 0)} attributed</span><span>${Number(item.other_scope_records || 0)} other-scope</span><span>${Number(item.unbound_records || 0)} unbound</span><code>phase ${Number(item.sequence || 0)}</code></footer></article>`;
+    }).join('')}</div>
+    ${blockers.length ? `<details class="tenant-isolation-blockers" open><summary>${blockers.length} prerequisite${blockers.length === 1 ? '' : 's'} before migration authority can exist</summary><ul>${blockers.map(item => `<li><b>${escapeHtml(item.label)}</b><span>${escapeHtml(item.reason)}</span></li>`).join('')}</ul></details>` : '<div class="tenant-isolation-ready"><b>Schema prerequisites are satisfied.</b><span>Copy, digest, rollback, and worker-quiescence tests are still required before activation can exist.</span></div>'}
+    <details class="tenant-safety-contract"><summary>Review the fail-closed migration contract</summary><ol>${(plan.safety_contract || []).map(item => `<li>${escapeHtml(item)}</li>`).join('')}</ol><p><b>Next engineering step:</b> ${escapeHtml(plan.next_step || '')}</p></details>
+  </article>`;
+}
+
+function renderTenantIsolation() {
+  const target = $('#tenantIsolationTarget');
+  const summary = $('#tenantIsolationSummary');
+  const controlPlane = $('#tenantControlPlane');
+  if (!target || !summary || !controlPlane) return;
+  const canAdmin = Boolean(state.auth?.permissions?.can_administer);
+  const value = state.tenantIsolation;
+  const mode = $('#tenantIsolationMode');
+  const button = $('#buildTenantIsolationPlan');
+  if (!canAdmin) {
+    mode.textContent = 'Administrator review';
+    target.innerHTML = '<option>Admin access required</option>';
+    target.disabled = true;
+    button.disabled = true;
+    summary.innerHTML = '<div class="empty-inline compact-empty">An administrator can build a content-free tenant isolation readiness plan. No evidence payload is exposed by the plan.</div>';
+    controlPlane.innerHTML = '<p>Authentication, connection identity, encrypted secrets, audit integrity, and model governance remain in the shared control plane.</p>';
+    return;
+  }
+  const scopes = value?.available_targets || executionScopes();
+  const prior = target.value;
+  target.innerHTML = scopes.map(item => `<option value="${escapeHtml(scopeKey(item))}">${escapeHtml(scopeLabel(item))} · revision ${escapeHtml(shortFingerprint(item.fingerprint))}</option>`).join('');
+  if (scopes.some(item => scopeKey(item) === prior)) target.value = prior;
+  target.disabled = !scopes.length;
+  button.disabled = !scopes.length;
+  mode.textContent = value?.runtime?.mode === 'shared-row-filtered' ? 'Shared row filtering' : 'Readiness unavailable';
+  if (value?.error) {
+    summary.innerHTML = `<div class="empty-inline compact-empty error">Isolation readiness could not be loaded: ${escapeHtml(value.error)}</div>`;
+  } else {
+    summary.innerHTML = renderTenantIsolationPlan((value?.latest_plans || [])[0]);
+  }
+  controlPlane.innerHTML = `<p>These security and governance authorities stay global so cross-tenant policy and audit integrity remain reviewable:</p><ul>${(value?.global_control_plane || []).map(item => `<li>${escapeHtml(item)}</li>`).join('')}</ul>`;
+}
+
+async function buildTenantIsolationPlan() {
+  const button = $('#buildTenantIsolationPlan');
+  const original = button.textContent;
+  try {
+    const target = selectedScope('#tenantIsolationTarget');
+    button.disabled = true;
+    button.textContent = 'Inspecting schemas and counts…';
+    const plan = await api('/api/tenant-isolation/plans', {method:'POST', body:JSON.stringify(bindingPayload(target))});
+    const value = state.tenantIsolation || {};
+    state.tenantIsolation = {...value, latest_plans:[plan, ...(value.latest_plans || []).filter(item => item.plan_id !== plan.plan_id)]};
+    renderTenantIsolation();
+    $('#tenantIsolationSummary').scrollIntoView({behavior:'smooth', block:'nearest'});
+    toast(`Isolation readiness captured · ${plan.blocker_count} prerequisite${plan.blocker_count === 1 ? '' : 's'}`);
+  } catch (error) {
+    toast(error.message);
+  } finally {
+    button.disabled = false;
+    button.textContent = original;
+  }
 }
 
 function renderManagedSplunkConnections() {
@@ -5347,7 +5443,7 @@ document.addEventListener('click', async event => {
   }
   const change = event.target.closest('[data-change-investigate]');
   if (change) openInvestigation('discovery', `Explain and validate this change since the previous discovery: ${change.dataset.changeCategory} ${change.dataset.changeInvestigate}. Determine whether it is a real posture change or a collection issue.`, false);
-  if (event.target.closest('#openSettings,#configureModels,[data-open-settings]')) { $('#settingsModal').hidden = false; loadWorkload(); loadConnections(); }
+  if (event.target.closest('#openSettings,#configureModels,[data-open-settings]')) { $('#settingsModal').hidden = false; loadWorkload(); await loadConnections(); await loadTenantIsolation(); }
   if (event.target.closest('#closeSettings')) $('#settingsModal').hidden = true;
   if (event.target.closest('#addArtifact')) openArtifactEditor();
   if (event.target.closest('.close-artifact')) { $('#artifactModal').hidden = true; state.editingArtifactId = null; }
@@ -5556,6 +5652,7 @@ $('#contextNext').addEventListener('click', () => { state.contextPage += 1; rend
 $('#settingsForm').addEventListener('submit', saveSettings);
 $('#saveSplunkConnection').addEventListener('click', saveManagedSplunkConnection);
 $('#addSplunkConnection').addEventListener('click', () => openManagedSplunkForm());
+$('#buildTenantIsolationPlan').addEventListener('click', buildTenantIsolationPlan);
 $('#cancelSplunkConnection').addEventListener('click', () => { resetManagedSplunkForm(); $('#managedSplunkForm').hidden = true; });
 $('#managedSplunkVerifyTls').addEventListener('change', updateManagedSplunkTlsControls);
 $('#connectionWorkflowBindings').addEventListener('click', event => {
