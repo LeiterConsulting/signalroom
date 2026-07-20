@@ -1,7 +1,7 @@
 const state = {
   settings: null, artifacts: [], modelReadiness: null, conversationId: null, busy: false,
   connections: null, activeScope: null,
-  ledger: [], lastDiscovery: null, promptPath: [], contextKind: 'all', cases: [],
+  ledger: [], lastDiscovery: null, estateComparison: null, promptPath: [], contextKind: 'all', cases: [],
   activeCase: null, caseCockpit: null, pendingCaseItem: null, detailActions: [], contextPage: 1, contextPageSize: 9,
   contextItems: [], editingArtifactId: null, editingCaseItemId: null, demoTourStep: -1,
   modelRecommendations: {}, validations: [], editingValidationId: null,
@@ -896,6 +896,7 @@ function renderConnections() {
   $('#futureMcpIntro').innerHTML = `<b>Why add another MCP?</b><p>${escapeHtml(catalog.mission || '')}</p><span>Additional Splunk is executable now · other connector types remain governed roadmap candidates</span>`;
   $('#futureMcpGrid').innerHTML = (catalog.suggestions || []).map(item => `<article><header><span>${escapeHtml(item.priority || 'later')}</span><b>${escapeHtml(item.label)}</b></header><p>${escapeHtml(item.purpose)}</p><dl><dt>Expected value</dt><dd>${escapeHtml(item.expected_value)}</dd><dt>Authority boundary</dt><dd>${escapeHtml(item.authority)}</dd></dl></article>`).join('');
   $('#futureMcpAdmission').innerHTML = `<b>Admission contract before any connector is enabled</b><ul>${(catalog.admission_requirements || []).map(item => `<li>${escapeHtml(item)}</li>`).join('')}</ul><small>Tenant scope now gates evidence, cases, discovery history, and investigation retrieval. Separate per-tenant database files remain a future hard-isolation option.</small>`;
+  renderEstateComparisonControls();
 }
 
 function renderManagedSplunkConnections() {
@@ -3882,6 +3883,117 @@ async function loadLatestDiscovery() {
   if (result?.run_id) renderDiscoveryResult(result);
 }
 
+function renderEstateComparisonControls() {
+  const left = $('#estateComparisonLeft'); const right = $('#estateComparisonRight');
+  if (!left || !right) return;
+  const scopes = executionScopes();
+  const leftKey = left.value || scopeKey(state.activeScope || scopes[0] || {});
+  const rightKey = right.value || scopeKey(scopes.find(item => scopeKey(item) !== leftKey) || scopes[1] || {});
+  const options = scopes.map(item => `<option value="${escapeHtml(scopeKey(item))}">${escapeHtml(scopeLabel(item))} · revision ${escapeHtml(shortFingerprint(item.fingerprint))}</option>`).join('');
+  left.innerHTML = options; right.innerHTML = options;
+  if (scopes.some(item => scopeKey(item) === leftKey)) left.value = leftKey;
+  else if (scopes[0]) left.value = scopeKey(scopes[0]);
+  const availableRight = scopes.find(item => scopeKey(item) === rightKey && scopeKey(item) !== left.value)
+    || scopes.find(item => scopeKey(item) !== left.value);
+  if (availableRight) right.value = scopeKey(availableRight);
+  const ready = scopes.length >= 2;
+  left.disabled = !ready; right.disabled = !ready;
+  $('#runEstateComparison').disabled = !ready;
+  $('#estateComparisonEmpty').hidden = ready || Boolean(state.estateComparison);
+  $('#estateComparisonStatus').textContent = ready ? `${scopes.length} authorized scopes` : 'Two scopes required';
+}
+
+function comparisonNumber(value, unit = 'count') {
+  if (value == null) return 'Not reported';
+  return unit === 'percent' ? `${Number(value).toLocaleString()}%` : Number(value).toLocaleString();
+}
+
+function comparisonSourceCard(source, findings, side) {
+  return `<section class="estate-source ${escapeHtml(side)}">
+    <header><span>${escapeHtml(side.toUpperCase())} SOURCE</span><b>${escapeHtml(source.display_name)}</b></header>
+    <p>${escapeHtml(source.tenant_scope_id)} · ${escapeHtml(source.depth)} discovery · ${escapeHtml(assuranceTime(source.generated_at))}</p>
+    <div class="scope-provenance"><span>${escapeHtml(source.connection_alias)}</span><code>${escapeHtml(shortFingerprint(source.connection_fingerprint))}</code><code>run ${escapeHtml(String(source.run_id).slice(0, 8))}</code></div>
+    <div class="estate-source-health ${source.collection_complete ? 'complete' : 'partial'}">${source.collection_complete ? 'Collection complete' : `${Number(source.failed_calls || 0)} collection gap(s)`} · snapshot <code>${escapeHtml(String(source.snapshot_sha256).slice(0, 12))}</code></div>
+    <div class="estate-source-findings"><b>${findings.length} attributed finding${findings.length === 1 ? '' : 's'}</b>${findings.slice(0,3).map(item => `<span><em>${escapeHtml(item.severity)}</em>${escapeHtml(item.title)}</span>`).join('') || '<span>No findings retained in this summary.</span>'}</div>
+    <footer><button class="button ghost small" type="button" data-open-comparison-source="${escapeHtml(side)}">Open this source</button><button class="button ghost small" type="button" data-investigate-comparison="${escapeHtml(side)}">Investigate from this scope</button><button class="button ghost small" type="button" data-preserve-comparison="${escapeHtml(side)}">Preserve source review</button></footer>
+  </section>`;
+}
+
+function renderEstateComparison(value) {
+  const holder = $('#estateComparisonResult'); if (!holder || !value?.comparison_id) return;
+  state.estateComparison = value;
+  const left = value.left || {}; const right = value.right || {};
+  const findings = value.findings || {left:[],right:[]};
+  const metrics = (value.metrics || []).map(item => {
+    const delta = item.delta_right_minus_left;
+    const deltaLabel = delta == null ? '—' : `${delta > 0 ? '+' : ''}${Number(delta).toLocaleString()}`;
+    return `<tr><th scope="row">${escapeHtml(item.label)}</th><td>${escapeHtml(comparisonNumber(item.left,item.unit))}</td><td>${escapeHtml(comparisonNumber(item.right,item.unit))}</td><td class="${delta === 0 ? 'same' : 'different'}">${escapeHtml(deltaLabel)}</td></tr>`;
+  }).join('');
+  const domains = (value.domains || []).map(item => `<tr><th scope="row">${escapeHtml(item.domain)}</th><td><span class="domain-status ${escapeHtml(item.left)}">${escapeHtml(item.left)}</span></td><td><span class="domain-status ${escapeHtml(item.right)}">${escapeHtml(item.right)}</span></td><td>${item.relation === 'same' ? 'Same observation' : 'Different observation'}</td></tr>`).join('');
+  const contrasts = (value.contrasts || []).filter(item => item.left_only_count || item.right_only_count || item.shared_count).map(item => `<article class="estate-contrast">
+    <header><b>${escapeHtml(item.label)}</b><span>${Number(item.shared_count || 0).toLocaleString()} shared labels</span></header>
+    <div><section><span>LEFT ONLY · ${Number(item.left_only_count || 0).toLocaleString()}</span><p>${(item.left_only || []).map(entry => `<code>${escapeHtml(entry)}</code>`).join('') || '<em>None reported</em>'}</p></section><section><span>RIGHT ONLY · ${Number(item.right_only_count || 0).toLocaleString()}</span><p>${(item.right_only || []).map(entry => `<code>${escapeHtml(entry)}</code>`).join('') || '<em>None reported</em>'}</p></section></div>
+    ${item.truncated ? '<small>Visible labels are bounded to 25 per side.</small>' : ''}
+  </article>`).join('');
+  holder.innerHTML = `<div class="estate-comparison-sources">${comparisonSourceCard(left,findings.left || [],'left')}${comparisonSourceCard(right,findings.right || [],'right')}</div>
+    <section class="estate-comparison-table"><header><div><span>BOUNDED METRICS</span><h4>Side-by-side observations</h4></div><small>Delta is right minus left—not a risk score</small></header><div class="table-scroll"><table><thead><tr><th>Observed measure</th><th>${escapeHtml(left.display_name)}</th><th>${escapeHtml(right.display_name)}</th><th>Right − left</th></tr></thead><tbody>${metrics}</tbody></table></div></section>
+    <section class="estate-comparison-table"><header><div><span>SECURITY DOMAINS</span><h4>Coverage observations by source</h4></div><small>“Gap” means validate collection—not proven absence</small></header><div class="table-scroll"><table><thead><tr><th>Domain</th><th>${escapeHtml(left.display_name)}</th><th>${escapeHtml(right.display_name)}</th><th>Relationship</th></tr></thead><tbody>${domains}</tbody></table></div></section>
+    <section class="estate-contrasts"><header><div><span>LABEL CONTRASTS</span><h4>What each retained catalog reports</h4></div><small>String identity only · no semantic equivalence inference</small></header>${contrasts || '<div class="empty-inline compact-empty">No comparable catalog labels were retained by these snapshots.</div>'}</section>
+    <aside class="estate-comparison-caveats"><b>Interpretation boundaries</b><ul>${(value.caveats || []).map(item => `<li>${escapeHtml(item)}</li>`).join('')}</ul><code>comparison ${escapeHtml(String(value.comparison_id).slice(0, 16))}</code></aside>`;
+  holder.hidden = false;
+  $('#estateComparisonEmpty').hidden = true;
+  $('#estateComparisonStatus').textContent = 'Source-preserving result ready';
+}
+
+async function runEstateComparison(event) {
+  event.preventDefault();
+  let left; let right;
+  try { left = selectedScope('#estateComparisonLeft'); right = selectedScope('#estateComparisonRight'); }
+  catch (error) { toast(error.message); return; }
+  if (scopeKey(left) === scopeKey(right)) { toast('Choose two different immutable Splunk scopes'); return; }
+  const button = $('#runEstateComparison'); const prior = button.textContent;
+  button.disabled = true; button.textContent = 'Reading retained snapshots…';
+  $('#estateComparisonStatus').textContent = 'Local comparison in progress';
+  try {
+    const result = await api('/api/discovery/comparison', {method:'POST',body:JSON.stringify({left:bindingPayload(left),right:bindingPayload(right)})});
+    renderEstateComparison(result); toast('Retained snapshots compared · zero new Splunk queries');
+  } catch (error) {
+    $('#estateComparisonStatus').textContent = 'Comparison needs attention';
+    toast(error.message);
+  } finally { button.disabled = executionScopes().length < 2; button.textContent = prior; }
+}
+
+function comparisonReviewPrompt(value, side) {
+  const source = value?.[side] || {}; const otherSide = side === 'left' ? 'right' : 'left'; const other = value?.[otherSide] || {};
+  const metricLines = (value?.metrics || []).slice(0,12).map(item => `${item.label}: selected ${comparisonNumber(item[side],item.unit)}; other retained snapshot ${comparisonNumber(item[otherSide],item.unit)}.`).join('\n');
+  const contrastLines = (value?.contrasts || []).filter(item => item.left_only_count || item.right_only_count).map(item => `${item.label}: selected-only ${item[`${side}_only_count`]}; other-only ${item[`${otherSide}_only_count`]}; shared ${item.shared_count}.`).join('\n');
+  return `Review this source-preserving Splunk estate comparison from the selected ${source.display_name} scope. Treat ${source.connection_alias} / ${source.tenant_scope_id} / revision ${source.connection_fingerprint} as the only live tool authority. The other estate (${other.display_name}, ${other.tenant_scope_id}, revision ${other.connection_fingerprint}) is retained comparison context only: do not query it from this scope and do not blend the estates into a global conclusion. Explain the most material differences as hypotheses, name collection-depth caveats, and propose one bounded validation for the selected estate.\n\nComparison ${value.comparison_id}\n${metricLines}\n${contrastLines}`;
+}
+
+async function useEstateComparisonSource(side, action) {
+  const value = state.estateComparison; const source = value?.[side]; if (!source) return;
+  const target = normalizedBinding(source);
+  await switchScope(scopeKey(target));
+  if (action === 'open') {
+    setView('discovery'); $('#discoveryMetrics').scrollIntoView({behavior:'smooth',block:'start'});
+    toast(`Opened ${source.display_name} discovery scope`);
+  } else if (action === 'investigate') {
+    openInvestigation('discovery', comparisonReviewPrompt(value, side), false);
+  } else if (action === 'preserve') {
+    const sideMetrics = (value.metrics || []).map(item => `${item.label}: ${comparisonNumber(item[side],item.unit)}`).join('\n');
+    const sideFindings = (value.findings?.[side] || []).map(item => `[${item.severity}] ${item.title}: ${item.evidence}`).join('\n');
+    openCasePicker({
+      kind:'observation',
+      title:`Estate comparison review · ${source.display_name}`,
+      content:`Source-only review item from comparison ${value.comparison_id}.\nSplunk alias: ${source.connection_alias}\nTenant scope: ${source.tenant_scope_id}\nConnection revision: ${source.connection_fingerprint}\nDiscovery run: ${source.run_id}\nSnapshot SHA-256: ${source.snapshot_sha256}\n\nObserved measures\n${sideMetrics}\n\nSource-attributed findings\n${sideFindings || 'No findings retained.'}\n\nThe other estate's facts are intentionally not copied into this tenant-scoped case item.`,
+      source:'SignalRoom · retained discovery comparison',
+      confidence:'medium',
+      status:'needs-validation',
+      metadata:{comparison_id:value.comparison_id,snapshot_sha256:source.snapshot_sha256,source_side:side,network_queries:0,model_inference:false}
+    });
+  }
+}
+
 function validationContract(task) {
   return `${task.earliest_time} → ${task.latest_time} · maximum ${Number(task.row_limit).toLocaleString()} rows`;
 }
@@ -5362,6 +5474,27 @@ $('#demoTourNext').addEventListener('click', () => {
 $('#toggleEvidence').addEventListener('click', () => $('.evidence-panel').classList.add('mobile-open'));
 $('#closeEvidence').addEventListener('click', () => $('.evidence-panel').classList.remove('mobile-open'));
 $('#runDiscovery').addEventListener('click', runDiscovery);
+$('#estateComparisonForm').addEventListener('submit', runEstateComparison);
+$('#estateComparisonLeft').addEventListener('change', event => {
+  if ($('#estateComparisonRight').value === event.target.value) {
+    const alternative = executionScopes().find(item => scopeKey(item) !== event.target.value);
+    if (alternative) $('#estateComparisonRight').value = scopeKey(alternative);
+  }
+});
+$('#estateComparisonRight').addEventListener('change', event => {
+  if ($('#estateComparisonLeft').value === event.target.value) {
+    const alternative = executionScopes().find(item => scopeKey(item) !== event.target.value);
+    if (alternative) $('#estateComparisonLeft').value = scopeKey(alternative);
+  }
+});
+$('#estateComparisonResult').addEventListener('click', event => {
+  const open = event.target.closest('[data-open-comparison-source]');
+  const investigate = event.target.closest('[data-investigate-comparison]');
+  const preserve = event.target.closest('[data-preserve-comparison]');
+  if (open) useEstateComparisonSource(open.dataset.openComparisonSource, 'open').catch(error => toast(error.message));
+  else if (investigate) useEstateComparisonSource(investigate.dataset.investigateComparison, 'investigate').catch(error => toast(error.message));
+  else if (preserve) useEstateComparisonSource(preserve.dataset.preserveComparison, 'preserve').catch(error => toast(error.message));
+});
 $('#cancelDiscoveryJob').addEventListener('click', cancelDiscoveryJob);
 $('#discoveryJobHistory').addEventListener('click', event => {
   const target = event.target.closest('[data-inspect-discovery-job]');

@@ -84,10 +84,29 @@ pauses the cadence for review.
 Detection deployment verification and other platform-wide durable automation that do not yet expose
 a target remain Primary-bound.
 
-Source-preserving cross-instance comparison, OIDC group-to-alias mapping beyond the current Primary grant, backup and
-migration tooling for connection credentials, and optional per-tenant data-plane isolation remain
-future work. Comparisons must preserve source attribution instead of merging results into an
-unqualified global answer.
+## Source-preserving estate comparison
+
+The Discovery page can compare the latest retained summaries for two admitted, authorized immutable
+scopes. `POST /api/discovery/comparison` resolves and authorizes both aliases independently before it
+reads either snapshot. It does not issue a Splunk MCP request, invoke a model, persist raw rows, or
+merge facts into an unqualified global answer.
+
+Each side retains its display name, alias, tenant scope, connection revision, discovery run, depth,
+collection completeness, and a SHA-256 digest of the exact compact snapshot. The comparison ID binds
+both source contracts. Counts are shown side by side with an explicitly arithmetic right-minus-left
+delta. Domain coverage, catalog-label contrasts, and findings remain in left/right containers.
+Different depths and collection failures produce caveats; a cross-estate difference is never called
+an improvement, regression, or risk ranking.
+
+Follow-up actions first switch to the selected source's admitted scope. Investigation identifies that
+scope as the only live tool authority and treats the other snapshot as retained context. Case
+preservation copies only the selected source's measures and findings, plus its comparison and
+snapshot identifiers. It deliberately does not copy the other estate's facts into a tenant-scoped
+case item.
+
+OIDC group-to-alias mapping beyond the current Primary grant, backup and migration tooling for
+connection credentials, optional per-tenant data-plane isolation, and time-aligned durable
+multi-estate review packets remain future work.
 
 ## Why additional MCP connections belong in SignalRoom
 

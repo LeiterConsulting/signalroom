@@ -14,6 +14,7 @@ This is a focused reimplementation inspired by [LeiterConsulting/splunk-discover
 - Parallel read-only quick, standard, and deep discovery with change detection, JSON blueprints, and briefs
 - First-class security discovery across telemetry freshness, detection health, data-model readiness, and reusable RAG knowledge
 - Durable manual discovery jobs with live retained progress, hard call ceilings, cancellation, restart recovery, and per-run results
+- Source-preserving comparison of two authorized Splunk estates from exact retained snapshots, with zero new queries and side-scoped follow-ups
 - Delta-aware model-team reuse with exact input fingerprints and visible cache provenance
 - Read-only Splunk MLTK model inventory with definition drift and endpoint-scoped dependency checks
 - Opt-in, explicitly targeted continuous assurance with durable schedules, cross-run signal correlation, response packages, and hard Splunk-call budgets
@@ -142,6 +143,13 @@ inferring it from the global browser selector. Endpoint, TLS-trust, scope, or cr
 silently preserve secondary admission; administrators must diagnose and enable the replacement
 revision, then explicitly rebind and review paused schedules. See
 [Connection identities and additional MCPs](docs/CONNECTIONS.md).
+
+After discovery has run on two admitted scopes, **Discovery → Splunk estate comparison** can compare
+their latest retained summaries. The comparison makes no Splunk or model call. It binds an exact
+snapshot digest, run ID, connection revision, and tenant scope to each side; reports right-minus-left
+counts only as arithmetic; and never labels a difference as improvement or regression. Opening,
+investigating, or preserving a review item first enters that source's authorized scope. A case item
+receives only that side's observations so cross-tenant facts are not copied into a blended record.
 
 The client discovers available tools and resolves common aliases such as `splunk_run_query` / `run_splunk_query`, `splunk_get_indexes` / `get_indexes`, and related SAIA SPL helpers.
 
@@ -548,6 +556,14 @@ does not interrupt the job. A process restart re-queues an interrupted run as a 
 explicit cancellation is terminal. The Discovery page can reopen retained results and replay each run's activity.
 Full timestamped blueprints and briefs remain in the artifact directory, while the job database deliberately
 stores the smaller projection that excludes raw inventory catalogs.
+
+When at least two admitted scopes have retained discovery, the same page provides a pairwise estate
+comparison. SignalRoom reads the compact summary for each exact revision, computes deterministic
+metric, domain, and bounded catalog-label contrasts, and returns source-specific findings. The
+comparison contract is zero new Splunk queries, zero model calls, no raw rows, and no merged global
+conclusion. A deterministic comparison fingerprint covers both scope identities, run IDs, and
+snapshot digests. Different depths or collection gaps remain visible caveats rather than silently
+normalizing incomparable evidence.
 
 ### Continuous assurance
 

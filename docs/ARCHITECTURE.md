@@ -395,6 +395,20 @@ observation begins only after an operator reviews and deploys the generated cont
 
 SignalRoom is an MCP client of a Splunk MCP server and an MCP server to agent hosts. That lets another agent call the controlled, domain-specific workflows without receiving raw Splunk credentials.
 
+## Multi-estate comparison is explicitly non-merging
+
+`DiscoveryComparisonService` accepts two already-authorized immutable scope bindings and their compact
+retained discovery summaries. It performs deterministic local comparison only. The result keeps
+source cards, findings, domain observations, and unique catalog labels separated by side. Numeric
+deltas are named `delta_right_minus_left` to prevent an arithmetic difference from being presented as
+a security verdict.
+
+The deterministic comparison ID covers the schema, both exact bindings, both discovery run IDs, and
+both compact-snapshot SHA-256 digests. The API records a hash-chained control-plane audit event and
+states its zero-query/zero-inference contract. It stores no additional cross-tenant evidence record.
+UI investigation pivots select one authorized estate as the sole live tool target. Case preservation
+is source-only because existing case and RAG stores treat tenant scope as a hard query boundary.
+
 ## External identity remains authentication evidence
 
 `OIDCService` supports one opt-in issuer only after local RBAC is active. Browser login uses authorization code plus
@@ -415,9 +429,9 @@ there is deliberately no remote recovery route.
 
 ## Next production increments
 
-1. Multi-instance comparison with source-preserving provenance and explicit, non-merging analyst views
-2. Optional per-tenant data-plane isolation for higher-assurance deployments
-3. OIDC group-to-alias assignment policy and credential backup/restore controls
+1. Optional per-tenant data-plane isolation for higher-assurance deployments
+2. OIDC group-to-alias assignment policy and credential backup/restore controls
+3. Time-aligned durable multi-estate review packets without cross-tenant fact copying
 4. Read-only deployment reconciliation for the audit operations pack when the Splunk MCP contract exposes the
    required index and knowledge-object configuration fields
 

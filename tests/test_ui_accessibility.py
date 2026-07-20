@@ -181,6 +181,18 @@ def test_durable_analytics_expose_explicit_splunk_targets_and_provenance() -> No
     assert ".forecast-schedule-binding" in STYLES_CSS
 
 
+def test_discovery_comparison_is_explicit_source_preserving_and_accessible() -> None:
+    assert 'id="estateComparisonForm"' in INDEX_HTML
+    assert 'aria-label="Left Splunk comparison source"' in INDEX_HTML
+    assert 'aria-label="Right Splunk comparison source"' in INDEX_HTML
+    assert "runs zero new Splunk queries or model inference" in INDEX_HTML
+    assert "no global conclusion" in INDEX_HTML
+    assert "function renderEstateComparison(value)" in APP_JS
+    assert "other estate's facts are intentionally not copied" in APP_JS
+    assert "data-investigate-comparison" in APP_JS
+    assert ".estate-comparison-controls select:focus-visible" in STYLES_CSS
+
+
 def test_remote_audit_export_is_explicit_and_accessible() -> None:
     assert 'id="auditExportForm"' in INDEX_HTML
     assert 'id="auditExportEnabled"' in INDEX_HTML

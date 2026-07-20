@@ -546,6 +546,17 @@ class DiscoveryRequest(BaseModel):
     tenant_scope_id: str = Field(default="workspace-primary", min_length=1, max_length=160)
 
 
+class ConnectionScopeReference(BaseModel):
+    connection_alias: str = Field(default="primary", min_length=1, max_length=120)
+    connection_fingerprint: str = Field(default="", max_length=64)
+    tenant_scope_id: str = Field(default="workspace-primary", min_length=1, max_length=160)
+
+
+class DiscoveryComparisonRequest(BaseModel):
+    left: ConnectionScopeReference
+    right: ConnectionScopeReference
+
+
 DiscoveryJobStatus = Literal[
     "queued",
     "running",

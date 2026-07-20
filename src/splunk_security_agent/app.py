@@ -46,7 +46,12 @@ from .detections import (
     DetectionService,
     DetectionStore,
 )
-from .discovery import DiscoveryJobService, DiscoveryJobStore, DiscoveryPipeline
+from .discovery import (
+    DiscoveryComparisonService,
+    DiscoveryJobService,
+    DiscoveryJobStore,
+    DiscoveryPipeline,
+)
 from .feedback import AnalystFeedbackStore
 from .forecasting import (
     TimeSeriesExperimentStore,
@@ -103,6 +108,7 @@ from .schemas import (
     DetectionRuntimeDraftRequest,
     DetectionUpdate,
     DetectionValidationDraftRequest,
+    DiscoveryComparisonRequest,
     DiscoveryRequest,
     EvaluationSuiteArchiveRequest,
     EvaluationSuiteCreate,
@@ -2648,6 +2654,60 @@ async def latest_discovery(
 ) -> dict[str, Any]:
     scope = _request_scope(connection_alias, connection_fingerprint, tenant_scope_id)
     return services.discovery_for_scope(scope).latest_summary() or {}
+
+
+@app.post("/api/discovery/comparison")
+async def compare_discovery_snapshots(
+    value: DiscoveryComparisonRequest, request: Request
+) -> dict[str, Any]:
+    left_scope = _request_scope(
+        value.left.connection_alias,
+        value.left.connection_fingerprint,
+        value.left.tenant_scope_id,
+    )
+    right_scope = _request_scope(
+        value.right.connection_alias,
+        value.right.connection_fingerprint,
+        value.right.tenant_scope_id,
+    )
+    try:
+        result = DiscoveryComparisonService().compare(
+            left_scope,
+            services.discovery_for_scope(left_scope).latest_summary(),
+            right_scope,
+            services.discovery_for_scope(right_scope).latest_summary(),
+        )
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    actor = str(
+        (getattr(request.state, "principal", {}) or {}).get("username")
+        or "local-operator"
+    )
+    services.audit.record(
+        "discovery.comparison.created",
+        "compare-retained-snapshots",
+        target_type="discovery-comparison",
+        target_id=result["comparison_id"],
+        summary="Compared two retained Splunk discovery snapshots without merging evidence.",
+        metadata={
+            "splunk_queries": 0,
+            "model_inference": False,
+            "left": {
+                "connection_alias": left_scope["alias"],
+                "connection_fingerprint": left_scope["fingerprint"],
+                "tenant_scope_id": left_scope["tenant_scope_id"],
+                "run_id": result["left"]["run_id"],
+            },
+            "right": {
+                "connection_alias": right_scope["alias"],
+                "connection_fingerprint": right_scope["fingerprint"],
+                "tenant_scope_id": right_scope["tenant_scope_id"],
+                "run_id": result["right"]["run_id"],
+            },
+        },
+        actor=actor,
+    )
+    return result
 
 
 @app.get("/api/discovery/jobs")
