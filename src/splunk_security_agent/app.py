@@ -34,7 +34,7 @@ from .benchmarks import (
     ModelTournamentService,
     ModelTournamentStore,
 )
-from .cases import CaseCockpitService, CaseStore
+from .cases import CaseCockpitService
 from .config import ConfigStore
 from .connections import ConnectionRegistryStore
 from .delivery import AssuranceDeliveryService, DeliveryStore
@@ -49,7 +49,6 @@ from .detections import (
 from .discovery import (
     DiscoveryComparisonService,
     DiscoveryJobService,
-    DiscoveryJobStore,
     DiscoveryPipeline,
 )
 from .feedback import AnalystFeedbackStore
@@ -63,7 +62,6 @@ from .mcp_server import MCPServer
 from .model_setup import ModelSetupService
 from .model_trust import ModelTrustService, ModelTrustStore
 from .providers import ModelProviderError, ModelRouter
-from .rag import EvidenceStore
 from .schemas import (
     AnalystFeedbackCreate,
     ArtifactCreate,
@@ -128,6 +126,8 @@ from .schemas import (
     QueryIntelligenceRequest,
     SettingsUpdate,
     SplunkConnection,
+    TenantDataMigrationActionRequest,
+    TenantDataMigrationRequest,
     TenantIsolationPlanRequest,
     TimeSeriesAlertCandidateCreate,
     TimeSeriesBaselineAcceptRequest,
@@ -148,7 +148,15 @@ from .splunk import (
     SplunkMCPClient,
 )
 from .splunk_models import SplunkModelInventoryService
-from .tenancy import TenantIsolationPlanner, TenantIsolationStore
+from .tenancy import (
+    RoutedCaseStore,
+    RoutedDiscoveryJobStore,
+    RoutedEvidenceStore,
+    TenantDataMigrationService,
+    TenantDataPlaneRegistry,
+    TenantIsolationPlanner,
+    TenantIsolationStore,
+)
 from .validation import QueryIntelligenceService, ValidationService, ValidationStore
 from .workload import (
     SplunkWorkloadService,
@@ -170,6 +178,10 @@ class Services:
         self.connection_registry = ConnectionRegistryStore(DATA / "connection_registry.db")
         self.tenant_isolation_store = TenantIsolationStore(DATA / "tenant_isolation.db")
         self.tenant_isolation = TenantIsolationPlanner(DATA, self.tenant_isolation_store)
+        self.tenant_data_registry = TenantDataPlaneRegistry(
+            DATA / "tenant_isolation.db", DATA
+        )
+        self.tenant_data_plane = TenantDataMigrationService(self.tenant_data_registry)
         initial_settings = self.config.load()
         self._connection_binding = self.connection_registry.sync_primary(
             initial_settings.splunk,
@@ -182,7 +194,7 @@ class Services:
             DATA / "model_trust_signing.key",
             DATA / "model_attestations",
         )
-        self.evidence = EvidenceStore(DATA / "evidence.db")
+        self.evidence = RoutedEvidenceStore(self.tenant_data_registry)
         self.feedback = AnalystFeedbackStore(DATA / "feedback.db")
         self.evaluation_suite_store = EvaluationSuiteStore(DATA / "evaluation_suites.db")
         self.evaluation_suites = EvaluationSuiteService(self.evaluation_suite_store)
@@ -203,7 +215,7 @@ class Services:
             self.tournament_store,
             self.model_trust,
         )
-        self.cases = CaseStore(DATA / "cases.db", DATA / "case_exports")
+        self.cases = RoutedCaseStore(self.tenant_data_registry)
         self.validation_store = ValidationStore(DATA / "validations.db")
         self.workload_store = WorkloadStore(DATA / "workload.db")
         self.workload = SplunkWorkloadService(self.workload_store)
@@ -247,7 +259,7 @@ class Services:
         self.auth_store = AuthStore(DATA / "auth.db")
         self.auth = AuthService(self.auth_store, self.audit, self.available_auth_connections)
         self.oidc = OIDCService(self.auth_store, self.auth, self.config, self.audit)
-        self.discovery_job_store = DiscoveryJobStore(DATA / "discovery_jobs.db")
+        self.discovery_job_store = RoutedDiscoveryJobStore(self.tenant_data_registry)
         self.assurance_store = AssuranceStore(DATA / "assurance.db")
         self.delivery_store = DeliveryStore(DATA / "delivery.db")
         self.connection_diagnostics_store = ConnectionDiagnosticsStore(DATA / "connection_diagnostics.db")
@@ -1136,9 +1148,129 @@ async def get_connections(request: Request) -> dict[str, Any]:
 async def tenant_isolation_overview(request: Request) -> dict[str, Any]:
     _admin_actor(request)
     result = services.tenant_isolation.overview()
+    data_plane = services.tenant_data_plane.overview()
+    result["data_plane"] = data_plane
+    result["runtime"]["routing_cutover_available"] = True
+    result["runtime"]["isolated_route_count"] = len(
+        [item for item in data_plane["routes"] if item["mode"] == "isolated-routing"]
+    )
     result["available_targets"] = services.connection_overview(
         None, include_all_managed=True
     ).get("execution_scopes", [])
+    return result
+
+
+@app.post("/api/tenant-isolation/migrations", status_code=201)
+async def stage_tenant_data_migration(
+    value: TenantDataMigrationRequest,
+    request: Request,
+) -> dict[str, Any]:
+    actor = _admin_actor(request)
+    scope = _request_scope(
+        value.connection_alias,
+        value.connection_fingerprint,
+        value.tenant_scope_id,
+    )
+    plan = services.tenant_isolation.preview(scope)
+    if plan["plan_id"] != value.plan_id:
+        raise HTTPException(
+            409,
+            "Tenant topology changed after readiness review. Build a fresh plan before staging.",
+        )
+    try:
+        result = services.tenant_data_plane.stage(scope, plan, actor)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    services.audit.record(
+        "tenant.data-migration.verified",
+        "stage-and-verify",
+        target_type="tenant-scope",
+        target_id=scope["tenant_scope_id"],
+        summary=(
+            "Copied three tenant-owned stores into a staged generation and verified exact digests; "
+            "runtime routing remained shared."
+        ),
+        metadata={
+            "migration_id": result["id"],
+            "plan_id": result["plan_id"],
+            "generation_id": result["generation_id"],
+            "source_digest": result["source_digest"],
+            "target_digest": result["target_digest"],
+            "status": result["status"],
+            "routing_changed": False,
+        },
+        actor=actor,
+    )
+    return result
+
+
+@app.post("/api/tenant-isolation/migrations/{migration_id}/cutover")
+async def cutover_tenant_data_migration(
+    migration_id: str,
+    value: TenantDataMigrationActionRequest,
+    request: Request,
+) -> dict[str, Any]:
+    actor = _admin_actor(request)
+    scope = _request_scope(
+        value.connection_alias,
+        value.connection_fingerprint,
+        value.tenant_scope_id,
+    )
+    try:
+        result = services.tenant_data_plane.cutover(migration_id, scope)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    services.audit.record(
+        "tenant.data-routing.cutover",
+        "cutover",
+        target_type="tenant-scope",
+        target_id=scope["tenant_scope_id"],
+        summary=(
+            "Activated a digest-verified isolated tenant route. The sealed shared source copy "
+            "remains available for zero-write rollback."
+        ),
+        metadata={
+            "migration_id": result["id"],
+            "generation_id": result["generation_id"],
+            "source_retained_for_rollback": True,
+            "physical_source_purge_complete": False,
+        },
+        actor=actor,
+    )
+    return result
+
+
+@app.post("/api/tenant-isolation/migrations/{migration_id}/rollback")
+async def rollback_tenant_data_migration(
+    migration_id: str,
+    value: TenantDataMigrationActionRequest,
+    request: Request,
+) -> dict[str, Any]:
+    actor = _admin_actor(request)
+    scope = _request_scope(
+        value.connection_alias,
+        value.connection_fingerprint,
+        value.tenant_scope_id,
+    )
+    try:
+        result = services.tenant_data_plane.rollback(migration_id, scope)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    services.audit.record(
+        "tenant.data-routing.rolled-back",
+        "rollback",
+        target_type="tenant-scope",
+        target_id=scope["tenant_scope_id"],
+        summary=(
+            "Restored shared tenant routing before any isolated-generation write occurred."
+        ),
+        metadata={
+            "migration_id": result["id"],
+            "generation_id": result["generation_id"],
+            "post_cutover_writes": 0,
+        },
+        actor=actor,
+    )
     return result
 
 

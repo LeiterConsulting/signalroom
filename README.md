@@ -11,6 +11,7 @@ This is a focused reimplementation inspired by [LeiterConsulting/splunk-discover
 - Immutable Splunk connection revisions and tenant-scoped durable workflow bindings that fail closed before a call when any target moves
 - An explicit Splunk-scope selector with tenant-gated artifacts, hybrid RAG, discovery state, investigation memory, cases, exports, and SignalRoom MCP tools
 - Admin-only, content-free physical-isolation readiness plans that bind an exact Splunk revision, inventory tenant row/file counts, and expose every blocking store without moving data or changing routing
+- Digest-verified tenant generations and runtime routing for Evidence, Cases, and Manual Discovery, with stale-source rejection and zero-write rollback to a sealed shared source
 - Layered Splunk MCP diagnostics across configuration, DNS, TCP, TLS identity, authentication, and depth-specific tool contracts
 - Parallel read-only quick, standard, and deep discovery with change detection, JSON blueprints, and briefs
 - First-class security discovery across telemetry freshness, detection health, data-model readiness, and reusable RAG knowledge
@@ -158,6 +159,14 @@ schema, row counts, and artifact filenames only. It does not read evidence paylo
 create a tenant database, or change runtime routing. Its blockers identify stores that still need a direct
 tenant key, verified parent relationship, or filesystem router. This is a migration engineering gate—not
 an isolation switch—and the shared source files remain authoritative.
+
+After reviewing a current plan, an administrator can stage Evidence, Cases, and Manual Discovery into
+a generation beneath the tenant root. This step locally reads and copies payload rows, verifies canonical
+source/target digests, and leaves routing unchanged. Cutover rechecks both the shared source and staged
+generation before activating the isolated route. The shared rows remain sealed as a rollback source;
+rollback is allowed only before the isolated generation accepts a write. SignalRoom therefore labels this
+state **isolated routing · source retained**, not complete physical isolation. Shared-source purge and a
+verified reverse-migration path remain future finalization gates.
 
 The client discovers available tools and resolves common aliases such as `splunk_run_query` / `run_splunk_query`, `splunk_get_indexes` / `get_indexes`, and related SAIA SPL helpers.
 

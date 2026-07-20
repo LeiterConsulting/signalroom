@@ -941,6 +941,66 @@ function renderTenantIsolationPlan(plan) {
   </article>`;
 }
 
+function selectedTenantIsolationScope() {
+  const key = $('#tenantIsolationTarget')?.value || '';
+  return (state.tenantIsolation?.available_targets || executionScopes()).find(item => scopeKey(item) === key) || null;
+}
+
+function tenantPlanForScope(scope) {
+  if (!scope) return null;
+  return (state.tenantIsolation?.latest_plans || []).find(item =>
+    item.tenant_scope_id === scope.tenant_scope_id &&
+    item.connection_alias === scope.alias &&
+    item.connection_fingerprint === scope.fingerprint
+  ) || null;
+}
+
+function renderTenantDataPlane(scope, plan) {
+  const holder = $('#tenantDataPlaneSummary'); if (!holder) return;
+  if (!scope) {
+    holder.innerHTML = '<div class="empty-inline compact-empty">Choose an admitted tenant before reviewing data routing.</div>';
+    return;
+  }
+  const dataPlane = state.tenantIsolation?.data_plane || {};
+  const route = (dataPlane.routes || []).find(item => item.tenant_scope_id === scope.tenant_scope_id) || {mode:'shared',writes_since_cutover:0};
+  const migrations = (dataPlane.migrations || []).filter(item =>
+    item.tenant_scope_id === scope.tenant_scope_id && item.connection_alias === scope.alias
+  );
+  const migration = migrations[0] || null;
+  const status = route.mode === 'isolated-routing' ? 'isolated-routing' : migration?.status || 'shared';
+  const labels = {
+    shared:'Shared source authoritative',
+    copying:'Copy in progress',
+    verified:'Verified · cutover pending',
+    cutover:'Isolated routing active',
+    'rolled-back':'Rolled back to shared',
+    failed:'Migration failed',
+    'isolated-routing':'Isolated routing active'
+  };
+  let action = '';
+  if (status === 'verified' && migration) {
+    action = `<button class="button primary small" type="button" data-cutover-tenant="${escapeHtml(migration.id)}">Activate verified route</button>`;
+  } else if (route.mode === 'isolated-routing' && migration?.status === 'cutover') {
+    action = `<button class="button ghost small" type="button" data-rollback-tenant="${escapeHtml(migration.id)}" ${Number(route.writes_since_cutover || 0) ? 'disabled' : ''}>Rollback to sealed shared source</button>`;
+  } else if (plan && !['copying','verified','cutover'].includes(migration?.status || '')) {
+    action = '<button class="button primary small" type="button" id="stageTenantMigration">Stage and verify three stores</button>';
+  }
+  const components = migration?.components || [];
+  const writeBoundary = route.mode === 'isolated-routing'
+    ? Number(route.writes_since_cutover || 0)
+      ? `${Number(route.writes_since_cutover)} isolated write${Number(route.writes_since_cutover) === 1 ? '' : 's'} · direct rollback blocked`
+      : 'Zero isolated writes · sealed-source rollback remains available'
+    : 'Shared source remains authoritative; routing has not changed';
+  holder.innerHTML = `<article class="tenant-data-plane ${escapeHtml(status)}">
+    <header><div><span>DATA-PLANE ROUTING</span><h5>${escapeHtml(labels[status] || status)}</h5><p>${escapeHtml(writeBoundary)}</p></div>${action}</header>
+    <div class="tenant-copy-boundary"><b>Staging authority</b><span>Unlike readiness planning, staging reads and locally copies tenant payload rows for Evidence, Cases, and Manual Discovery. It sends nothing externally and changes no runtime route until a separate cutover.</span></div>
+    ${migration ? `<div class="tenant-migration-identity"><span><b>Migration</b><code>${escapeHtml(migration.id.slice(0,12))}</code></span><span><b>Generation</b><code>${escapeHtml(migration.generation_id.slice(0,12))}</code></span><span><b>Source digest</b><code>${escapeHtml((migration.source_digest || 'pending').slice(0,12))}</code></span><span><b>Target digest</b><code>${escapeHtml((migration.target_digest || 'pending').slice(0,12))}</code></span></div>` : ''}
+    ${components.length ? `<div class="tenant-copy-components">${components.map(item => `<span class="${item.verified ? 'verified' : 'failed'}"><b>${escapeHtml(item.id.replaceAll('-', ' '))}</b>${Number(item.source_records || 0)} source rows · ${Number(item.target_records || 0)} target rows</span>`).join('')}</div>` : ''}
+    ${migration?.error ? `<div class="tenant-migration-error"><b>Migration stopped</b><span>${escapeHtml(migration.error)}</span></div>` : ''}
+    ${route.mode === 'isolated-routing' ? '<div class="tenant-source-retained"><b>Routing isolation is active; physical cleanup is not final.</b><span>The original shared rows are sealed as the rollback source. A future purge/finalization gate must verify a reverse-migration path before claiming complete physical separation.</span></div>' : ''}
+  </article>`;
+}
+
 function renderTenantIsolation() {
   const target = $('#tenantIsolationTarget');
   const summary = $('#tenantIsolationSummary');
@@ -956,6 +1016,7 @@ function renderTenantIsolation() {
     target.disabled = true;
     button.disabled = true;
     summary.innerHTML = '<div class="empty-inline compact-empty">An administrator can build a content-free tenant isolation readiness plan. No evidence payload is exposed by the plan.</div>';
+    $('#tenantDataPlaneSummary').innerHTML = '';
     controlPlane.innerHTML = '<p>Authentication, connection identity, encrypted secrets, audit integrity, and model governance remain in the shared control plane.</p>';
     return;
   }
@@ -965,12 +1026,18 @@ function renderTenantIsolation() {
   if (scopes.some(item => scopeKey(item) === prior)) target.value = prior;
   target.disabled = !scopes.length;
   button.disabled = !scopes.length;
-  mode.textContent = value?.runtime?.mode === 'shared-row-filtered' ? 'Shared row filtering' : 'Readiness unavailable';
+  const selectedScope = scopes.find(item => scopeKey(item) === target.value) || scopes[0] || null;
+  const selectedPlan = tenantPlanForScope(selectedScope);
+  const selectedRoute = (value?.data_plane?.routes || []).find(item => item.tenant_scope_id === selectedScope?.tenant_scope_id);
+  mode.textContent = selectedRoute?.mode === 'isolated-routing'
+    ? 'Isolated routing · source retained'
+    : value?.runtime?.mode === 'shared-row-filtered' ? 'Shared row filtering' : 'Readiness unavailable';
   if (value?.error) {
     summary.innerHTML = `<div class="empty-inline compact-empty error">Isolation readiness could not be loaded: ${escapeHtml(value.error)}</div>`;
   } else {
-    summary.innerHTML = renderTenantIsolationPlan((value?.latest_plans || [])[0]);
+    summary.innerHTML = renderTenantIsolationPlan(selectedPlan);
   }
+  renderTenantDataPlane(selectedScope, selectedPlan);
   controlPlane.innerHTML = `<p>These security and governance authorities stay global so cross-tenant policy and audit integrity remain reviewable:</p><ul>${(value?.global_control_plane || []).map(item => `<li>${escapeHtml(item)}</li>`).join('')}</ul>`;
 }
 
@@ -993,6 +1060,45 @@ async function buildTenantIsolationPlan() {
     button.disabled = false;
     button.textContent = original;
   }
+}
+
+async function stageTenantMigration() {
+  const scope = selectedTenantIsolationScope();
+  const plan = tenantPlanForScope(scope);
+  if (!scope || !plan) { toast('Build a current readiness plan before staging'); return; }
+  const button = $('#stageTenantMigration');
+  const original = button.textContent;
+  button.disabled = true;
+  button.textContent = 'Copying three stores and verifying digests…';
+  try {
+    await api('/api/tenant-isolation/migrations', {method:'POST',body:JSON.stringify({...bindingPayload(scope),plan_id:plan.plan_id})});
+    await loadTenantIsolation();
+    toast('Tenant generation copied and digest verified · routing unchanged');
+  } catch (error) { toast(error.message); }
+  finally {
+    const current = $('#stageTenantMigration');
+    if (current) { current.disabled = false; current.textContent = original; }
+  }
+}
+
+async function cutoverTenantMigration(migrationId) {
+  const scope = selectedTenantIsolationScope(); if (!scope) return;
+  if (!confirm('Activate the verified isolated route for Evidence, Cases, and Manual Discovery? The sealed shared source remains available only until the isolated generation accepts a write.')) return;
+  try {
+    await api(`/api/tenant-isolation/migrations/${encodeURIComponent(migrationId)}/cutover`, {method:'POST',body:JSON.stringify(bindingPayload(scope))});
+    await loadTenantIsolation();
+    toast('Verified tenant route activated');
+  } catch (error) { toast(error.message); }
+}
+
+async function rollbackTenantMigration(migrationId) {
+  const scope = selectedTenantIsolationScope(); if (!scope) return;
+  if (!confirm('Return this tenant to the sealed shared source? This is allowed only before any isolated-generation write.')) return;
+  try {
+    await api(`/api/tenant-isolation/migrations/${encodeURIComponent(migrationId)}/rollback`, {method:'POST',body:JSON.stringify(bindingPayload(scope))});
+    await loadTenantIsolation();
+    toast('Tenant routing returned to the sealed shared source');
+  } catch (error) { toast(error.message); }
 }
 
 function renderManagedSplunkConnections() {
@@ -5445,6 +5551,11 @@ document.addEventListener('click', async event => {
   if (change) openInvestigation('discovery', `Explain and validate this change since the previous discovery: ${change.dataset.changeCategory} ${change.dataset.changeInvestigate}. Determine whether it is a real posture change or a collection issue.`, false);
   if (event.target.closest('#openSettings,#configureModels,[data-open-settings]')) { $('#settingsModal').hidden = false; loadWorkload(); await loadConnections(); await loadTenantIsolation(); }
   if (event.target.closest('#closeSettings')) $('#settingsModal').hidden = true;
+  if (event.target.closest('#stageTenantMigration')) await stageTenantMigration();
+  const cutoverTenant = event.target.closest('[data-cutover-tenant]');
+  if (cutoverTenant) await cutoverTenantMigration(cutoverTenant.dataset.cutoverTenant);
+  const rollbackTenant = event.target.closest('[data-rollback-tenant]');
+  if (rollbackTenant) await rollbackTenantMigration(rollbackTenant.dataset.rollbackTenant);
   if (event.target.closest('#addArtifact')) openArtifactEditor();
   if (event.target.closest('.close-artifact')) { $('#artifactModal').hidden = true; state.editingArtifactId = null; }
   if (event.target.closest('#uploadArtifact')) $('#fileInput').click();
@@ -5653,6 +5764,7 @@ $('#settingsForm').addEventListener('submit', saveSettings);
 $('#saveSplunkConnection').addEventListener('click', saveManagedSplunkConnection);
 $('#addSplunkConnection').addEventListener('click', () => openManagedSplunkForm());
 $('#buildTenantIsolationPlan').addEventListener('click', buildTenantIsolationPlan);
+$('#tenantIsolationTarget').addEventListener('change', renderTenantIsolation);
 $('#cancelSplunkConnection').addEventListener('click', () => { resetManagedSplunkForm(); $('#managedSplunkForm').hidden = true; });
 $('#managedSplunkVerifyTls').addEventListener('change', updateManagedSplunkTlsControls);
 $('#connectionWorkflowBindings').addEventListener('click', event => {

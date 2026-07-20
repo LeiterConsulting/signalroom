@@ -536,12 +536,13 @@
           </section>
           <section class="tenant-isolation-manager" aria-labelledby="tenantIsolationTitle">
             <header><div><h4 id="tenantIsolationTitle">Physical tenant isolation readiness</h4><p>Build a content-free migration inventory before enabling separate tenant databases and artifact roots. Planning reads schemas, counts, and filenames only; it does not move data or change runtime routing.</p></div><span class="subtle-pill warn" id="tenantIsolationMode">Shared row filtering</span></header>
-            <div class="tenant-isolation-contract" role="note"><b>No unsafe isolation toggle</b><span>SignalRoom will expose activation only after every tenant-owned store has a direct or verified inherited scope, workers can quiesce, and copy/digest/rollback tests pass.</span></div>
+            <div class="tenant-isolation-contract" role="note"><b>No unsafe isolation toggle</b><span>SignalRoom permits staged routing only for Evidence, Cases, and Manual Discovery. It will not claim physical isolation or expose shared-source purge until every tenant-owned store has a direct or verified inherited scope.</span></div>
             <div class="tenant-isolation-controls">
               <label><span>Tenant and immutable Splunk target</span><select id="tenantIsolationTarget" aria-label="Tenant isolation planning target"></select><small>Only currently admitted scopes can be planned. Future migration will recheck this exact revision.</small></label>
               <button class="button primary" type="button" id="buildTenantIsolationPlan">Build readiness plan</button>
             </div>
             <div class="tenant-isolation-summary" id="tenantIsolationSummary" aria-live="polite"><div class="empty-inline compact-empty">No isolation readiness plan has been created. The current shared files remain authoritative.</div></div>
+            <div class="tenant-data-plane-summary" id="tenantDataPlaneSummary" aria-live="polite"></div>
             <details class="tenant-control-plane"><summary>What deliberately remains global?</summary><div id="tenantControlPlane"></div></details>
           </section>
           <details class="future-mcp-catalog">

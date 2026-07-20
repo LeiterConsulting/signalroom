@@ -40,10 +40,27 @@ The current component map distinguishes four states:
 - **Filesystem router required:** scope-aware names or reads exist, but files still share an artifact root.
 
 Authentication, encrypted secrets, connection identity, the tamper-evident audit authority, model trust,
-and global workload/outbound policy deliberately remain shared control-plane services. A future migration
-must recheck the immutable connection binding, quiesce writers, copy into a contained tenant root, verify
-digests, and retain a rollback path before an explicit cutover can exist. Until then, shared source files
-remain authoritative and the interface exposes no activation toggle.
+and global workload/outbound policy deliberately remain shared control-plane services.
+
+## Staged tenant data routing
+
+Evidence, Cases, and Manual Discovery have direct or verified inherited scope contracts and can now enter
+a staged migration. Staging is materially different from readiness planning: it reads and locally copies
+the selected tenant's payload rows into a new generation under `data/tenants/<scope>/generations/`. It copies
+no other tenant rows, sends nothing externally, and leaves shared routing authoritative while it computes
+canonical source and target digests.
+
+Cutover requires the same admitted alias, immutable connection fingerprint, tenant scope, and current source
+digest. It also re-verifies the staged generation and refuses to run while a tenant discovery job is queued or
+running. The runtime store facades then route only that tenant's Evidence, Cases, and Manual Discovery traffic
+to the verified generation. A missing active generation fails closed instead of recreating an empty database.
+
+The shared tenant rows remain sealed as a rollback source. Zero-write rollback can restore shared routing;
+the first isolated-generation mutation increments a durable write epoch and blocks direct rollback because it
+would hide newer data. A future reverse migration is required to preserve those writes. SignalRoom deliberately
+calls this state **isolated routing with source retained**, not complete physical isolation. Shared-source purge,
+filesystem routing, and migration of the currently blocking stores must be completed before hard isolation can
+be claimed.
 
 Administrators can add live Splunk aliases such as `production-us`, `production-eu`, or `security-lab`
 in Settings. Each alias has its own encrypted MCP token, tenant scope, endpoint/TLS identity, diagnostic

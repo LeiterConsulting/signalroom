@@ -192,6 +192,13 @@ def test_tenant_isolation_is_readiness_only_and_keyboard_accessible() -> None:
     assert "migration authority can exist" in APP_JS
     assert ".tenant-isolation-controls select:focus-visible" in STYLES_CSS
     assert ".tenant-isolation-controls button:focus-visible" in STYLES_CSS
+    assert 'id="tenantDataPlaneSummary"' in INDEX_HTML
+    assert "Stage and verify three stores" in APP_JS
+    assert "Activate verified route" in APP_JS
+    assert "Rollback to sealed shared source" in APP_JS
+    assert "physical cleanup is not final" in APP_JS
+    assert "data-cutover-tenant" in APP_JS
+    assert ".tenant-data-plane button:focus-visible" in STYLES_CSS
 
 
 def test_discovery_comparison_is_explicit_source_preserving_and_accessible() -> None:

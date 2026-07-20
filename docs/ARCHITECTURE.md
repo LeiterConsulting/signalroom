@@ -429,10 +429,9 @@ there is deliberately no remote recovery route.
 
 ## Next production increments
 
-1. Add a tenant-aware store registry plus staged copy, digest verification, rollback, and explicit cutover for
-   evidence, cases, and manual discovery; the readiness planner is implemented and activation remains unavailable
-2. Add durable direct tenant ownership to validation, detection, forecast-experiment, delivery, and assurance-policy
-   roots before expanding physical migration coverage
+1. Add durable direct tenant ownership to validation, detection, forecast-experiment, delivery, and assurance-policy
+   roots, then expand generation routing to those stores
+2. Add tenant filesystem routing plus verified reverse migration and shared-source purge/finalization
 3. Add OIDC group-to-alias assignment policy and encrypted credential backup/restore controls
 4. Add time-aligned durable multi-estate review packets without cross-tenant fact copying
 5. Add read-only deployment reconciliation for the audit operations pack when the Splunk MCP contract exposes the
@@ -446,6 +445,14 @@ uses filenames only. An admin binds planning to an admitted alias, tenant scope,
 fingerprint. The resulting plan identifies direct, inherited, missing, and filesystem scope contracts and
 is recorded in the shared audit authority. It cannot execute migration or change runtime routing. This
 prevents an incomplete toggle from falsely claiming isolation while unscoped durable records still exist.
+
+`TenantDataPlaneRegistry` is the runtime authority for the three copy-ready stores. A generation copy holds the
+process-wide store-operation lock, refuses active manual discovery, streams rows selected through the tenant root,
+and hashes the same canonical table order on both sides. Verification does not change routing. Cutover repeats the
+source and target digests before atomically recording the generation route. Routed store facades resolve the tenant
+on every operation and fail closed when an active generation is missing. The route records a durable write epoch;
+rollback to the retained shared source is legal only while that epoch remains zero. The shared duplicate is not yet
+purged, so this is routing isolation and a safe migration checkpoint—not final physical separation.
 
 ### Durable work is bound to an immutable connection revision
 

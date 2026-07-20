@@ -92,8 +92,10 @@ Use `--data-dir` when `SIGNALROOM_DATA_DIR` is not available in the recovery she
 active local identity, revokes its sessions, and records `auth.local.password.recovered`. It cannot change an OIDC
 identity. Direct data-directory access is the recovery authority, so restrict that directory accordingly.
 
-OIDC tenant/group admission does not partition artifacts, cases, or a shared Splunk connection into independent
-tenants. Deploy separate instances where hard data-plane tenancy is required.
+OIDC tenant/group admission does not itself partition artifacts, cases, or a shared Splunk connection into
+independent tenants. SignalRoom can route Evidence, Cases, and Manual Discovery into a digest-verified tenant
+generation, but the sealed shared rollback rows and currently unscoped stores remain until future finalization.
+Deploy separate instances where complete hard data-plane or process isolation is required.
 
 ## Splunk TLS certificates
 
