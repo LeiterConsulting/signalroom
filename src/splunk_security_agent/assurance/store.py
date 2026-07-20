@@ -90,6 +90,24 @@ class AssuranceStore:
                     ON assurance_packages(status, created_at DESC);
                 """
             )
+            self._ensure_column(
+                db, "assurance_policy", "connection_alias", "TEXT NOT NULL DEFAULT 'primary'"
+            )
+            self._ensure_column(
+                db, "assurance_policy", "connection_fingerprint", "TEXT NOT NULL DEFAULT ''"
+            )
+            self._ensure_column(
+                db, "assurance_policy", "tenant_scope_id", "TEXT NOT NULL DEFAULT ''"
+            )
+            self._ensure_column(
+                db, "assurance_runs", "connection_alias", "TEXT NOT NULL DEFAULT 'primary'"
+            )
+            self._ensure_column(
+                db, "assurance_runs", "connection_fingerprint", "TEXT NOT NULL DEFAULT ''"
+            )
+            self._ensure_column(
+                db, "assurance_runs", "tenant_scope_id", "TEXT NOT NULL DEFAULT ''"
+            )
             db.execute(
                 """INSERT OR IGNORE INTO assurance_policy
                 (id,enabled,interval_minutes,discovery_depth,max_splunk_calls_per_run,
@@ -152,6 +170,56 @@ class AssuranceStore:
             )
         return self.policy()
 
+    def bind_unbound(self, binding: dict[str, Any]) -> dict[str, int]:
+        """One-time migration for policy and runs created before identity binding."""
+        values = (
+            str(binding["alias"]),
+            str(binding["fingerprint"]),
+            str(binding["tenant_scope_id"]),
+        )
+        with self._lock, self.connect() as db:
+            policy = db.execute(
+                """UPDATE assurance_policy SET connection_alias=?,
+                connection_fingerprint=?,tenant_scope_id=?
+                WHERE id=1 AND connection_fingerprint=''""",
+                values,
+            )
+            runs = db.execute(
+                """UPDATE assurance_runs SET connection_alias=?,
+                connection_fingerprint=?,tenant_scope_id=?
+                WHERE connection_fingerprint=''""",
+                values,
+            )
+        return {"policy": int(policy.rowcount), "runs": int(runs.rowcount)}
+
+    def rebind_policy(
+        self,
+        binding: dict[str, Any],
+        *,
+        expected_connection_fingerprint: str,
+        expected_updated_at: str,
+    ) -> dict[str, Any]:
+        now = _now().isoformat()
+        with self._lock, self.connect() as db:
+            result = db.execute(
+                """UPDATE assurance_policy SET connection_alias=?,
+                connection_fingerprint=?,tenant_scope_id=?,enabled=0,next_run_at=NULL,
+                updated_at=? WHERE id=1 AND connection_fingerprint=? AND updated_at=?""",
+                (
+                    str(binding["alias"]),
+                    str(binding["fingerprint"]),
+                    str(binding["tenant_scope_id"]),
+                    now,
+                    expected_connection_fingerprint,
+                    expected_updated_at,
+                ),
+            )
+            if result.rowcount != 1:
+                raise ValueError(
+                    "The assurance policy or connection binding changed; refresh before rebinding"
+                )
+        return self.policy()
+
     def advance_schedule(self, *, scheduled_at: datetime | None = None) -> dict[str, Any]:
         policy = self.policy()
         now = scheduled_at or _now()
@@ -167,12 +235,14 @@ class AssuranceStore:
     def create_run(self, trigger: str, depth: str, call_budget: int) -> AssuranceRunRecord:
         run_id = str(uuid4())
         now = _now().isoformat()
+        policy = self.policy()
         with self._lock, self.connect() as db:
             db.execute(
                 """INSERT INTO assurance_runs
                 (id,trigger,depth,status,phase,progress,label,detail,metrics,summary,error,
                 call_budget,calls_used,cancel_requested,recovery_count,created_at,started_at,
-                completed_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                completed_at,updated_at,connection_alias,connection_fingerprint,tenant_scope_id)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     run_id,
                     trigger,
@@ -193,6 +263,9 @@ class AssuranceStore:
                     None,
                     None,
                     now,
+                    policy["connection_alias"],
+                    policy["connection_fingerprint"],
+                    policy["tenant_scope_id"],
                 ),
             )
         result = self.get_run(run_id)
@@ -723,6 +796,9 @@ class AssuranceStore:
             "next_run_at": row["next_run_at"],
             "last_scheduled_at": row["last_scheduled_at"],
             "updated_at": row["updated_at"],
+            "connection_alias": row["connection_alias"],
+            "connection_fingerprint": row["connection_fingerprint"],
+            "tenant_scope_id": row["tenant_scope_id"],
         }
 
     @staticmethod
@@ -743,11 +819,25 @@ class AssuranceStore:
             calls_used=int(row["calls_used"]),
             cancel_requested=bool(row["cancel_requested"]),
             recovery_count=int(row["recovery_count"]),
+            connection_alias=row["connection_alias"],
+            connection_fingerprint=row["connection_fingerprint"],
+            tenant_scope_id=row["tenant_scope_id"],
             created_at=row["created_at"],
             started_at=row["started_at"],
             completed_at=row["completed_at"],
             updated_at=row["updated_at"],
         )
+
+    @staticmethod
+    def _ensure_column(
+        db: sqlite3.Connection,
+        table: str,
+        column: str,
+        declaration: str,
+    ) -> None:
+        columns = {str(row["name"]) for row in db.execute(f"PRAGMA table_info({table})")}
+        if column not in columns:
+            db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
 
     @staticmethod
     def _notification(row: sqlite3.Row) -> dict[str, Any]:

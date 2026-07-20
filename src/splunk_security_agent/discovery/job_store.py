@@ -57,8 +57,22 @@ class DiscoveryJobStore:
                     ON discovery_job_events(job_id, id DESC);
                 """
             )
+            self._ensure_column(db, "discovery_jobs", "connection_alias", "TEXT NOT NULL DEFAULT 'primary'")
+            self._ensure_column(db, "discovery_jobs", "connection_fingerprint", "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column(db, "discovery_jobs", "tenant_scope_id", "TEXT NOT NULL DEFAULT ''")
 
-    def create_job(self, depth: str, requested_by: str, call_budget: int) -> DiscoveryJobRecord:
+    def create_job(
+        self,
+        depth: str,
+        requested_by: str,
+        call_budget: int,
+        binding: dict[str, Any] | None = None,
+    ) -> DiscoveryJobRecord:
+        binding = binding or {
+            "alias": "primary",
+            "fingerprint": "0" * 64,
+            "tenant_scope_id": "workspace-primary",
+        }
         job_id = str(uuid4())
         now = _now()
         label = "Queued for manual discovery"
@@ -74,8 +88,9 @@ class DiscoveryJobStore:
                 """INSERT INTO discovery_jobs
                 (id,depth,requested_by,status,phase,progress,label,detail,metrics,summary,
                 result,result_run_id,error,call_budget,calls_used,cancel_requested,
-                recovery_count,created_at,started_at,completed_at,updated_at)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                recovery_count,connection_alias,connection_fingerprint,tenant_scope_id,
+                created_at,started_at,completed_at,updated_at)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     job_id,
                     depth,
@@ -94,6 +109,9 @@ class DiscoveryJobStore:
                     0,
                     0,
                     0,
+                    str(binding["alias"]),
+                    str(binding["fingerprint"]),
+                    str(binding["tenant_scope_id"]),
                     now,
                     None,
                     None,
@@ -116,6 +134,20 @@ class DiscoveryJobStore:
         result = self.get_job(job_id)
         assert result is not None
         return result
+
+    def bind_unbound(self, binding: dict[str, Any]) -> int:
+        """One-time migration for jobs created before connection identities existed."""
+        with self._lock, self.connect() as db:
+            result = db.execute(
+                """UPDATE discovery_jobs SET connection_alias=?,connection_fingerprint=?,
+                tenant_scope_id=? WHERE connection_fingerprint=''""",
+                (
+                    str(binding["alias"]),
+                    str(binding["fingerprint"]),
+                    str(binding["tenant_scope_id"]),
+                ),
+            )
+        return int(result.rowcount)
 
     def get_job(self, job_id: str) -> DiscoveryJobRecord | None:
         with self.connect() as db:
@@ -447,6 +479,17 @@ class DiscoveryJobStore:
         )
 
     @staticmethod
+    def _ensure_column(
+        db: sqlite3.Connection,
+        table: str,
+        column: str,
+        declaration: str,
+    ) -> None:
+        columns = {str(row["name"]) for row in db.execute(f"PRAGMA table_info({table})")}
+        if column not in columns:
+            db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
+
+    @staticmethod
     def _job(row: sqlite3.Row) -> DiscoveryJobRecord:
         return DiscoveryJobRecord(
             id=row["id"],
@@ -465,6 +508,9 @@ class DiscoveryJobStore:
             calls_used=int(row["calls_used"]),
             cancel_requested=bool(row["cancel_requested"]),
             recovery_count=int(row["recovery_count"]),
+            connection_alias=row["connection_alias"],
+            connection_fingerprint=row["connection_fingerprint"],
+            tenant_scope_id=row["tenant_scope_id"],
             created_at=row["created_at"],
             started_at=row["started_at"],
             completed_at=row["completed_at"],

@@ -34,6 +34,7 @@ from .benchmarks import (
 )
 from .cases import CaseCockpitService, CaseStore
 from .config import ConfigStore
+from .connections import ConnectionRegistryStore
 from .delivery import AssuranceDeliveryService, DeliveryStore
 from .detections import (
     DetectionDeploymentService,
@@ -77,6 +78,7 @@ from .schemas import (
     CaseUpdate,
     ChatRequest,
     CodeVulnerabilityScreenRequest,
+    ConnectionRebindRequest,
     ConnectionTestRequest,
     DeliveryApproval,
     DeliveryPolicyUpdate,
@@ -146,6 +148,12 @@ DATA = Path(os.getenv("SIGNALROOM_DATA_DIR", ROOT / "data")).resolve()
 class Services:
     def __init__(self):
         self.config = ConfigStore(DATA)
+        self.connection_registry = ConnectionRegistryStore(DATA / "connection_registry.db")
+        initial_settings = self.config.load()
+        self._connection_binding = self.connection_registry.sync_primary(
+            initial_settings.splunk,
+            demo_mode=initial_settings.demo_mode,
+        )
         self.model_trust_store = ModelTrustStore(DATA / "model_trust.db")
         self.model_trust = ModelTrustService(
             self.config,
@@ -236,11 +244,14 @@ class Services:
             self.cases,
         )
         self.time_series_schedule_store = TimeSeriesScheduleStore(DATA / "time_series_schedules.db")
+        self._bind_legacy_workflows()
         self.time_series_schedules = TimeSeriesScheduleService(
             self.time_series_schedule_store,
             self.time_series,
             self.audit,
             self._forecast_schedule_authorization,
+            self.validate_connection_binding,
+            splunk_factory=lambda: self.splunk,
         )
         self._fingerprint = ""
         self._splunk: Any = None
@@ -263,6 +274,8 @@ class Services:
             self.discovery_lock,
             self._assurance_preflight,
             self.audit,
+            self.current_connection_binding,
+            self.validate_connection_binding,
         )
         self.assurance = AssuranceService(
             self.assurance_store,
@@ -271,6 +284,64 @@ class Services:
             self._assurance_complete,
             self.discovery_lock,
             self._assurance_preflight,
+            self.validate_connection_binding,
+        )
+
+    def current_connection_binding(self) -> dict[str, Any]:
+        settings = self.config.load()
+        self._connection_binding = self.connection_registry.sync_primary(
+            settings.splunk,
+            demo_mode=settings.demo_mode,
+        )
+        return dict(self._connection_binding)
+
+    def validate_connection_binding(
+        self,
+        alias: str,
+        fingerprint: str,
+        tenant_scope_id: str,
+    ) -> tuple[bool, str]:
+        self.current_connection_binding()
+        return self.connection_registry.validate(alias, fingerprint, tenant_scope_id)
+
+    def _bind_legacy_workflows(self) -> None:
+        self.discovery_job_store.bind_unbound(self._connection_binding)
+        self.assurance_store.bind_unbound(self._connection_binding)
+        self.time_series_schedule_store.bind_unbound(self._connection_binding)
+
+    def connection_overview(self) -> dict[str, Any]:
+        current = self.current_connection_binding()
+
+        def state(value: dict[str, Any]) -> dict[str, Any]:
+            valid, reason = self.connection_registry.validate(
+                str(value.get("connection_alias") or "primary"),
+                str(value.get("connection_fingerprint") or ""),
+                str(value.get("tenant_scope_id") or ""),
+            )
+            return {
+                **value,
+                "binding_current": valid,
+                "binding_status": "current" if valid else "rebind-required",
+                "binding_detail": reason,
+            }
+
+        policy = state(self.assurance_store.policy())
+        schedules = [state(item) for item in self.time_series_schedule_store.list()]
+        jobs = [
+            state(item.model_dump(mode="json"))
+            for item in self.discovery_job_store.list_jobs(limit=10)
+        ]
+        return self.connection_registry.overview(
+            {
+                "current_fingerprint": current["fingerprint"],
+                "assurance_policy": policy,
+                "forecast_schedules": schedules,
+                "recent_discovery_jobs": jobs,
+                "rebind_contract": (
+                    "Forecast schedules and assurance policy require an exact revision and "
+                    "updated-at match. Rebinding pauses scheduling. Discovery jobs are recreated."
+                ),
+            }
         )
 
     def _forecast_schedule_authorization(self, username: str) -> tuple[bool, str]:
@@ -320,6 +391,11 @@ class Services:
 
     def refresh(self, force: bool = False) -> None:
         settings = self.config.load()
+        self._connection_binding = self.connection_registry.sync_primary(
+            settings.splunk,
+            demo_mode=settings.demo_mode,
+        )
+        self._bind_legacy_workflows()
         fingerprint = json.dumps(settings.model_dump(mode="json"), sort_keys=True)
         if not force and fingerprint == self._fingerprint:
             return
@@ -745,6 +821,83 @@ async def auth_update_user(user_id: str, value: AuthUserUpdate, request: Request
 @app.get("/api/settings")
 async def get_settings() -> dict[str, Any]:
     return services.config.public_payload()
+
+
+@app.get("/api/connections")
+async def get_connections() -> dict[str, Any]:
+    return services.connection_overview()
+
+
+@app.post("/api/connections/rebind/assurance")
+async def rebind_assurance_connection(
+    value: ConnectionRebindRequest,
+    request: Request,
+) -> dict[str, Any]:
+    active = services.assurance_store.active_run()
+    if active is not None:
+        raise HTTPException(409, "Wait for the active assurance run before rebinding its policy")
+    binding = services.current_connection_binding()
+    try:
+        result = services.assurance_store.rebind_policy(
+            binding,
+            expected_connection_fingerprint=value.expected_connection_fingerprint,
+            expected_updated_at=value.expected_updated_at,
+        )
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    services.audit.record(
+        "connection.binding.rebound",
+        "rebind",
+        target_type="assurance-policy",
+        target_id="primary",
+        summary="Continuous assurance was paused and rebound to the current Primary Splunk revision.",
+        metadata={
+            "previous_fingerprint": value.expected_connection_fingerprint,
+            "connection_fingerprint": binding["fingerprint"],
+            "tenant_scope_id": binding["tenant_scope_id"],
+            "scheduling_paused": True,
+        },
+        actor=str((getattr(request.state, "principal", {}) or {}).get("username") or "local-operator"),
+    )
+    return result
+
+
+@app.post("/api/connections/rebind/time-series-schedules/{schedule_id}")
+async def rebind_time_series_schedule_connection(
+    schedule_id: str,
+    value: ConnectionRebindRequest,
+    request: Request,
+) -> dict[str, Any]:
+    active = services.time_series_schedule_store.active_attempt()
+    if active and active["schedule_id"] == schedule_id:
+        raise HTTPException(409, "Wait for the active shadow forecast before rebinding its schedule")
+    binding = services.current_connection_binding()
+    try:
+        result = services.time_series_schedule_store.rebind(
+            schedule_id,
+            binding,
+            expected_connection_fingerprint=value.expected_connection_fingerprint,
+            expected_updated_at=value.expected_updated_at,
+        )
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    if result is None:
+        raise HTTPException(404, "Shadow forecast schedule not found")
+    services.audit.record(
+        "connection.binding.rebound",
+        "rebind",
+        target_type="forecast-schedule",
+        target_id=schedule_id,
+        summary="A shadow forecast was paused and rebound to the current Primary Splunk revision.",
+        metadata={
+            "previous_fingerprint": value.expected_connection_fingerprint,
+            "connection_fingerprint": binding["fingerprint"],
+            "tenant_scope_id": binding["tenant_scope_id"],
+            "scheduling_paused": True,
+        },
+        actor=str((getattr(request.state, "principal", {}) or {}).get("username") or "local-operator"),
+    )
+    return result
 
 
 @app.post("/api/feedback", status_code=201)
@@ -1183,7 +1336,11 @@ async def create_time_series_schedule(
     actor = str(principal.get("username") or "local-operator")
     try:
         services.time_series.validate_contract(value.request)
-        result = services.time_series_schedule_store.create(value, actor=actor)
+        result = services.time_series_schedule_store.create(
+            value,
+            actor=actor,
+            binding=services.current_connection_binding(),
+        )
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
     services.time_series_schedules.wake()
@@ -1202,6 +1359,8 @@ async def create_time_series_schedule(
             "max_runs_per_day": result["max_runs_per_day"],
             "seasonal_comparison": result["seasonal_comparison"],
             "automatic_alerting": False,
+            "connection_fingerprint": result["connection_fingerprint"],
+            "tenant_scope_id": result["tenant_scope_id"],
         },
         actor=actor,
     )
@@ -1923,6 +2082,8 @@ async def create_discovery_job(value: DiscoveryRequest, request: Request) -> dic
             "depth": job.depth,
             "call_budget": job.call_budget,
             "restart_recovery": "fresh-read-only-retry",
+            "connection_fingerprint": job.connection_fingerprint,
+            "tenant_scope_id": job.tenant_scope_id,
         },
         actor=actor,
     )
@@ -2048,7 +2209,12 @@ async def create_assurance_run(request: AssuranceRunCreate) -> dict[str, Any]:
         target_type="assurance-run",
         target_id=run.id,
         summary=f"A manual {run.depth} continuous assurance run was queued.",
-        metadata={"depth": run.depth, "call_budget": run.call_budget},
+        metadata={
+            "depth": run.depth,
+            "call_budget": run.call_budget,
+            "connection_fingerprint": run.connection_fingerprint,
+            "tenant_scope_id": run.tenant_scope_id,
+        },
     )
     return run.model_dump(mode="json")
 

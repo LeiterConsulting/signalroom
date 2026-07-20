@@ -489,6 +489,18 @@
           <div class="connection-test-row"><button class="button ghost small" type="button" id="testSplunk">Run connection diagnostics</button><span class="test-result" id="splunkTestResult"></span></div>
           <section class="connection-diagnostics setup-diagnostics" id="setupConnectionDiagnostics" hidden aria-live="polite"><header><b>Connection contract</b><span></span></header><div class="diagnostic-stages"></div></section>
         </div>
+        <div class="form-section connection-architecture-section">
+          <h3>Connection identity and tenant scope</h3>
+          <p>SignalRoom binds durable work to the exact Splunk revision it was approved against. Changing the endpoint, TLS trust, demo/live mode, or tenant boundary creates a new immutable identity; saved work will not silently follow it.</p>
+          <div class="connection-identity-card" id="connectionIdentityCard" aria-live="polite"><span>LOADING</span><div><b>Reading the Primary connection identity…</b><small>Tokens are never included in an identity fingerprint.</small></div></div>
+          <div class="connection-workflow-bindings" id="connectionWorkflowBindings"></div>
+          <details class="future-mcp-catalog">
+            <summary><span>Future additional MCP connections</span><small>Purpose-led architecture preview · no connectors are executable yet</small></summary>
+            <div class="future-mcp-intro" id="futureMcpIntro"></div>
+            <div class="future-mcp-grid" id="futureMcpGrid"></div>
+            <div class="future-mcp-admission" id="futureMcpAdmission"></div>
+          </details>
+        </div>
         <div class="form-section"><h3>Model services</h3><p>Run chat and security reasoning through Ollama. SecureBERT specialists default to local Transformers after a one-time Hugging Face download; cloud inference remains optional.</p>
           <div class="model-onboarding">
             <article class="setup-provider-card">

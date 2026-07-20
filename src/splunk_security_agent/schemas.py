@@ -141,6 +141,15 @@ class TimeSeriesScheduleUpdate(BaseModel):
     seasonal_comparison: bool | None = None
 
 
+class ConnectionRebindRequest(BaseModel):
+    expected_connection_fingerprint: str = Field(
+        min_length=64,
+        max_length=64,
+        pattern=r"^[0-9a-f]{64}$",
+    )
+    expected_updated_at: str = Field(min_length=1, max_length=80)
+
+
 class TimeSeriesReviewDecision(BaseModel):
     expected_run_fingerprint: str = Field(
         min_length=64,
@@ -504,6 +513,9 @@ class DiscoveryJobRecord(BaseModel):
     calls_used: int = 0
     cancel_requested: bool = False
     recovery_count: int = 0
+    connection_alias: str = "primary"
+    connection_fingerprint: str = ""
+    tenant_scope_id: str = ""
     created_at: str
     started_at: str | None = None
     completed_at: str | None = None
@@ -596,6 +608,9 @@ class AssuranceRunRecord(BaseModel):
     calls_used: int = 0
     cancel_requested: bool = False
     recovery_count: int = 0
+    connection_alias: str = "primary"
+    connection_fingerprint: str = ""
+    tenant_scope_id: str = ""
     created_at: str
     started_at: str | None = None
     completed_at: str | None = None

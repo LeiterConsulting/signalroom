@@ -26,6 +26,10 @@ class DiscoveryJobService:
         run_lock: asyncio.Lock | None = None,
         preflight: Callable[[str, Any], Awaitable[dict[str, Any]]] | None = None,
         audit: Any | None = None,
+        connection_binding: Callable[[], dict[str, Any]] | None = None,
+        validate_connection_binding: (
+            Callable[[str, str, str], tuple[bool, str]] | None
+        ) = None,
         poll_seconds: float = 1.0,
     ):
         self.store = store
@@ -35,6 +39,8 @@ class DiscoveryJobService:
         self.run_lock = run_lock
         self.preflight = preflight
         self.audit = audit
+        self.connection_binding = connection_binding
+        self.validate_connection_binding = validate_connection_binding
         self.poll_seconds = poll_seconds
         self._worker: asyncio.Task[None] | None = None
         self._active_task: asyncio.Task[None] | None = None
@@ -66,7 +72,21 @@ class DiscoveryJobService:
             raise ValueError(f"Unsupported discovery depth: {depth}")
         if self.store.active_job() is not None:
             raise ValueError("A manual discovery job is already queued or running")
-        job = self.store.create_job(depth, requested_by or "local-operator", DISCOVERY_CALL_ESTIMATES[depth])
+        binding = (
+            self.connection_binding()
+            if self.connection_binding is not None
+            else {
+                "alias": "primary",
+                "fingerprint": "0" * 64,
+                "tenant_scope_id": "workspace-primary",
+            }
+        )
+        job = self.store.create_job(
+            depth,
+            requested_by or "local-operator",
+            DISCOVERY_CALL_ESTIMATES[depth],
+            binding,
+        )
         self._wake.set()
         return job
 
@@ -128,6 +148,24 @@ class DiscoveryJobService:
         running = self.store.mark_running(job_id)
         if running is None:
             return
+        if self.validate_connection_binding is not None:
+            valid, reason = self.validate_connection_binding(
+                running.connection_alias,
+                running.connection_fingerprint,
+                running.tenant_scope_id,
+            )
+            if not valid:
+                summary = {
+                    "discovery_run_id": "",
+                    "findings": 0,
+                    "collection_failures": 0,
+                    "connection_blocked": True,
+                    "blocking_stage": "connection-identity",
+                    "headline": reason,
+                }
+                self.store.complete_job(job_id, "connection-blocked", summary, None, 0)
+                self._record_completion(running, "connection-blocked", summary, 0)
+                return
         client = BudgetedSplunkClient(self.client_factory(), running.call_budget)
 
         async def progress(event: dict[str, Any]) -> None:
@@ -254,6 +292,8 @@ class DiscoveryJobService:
                     "depth": running.depth,
                     "splunk_calls": client.calls_used,
                     "call_budget": client.limit,
+                    "connection_fingerprint": running.connection_fingerprint,
+                    "tenant_scope_id": running.tenant_scope_id,
                 },
             )
 
@@ -310,6 +350,9 @@ class DiscoveryJobService:
                 "splunk_calls": calls_used,
                 "call_budget": job.call_budget,
                 "discovery_run_id": summary.get("discovery_run_id", ""),
+                "connection_alias": job.connection_alias,
+                "connection_fingerprint": job.connection_fingerprint,
+                "tenant_scope_id": job.tenant_scope_id,
             },
         )
 

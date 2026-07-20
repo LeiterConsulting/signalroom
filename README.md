@@ -8,6 +8,7 @@ This is a focused reimplementation inspired by [LeiterConsulting/splunk-discover
 
 - A polished local web workspace with setup, investigation chat, discovery, durable cases, context, and model views
 - Splunk MCP tool discovery and alias resolution for common server naming differences
+- Immutable Splunk connection revisions and tenant-scoped durable workflow bindings that fail closed before a call when Primary moves
 - Layered Splunk MCP diagnostics across configuration, DNS, TCP, TLS identity, authentication, and depth-specific tool contracts
 - Parallel read-only quick, standard, and deep discovery with change detection, JSON blueprints, and briefs
 - First-class security discovery across telemetry freshness, detection health, data-model readiness, and reusable RAG knowledge
@@ -124,6 +125,11 @@ authentication, and the read-only tool contract required by each discovery depth
 stored locally so the Discovery page can show the current blocking stage and last known successful check.
 Continuous assurance runs this same preflight and records `connection-blocked` with zero Splunk tool calls when
 the selected discovery depth is not ready.
+
+Connection identity is evaluated before transport preflight. Discovery jobs, assurance, and scheduled shadow
+forecasts retain the exact Primary Splunk revision and `workspace-primary` tenant scope they were approved
+against. Endpoint, TLS-trust, or demo/live changes never silently move durable work; administrators can explicitly
+rebind schedules and assurance policy, which pauses them for review. See [Connection identities and future MCPs](docs/CONNECTIONS.md).
 
 The client discovers available tools and resolves common aliases such as `splunk_run_query` / `run_splunk_query`, `splunk_get_indexes` / `get_indexes`, and related SAIA SPL helpers.
 

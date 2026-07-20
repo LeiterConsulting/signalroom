@@ -11,6 +11,7 @@ from .service import TimeSeriesForecastService
 
 ProgressCallback = Callable[[dict[str, Any]], Awaitable[None]]
 AuthorizationCheck = Callable[[str], tuple[bool, str]]
+ConnectionBindingCheck = Callable[[str, str, str], tuple[bool, str]]
 
 
 class TimeSeriesScheduleService:
@@ -22,13 +23,17 @@ class TimeSeriesScheduleService:
         forecast: TimeSeriesForecastService,
         audit: AuditStore,
         authorize_owner: AuthorizationCheck,
+        validate_connection_binding: ConnectionBindingCheck | None = None,
         *,
+        splunk_factory: Callable[[], Any] | None = None,
         poll_seconds: float = 2.0,
     ):
         self.store = store
         self.forecast = forecast
         self.audit = audit
         self.authorize_owner = authorize_owner
+        self.validate_connection_binding = validate_connection_binding
+        self.splunk_factory = splunk_factory
         self.poll_seconds = poll_seconds
         self._worker: asyncio.Task[None] | None = None
         self._active_task: asyncio.Task[None] | None = None
@@ -201,11 +206,24 @@ class TimeSeriesScheduleService:
             allowed, reason = self.authorize_owner(schedule["created_by"])
             if not allowed:
                 raise PermissionError(reason)
+            if self.validate_connection_binding is not None:
+                valid, reason = self.validate_connection_binding(
+                    running["connection_alias"],
+                    running["connection_fingerprint"],
+                    running["tenant_scope_id"],
+                )
+                if not valid:
+                    raise PermissionError(reason)
+            run_options = {
+                "actor": schedule["created_by"],
+                "seasonal_comparison": schedule["seasonal_comparison"],
+            }
+            if self.splunk_factory is not None:
+                run_options["splunk_client"] = self.splunk_factory()
             result = await self.forecast.run(
                 TimeSeriesForecastRequest(**schedule["request"]),
                 progress,
-                actor=schedule["created_by"],
-                seasonal_comparison=schedule["seasonal_comparison"],
+                **run_options,
             )
             completed = self.store.complete(attempt_id, result)
             comparison = (result.get("experiment") or {}).get("comparison") or {}
@@ -226,6 +244,9 @@ class TimeSeriesScheduleService:
                     "trigger": completed["trigger"],
                     "network_inference": False,
                     "automatic_alerting": False,
+                    "connection_alias": running["connection_alias"],
+                    "connection_fingerprint": running["connection_fingerprint"],
+                    "tenant_scope_id": running["tenant_scope_id"],
                 },
                 actor=schedule["created_by"],
             )
@@ -245,6 +266,9 @@ class TimeSeriesScheduleService:
                     "attempt_id": attempt_id,
                     "error": str(exc)[:1000],
                     "network_inference": False,
+                    "connection_alias": running["connection_alias"],
+                    "connection_fingerprint": running["connection_fingerprint"],
+                    "tenant_scope_id": running["tenant_scope_id"],
                 },
                 actor=schedule["created_by"],
             )

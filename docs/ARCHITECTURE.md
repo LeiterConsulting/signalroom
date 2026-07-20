@@ -26,6 +26,7 @@ FastAPI application ───── outward MCP tools
                    └── ValidationService ── draft → approve → bounded SPL → preserved evidence
 
 SplunkWorkloadService ── one wrapped Splunk MCP client per configured instance
+ConnectionRegistryStore ── mutable alias → immutable identity revision + tenant scope
         ├── read-only + deterministic relative-cost preflight
         ├── shared MCP-call and query concurrency admission
         ├── audit / enforce risk and UTC-day unit policy
@@ -408,9 +409,17 @@ there is deliberately no remote recovery route.
 
 ## Next production increments
 
-1. Multi-instance tenancy and data-plane isolation
-2. Per-connection authorization and identity lifecycle provisioning/deprovisioning
-3. Read-only deployment reconciliation for the audit operations pack when the Splunk MCP contract exposes the
+1. Tenant-scoped evidence retrieval, case boundaries, and explicit instance selection throughout Investigate
+2. Per-alias credentials, connection health, authorization, and identity lifecycle provisioning/deprovisioning
+3. Multi-instance comparison with source-preserving provenance and data-plane isolation
+4. Read-only deployment reconciliation for the audit operations pack when the Splunk MCP contract exposes the
    required index and knowledge-object configuration fields
-4. Bind every durable scheduled workflow to an immutable Splunk connection identity and tenant scope before
-   expanding beyond the current Primary-connection deployment model
+
+### Durable work is bound to an immutable connection revision
+
+`primary` is a mutable operator-facing alias. Its target is a SHA-256 identity over the normalized MCP
+endpoint, demo/live mode, TLS trust contract, and tenant scope. Credentials are excluded. Durable
+discovery, continuous assurance, and shadow forecasting copy that identity at creation and compare it
+before client creation. Drift fails closed with zero calls to the replacement instance. Explicit
+rebinds use optimistic concurrency and pause scheduling. The full contract and future multi-instance
+requirements are documented in [CONNECTIONS.md](CONNECTIONS.md).

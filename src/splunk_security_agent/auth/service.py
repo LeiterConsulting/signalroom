@@ -30,6 +30,7 @@ ADMIN_MUTATION_PREFIXES = (
     "/api/workload/",
     "/api/audit-export/",
     "/api/audit-operations/",
+    "/api/connections/rebind/",
 )
 ADMIN_MUTATION_PATHS = {
     "/api/auth/disable",

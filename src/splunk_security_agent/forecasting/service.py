@@ -567,6 +567,7 @@ class TimeSeriesForecastService:
         *,
         actor: str = "local-operator",
         seasonal_comparison: bool = True,
+        splunk_client: Any | None = None,
     ) -> dict[str, Any]:
         self.validate_contract(request)
         run_id = f"forecast-{uuid4().hex[:16]}"
@@ -602,7 +603,7 @@ class TimeSeriesForecastService:
             "latest_time": request.latest_time,
             "row_limit": request.row_limit,
         }
-        splunk = self.splunk_factory()
+        splunk = splunk_client if splunk_client is not None else self.splunk_factory()
         await report_progress(
             progress,
             "forecast:splunk",

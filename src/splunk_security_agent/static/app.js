@@ -1,5 +1,6 @@
 const state = {
   settings: null, artifacts: [], modelReadiness: null, conversationId: null, busy: false,
+  connections: null,
   ledger: [], lastDiscovery: null, promptPath: [], contextKind: 'all', cases: [],
   activeCase: null, caseCockpit: null, pendingCaseItem: null, detailActions: [], contextPage: 1, contextPageSize: 9,
   contextItems: [], editingArtifactId: null, editingCaseItemId: null, demoTourStep: -1,
@@ -731,16 +732,100 @@ function hydrateSettings() {
   $('#startDemoTour').hidden = !settings.demo_mode;
   applyAccessPermissions();
   hydrateWorkload();
+  renderConnections();
 }
 
 async function loadSettings() {
   state.settings = await api('/api/settings'); hydrateSettings();
+  await loadConnections();
   if (!state.settings.configured) $('#settingsModal').hidden = false;
   else if (state.settings.demo_mode && !localStorage.getItem('signalroom-demo-tour-complete')) {
     setTimeout(startDemoTour, 250);
   }
   loadModelReadiness();
   await loadDetectionRepositoryStatus();
+}
+
+async function loadConnections() {
+  try {
+    state.connections = await api('/api/connections');
+    renderConnections();
+  } catch (_) {
+    state.connections = null;
+  }
+}
+
+function shortFingerprint(value = '') {
+  return value ? `${String(value).slice(0, 12)}…` : 'unbound';
+}
+
+function connectionBindingRow(kind, item, label) {
+  if (!item) return '';
+  const current = Boolean(item.binding_current);
+  const canAdmin = Boolean(state.auth?.permissions?.can_administer);
+  const action = !current && kind !== 'discovery'
+    ? `<button class="button ${canAdmin ? 'primary' : 'ghost'} small" type="button" data-rebind-connection="${escapeHtml(kind)}" ${canAdmin ? '' : 'disabled'}>Rebind and pause</button>`
+    : kind === 'discovery' && !current
+      ? '<span class="binding-action-note">Create a fresh discovery job</span>'
+      : '<span class="binding-action-note">No action needed</span>';
+  const itemId = kind === 'forecast' ? ` data-workflow-id="${escapeHtml(item.id)}"` : '';
+  return `<article class="connection-binding-row ${current ? 'current' : 'stale'}"${itemId}>
+    <i aria-hidden="true"></i><div><b>${escapeHtml(label)}</b><small>${escapeHtml(item.tenant_scope_id || 'No tenant scope')} · revision ${escapeHtml(shortFingerprint(item.connection_fingerprint))}</small><p>${escapeHtml(item.binding_detail || '')}</p></div>${action}
+  </article>`;
+}
+
+function renderConnections() {
+  const value = state.connections;
+  if (!value || !$('#connectionIdentityCard')) return;
+  const primary = value.primary || {};
+  const identity = $('#connectionIdentityCard');
+  identity.className = `connection-identity-card ${primary.mode === 'demo' ? 'demo' : 'live'}`;
+  identity.innerHTML = `<span>${escapeHtml(primary.mode === 'demo' ? 'DEMO' : 'PRIMARY')}</span><div><b>${escapeHtml(primary.display_name || 'Primary Splunk')}</b><small>${escapeHtml(primary.tenant_scope_id || 'workspace-primary')} · immutable revision <code>${escapeHtml(shortFingerprint(primary.fingerprint))}</code></small><p>${escapeHtml(primary.endpoint || 'Endpoint not configured')} · TLS verification ${primary.verify_tls ? 'on' : 'off'}${primary.ca_bundle_bound ? ' · private CA bound' : ''}</p></div>`;
+  const workflows = value.workflow_bindings || {};
+  const assurance = workflows.assurance_policy;
+  const schedules = workflows.forecast_schedules || [];
+  const staleJobs = (workflows.recent_discovery_jobs || []).filter(item => !item.binding_current);
+  const rows = [
+    connectionBindingRow('assurance', assurance, 'Continuous assurance policy'),
+    ...schedules.map(item => connectionBindingRow('forecast', item, `Shadow forecast · ${item.title}`)),
+    ...staleJobs.slice(0, 3).map(item => connectionBindingRow('discovery', item, `Discovery job · ${String(item.id).slice(0, 8)}`))
+  ].filter(Boolean);
+  $('#connectionWorkflowBindings').innerHTML = rows.length
+    ? `<header><b>Durable workflow bindings</b><span>${rows.length} tracked</span></header>${rows.join('')}`
+    : '<div class="empty-inline compact-empty">No durable workflow bindings have been created.</div>';
+  const catalog = value.additional_mcp_connections || {};
+  $('#futureMcpIntro').innerHTML = `<b>Why add another MCP?</b><p>${escapeHtml(catalog.mission || '')}</p><span>Architecture preview · connection setup will arrive in a future release</span>`;
+  $('#futureMcpGrid').innerHTML = (catalog.suggestions || []).map(item => `<article><header><span>${escapeHtml(item.priority || 'later')}</span><b>${escapeHtml(item.label)}</b></header><p>${escapeHtml(item.purpose)}</p><dl><dt>Expected value</dt><dd>${escapeHtml(item.expected_value)}</dd><dt>Authority boundary</dt><dd>${escapeHtml(item.authority)}</dd></dl></article>`).join('');
+  $('#futureMcpAdmission').innerHTML = `<b>Admission contract before any connector is enabled</b><ul>${(catalog.admission_requirements || []).map(item => `<li>${escapeHtml(item)}</li>`).join('')}</ul><small>Tenant scope is currently execution and evidence metadata. Full multi-tenant database isolation is not represented as complete.</small>`;
+}
+
+async function rebindConnectionWorkflow(button) {
+  const kind = button.dataset.rebindConnection;
+  const row = button.closest('.connection-binding-row');
+  const workflows = state.connections?.workflow_bindings || {};
+  const item = kind === 'assurance'
+    ? workflows.assurance_policy
+    : (workflows.forecast_schedules || []).find(value => value.id === row?.dataset.workflowId);
+  if (!item) return;
+  if (!confirm(`Rebind this ${kind === 'assurance' ? 'assurance policy' : 'shadow forecast'} to the current Primary Splunk revision? Scheduling will be paused for review.`)) return;
+  button.disabled = true;
+  try {
+    const path = kind === 'assurance'
+      ? '/api/connections/rebind/assurance'
+      : `/api/connections/rebind/time-series-schedules/${encodeURIComponent(item.id)}`;
+    await api(path, {method:'POST',body:JSON.stringify({
+      expected_connection_fingerprint:item.connection_fingerprint,
+      expected_updated_at:item.updated_at
+    })});
+    await loadConnections();
+    if (kind === 'assurance') await loadAssurance();
+    else await loadTimeSeriesSchedules();
+    toast('Workflow rebound and paused for review');
+  } catch (error) {
+    toast(error.message);
+  } finally {
+    button.disabled = false;
+  }
 }
 
 function workloadPolicyPayload() {
@@ -4518,7 +4603,7 @@ async function saveSettings(event) {
   try {
     state.workload = await api('/api/workload/policy', { method:'PUT', body:JSON.stringify(workloadPolicyPayload()) });
     state.settings = await api('/api/settings', { method:'PUT', body:JSON.stringify({ settings, splunk_token:$('#splunkToken').value || null, huggingface_token:$('#hfToken').value || null }) });
-    hydrateSettings(); renderModels(); await loadModelReadiness(); await loadDetectionRepositoryStatus(); $('#settingsModal').hidden = true; $('#splunkToken').value = ''; $('#hfToken').value = ''; toast('Workspace saved');
+    hydrateSettings(); renderModels(); await loadConnections(); await loadModelReadiness(); await loadDetectionRepositoryStatus(); $('#settingsModal').hidden = true; $('#splunkToken').value = ''; $('#hfToken').value = ''; toast('Workspace saved');
     if (state.settings.demo_mode && !demoWasEnabled) startDemoTour();
   } catch (error) { toast(error.message); }
 }
@@ -4856,7 +4941,7 @@ document.addEventListener('click', async event => {
   }
   const change = event.target.closest('[data-change-investigate]');
   if (change) openInvestigation('discovery', `Explain and validate this change since the previous discovery: ${change.dataset.changeCategory} ${change.dataset.changeInvestigate}. Determine whether it is a real posture change or a collection issue.`, false);
-  if (event.target.closest('#openSettings,#configureModels,[data-open-settings]')) { $('#settingsModal').hidden = false; loadWorkload(); }
+  if (event.target.closest('#openSettings,#configureModels,[data-open-settings]')) { $('#settingsModal').hidden = false; loadWorkload(); loadConnections(); }
   if (event.target.closest('#closeSettings')) $('#settingsModal').hidden = true;
   if (event.target.closest('#addArtifact')) openArtifactEditor();
   if (event.target.closest('.close-artifact')) { $('#artifactModal').hidden = true; state.editingArtifactId = null; }
@@ -5039,6 +5124,10 @@ $('#goldenSuite').addEventListener('change', renderGoldenBenchmarks);
 $('#contextPrevious').addEventListener('click', () => { state.contextPage -= 1; renderArtifacts(state.contextItems); $('#contextView').scrollIntoView({ behavior:'smooth', block:'start' }); });
 $('#contextNext').addEventListener('click', () => { state.contextPage += 1; renderArtifacts(state.contextItems); $('#contextView').scrollIntoView({ behavior:'smooth', block:'start' }); });
 $('#settingsForm').addEventListener('submit', saveSettings);
+$('#connectionWorkflowBindings').addEventListener('click', event => {
+  const button = event.target.closest('[data-rebind-connection]');
+  if (button) rebindConnectionWorkflow(button);
+});
 $('#testSplunk').addEventListener('click', () => testConnection('splunk', null, $('#splunkTestResult')));
 $('#testRepository').addEventListener('click', testDetectionRepository);
 $('#checkModels').addEventListener('click', loadModelReadiness);

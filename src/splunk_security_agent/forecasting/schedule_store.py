@@ -114,8 +114,29 @@ class TimeSeriesScheduleStore:
                     ON time_series_schedule_reviews(state,created_at DESC);
                 """
             )
+            for table in ("time_series_schedules", "time_series_schedule_attempts"):
+                self._ensure_column(
+                    db, table, "connection_alias", "TEXT NOT NULL DEFAULT 'primary'"
+                )
+                self._ensure_column(
+                    db, table, "connection_fingerprint", "TEXT NOT NULL DEFAULT ''"
+                )
+                self._ensure_column(
+                    db, table, "tenant_scope_id", "TEXT NOT NULL DEFAULT ''"
+                )
 
-    def create(self, value: TimeSeriesScheduleCreate, *, actor: str) -> dict[str, Any]:
+    def create(
+        self,
+        value: TimeSeriesScheduleCreate,
+        *,
+        actor: str,
+        binding: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        binding = binding or {
+            "alias": "primary",
+            "fingerprint": "0" * 64,
+            "tenant_scope_id": "workspace-primary",
+        }
         schedule_id = str(uuid4())
         now = _now()
         next_run = now + timedelta(minutes=value.interval_minutes) if value.enabled else None
@@ -123,8 +144,9 @@ class TimeSeriesScheduleStore:
             db.execute(
                 """INSERT INTO time_series_schedules
                 (id,title,request_json,enabled,archived,interval_minutes,max_runs_per_day,
-                seasonal_comparison,created_by,created_at,updated_at,next_run_at,last_run_at)
-                VALUES (?,?,?,?,0,?,?,?,?,?,?,?,NULL)""",
+                seasonal_comparison,created_by,created_at,updated_at,next_run_at,last_run_at,
+                connection_alias,connection_fingerprint,tenant_scope_id)
+                VALUES (?,?,?,?,0,?,?,?,?,?,?,?,NULL,?,?,?)""",
                 (
                     schedule_id,
                     value.title.strip(),
@@ -137,11 +159,73 @@ class TimeSeriesScheduleStore:
                     now.isoformat(),
                     now.isoformat(),
                     next_run.isoformat() if next_run else None,
+                    str(binding["alias"]),
+                    str(binding["fingerprint"]),
+                    str(binding["tenant_scope_id"]),
                 ),
             )
         schedule = self.get(schedule_id)
         assert schedule is not None
         return schedule
+
+    def bind_unbound(self, binding: dict[str, Any]) -> dict[str, int]:
+        """One-time migration for schedules and attempts without historical identities."""
+        values = (
+            str(binding["alias"]),
+            str(binding["fingerprint"]),
+            str(binding["tenant_scope_id"]),
+        )
+        with self._lock, self.connect() as db:
+            schedules = db.execute(
+                """UPDATE time_series_schedules SET connection_alias=?,
+                connection_fingerprint=?,tenant_scope_id=?
+                WHERE connection_fingerprint=''""",
+                values,
+            )
+            attempts = db.execute(
+                """UPDATE time_series_schedule_attempts SET connection_alias=?,
+                connection_fingerprint=?,tenant_scope_id=?
+                WHERE connection_fingerprint=''""",
+                values,
+            )
+        return {
+            "schedules": int(schedules.rowcount),
+            "attempts": int(attempts.rowcount),
+        }
+
+    def rebind(
+        self,
+        schedule_id: str,
+        binding: dict[str, Any],
+        *,
+        expected_connection_fingerprint: str,
+        expected_updated_at: str,
+    ) -> dict[str, Any] | None:
+        current = self.get(schedule_id)
+        if current is None or current["archived"]:
+            return None
+        now = _now().isoformat()
+        with self._lock, self.connect() as db:
+            result = db.execute(
+                """UPDATE time_series_schedules SET connection_alias=?,
+                connection_fingerprint=?,tenant_scope_id=?,enabled=0,next_run_at=NULL,
+                updated_at=? WHERE id=? AND archived=0 AND connection_fingerprint=?
+                AND updated_at=?""",
+                (
+                    str(binding["alias"]),
+                    str(binding["fingerprint"]),
+                    str(binding["tenant_scope_id"]),
+                    now,
+                    schedule_id,
+                    expected_connection_fingerprint,
+                    expected_updated_at,
+                ),
+            )
+            if result.rowcount != 1:
+                raise ValueError(
+                    "The schedule or connection binding changed; refresh before rebinding"
+                )
+        return self.get(schedule_id)
 
     def get(self, schedule_id: str) -> dict[str, Any] | None:
         with self.connect() as db:
@@ -291,11 +375,21 @@ class TimeSeriesScheduleStore:
                 """INSERT INTO time_series_schedule_attempts
                 (id,schedule_id,trigger,status,phase,progress,label,detail,metrics_json,
                 error,experiment_run_id,run_fingerprint,recovery_count,created_at,
-                started_at,completed_at,updated_at)
+                started_at,completed_at,updated_at,connection_alias,
+                connection_fingerprint,tenant_scope_id)
                 VALUES (?,?,?,'queued','schedule:queued',0,
                 'Shadow forecast queued','Waiting for the single local forecast lane.','{}',
-                '','','',0,?,NULL,NULL,?)""",
-                (attempt_id, schedule_id, trigger, now.isoformat(), now.isoformat()),
+                '','','',0,?,NULL,NULL,?,?,?,?)""",
+                (
+                    attempt_id,
+                    schedule_id,
+                    trigger,
+                    now.isoformat(),
+                    now.isoformat(),
+                    schedule["connection_alias"],
+                    schedule["connection_fingerprint"],
+                    schedule["tenant_scope_id"],
+                ),
             )
             self._insert_event(
                 db,
@@ -699,6 +793,9 @@ class TimeSeriesScheduleStore:
             "updated_at": row["updated_at"],
             "next_run_at": row["next_run_at"],
             "last_run_at": row["last_run_at"],
+            "connection_alias": row["connection_alias"],
+            "connection_fingerprint": row["connection_fingerprint"],
+            "tenant_scope_id": row["tenant_scope_id"],
         }
 
     @staticmethod
@@ -717,11 +814,25 @@ class TimeSeriesScheduleStore:
             "experiment_run_id": row["experiment_run_id"],
             "run_fingerprint": row["run_fingerprint"],
             "recovery_count": int(row["recovery_count"]),
+            "connection_alias": row["connection_alias"],
+            "connection_fingerprint": row["connection_fingerprint"],
+            "tenant_scope_id": row["tenant_scope_id"],
             "created_at": row["created_at"],
             "started_at": row["started_at"],
             "completed_at": row["completed_at"],
             "updated_at": row["updated_at"],
         }
+
+    @staticmethod
+    def _ensure_column(
+        db: sqlite3.Connection,
+        table: str,
+        column: str,
+        declaration: str,
+    ) -> None:
+        columns = {str(row["name"]) for row in db.execute(f"PRAGMA table_info({table})")}
+        if column not in columns:
+            db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
 
     @staticmethod
     def _event(row: sqlite3.Row) -> dict[str, Any]:

@@ -59,6 +59,9 @@ class AssuranceService:
         on_complete: Callable[[str, dict[str, Any]], Awaitable[None] | None] | None = None,
         run_lock: asyncio.Lock | None = None,
         preflight: Callable[[str, Any], Awaitable[dict[str, Any]]] | None = None,
+        validate_connection_binding: (
+            Callable[[str, str, str], tuple[bool, str]] | None
+        ) = None,
         poll_seconds: float = 2.0,
     ):
         self.store = store
@@ -67,6 +70,7 @@ class AssuranceService:
         self.on_complete = on_complete
         self.run_lock = run_lock
         self.preflight = preflight
+        self.validate_connection_binding = validate_connection_binding
         self.poll_seconds = poll_seconds
         self._worker: asyncio.Task[None] | None = None
         self._active_task: asyncio.Task[None] | None = None
@@ -101,6 +105,14 @@ class AssuranceService:
 
     def enqueue(self, depth: str | None = None, trigger: str = "manual") -> AssuranceRunRecord:
         policy = self.store.policy()
+        if self.validate_connection_binding is not None:
+            valid, reason = self.validate_connection_binding(
+                policy["connection_alias"],
+                policy["connection_fingerprint"],
+                policy["tenant_scope_id"],
+            )
+            if not valid:
+                raise ValueError(reason)
         selected_depth = depth or policy["discovery_depth"]
         self._validate_budget(selected_depth, policy["max_splunk_calls_per_run"])
         if self.store.active_run() is not None:
@@ -208,6 +220,36 @@ class AssuranceService:
         running = self.store.mark_running(run_id)
         if running is None:
             return
+        if self.validate_connection_binding is not None:
+            valid, reason = self.validate_connection_binding(
+                running.connection_alias,
+                running.connection_fingerprint,
+                running.tenant_scope_id,
+            )
+            if not valid:
+                summary = {
+                    "discovery_run_id": "",
+                    "findings": 0,
+                    "high_findings": 0,
+                    "inventory_drift": 0,
+                    "coverage_drift": 0,
+                    "mltk_drift": 0,
+                    "dependency_issues": 0,
+                    "collection_failures": 0,
+                    "coverage_score": None,
+                    "connection_blocked": True,
+                    "blocking_stage": "connection-identity",
+                    "headline": reason,
+                }
+                self.store.complete_run(run_id, "connection-blocked", summary, 0)
+                self.store.add_notification(
+                    run_id,
+                    "high",
+                    "connection",
+                    "Continuous assurance requires an explicit connection rebind",
+                    reason,
+                )
+                return
         client = BudgetedSplunkClient(self.client_factory(), running.call_budget)
 
         async def progress(event: dict[str, Any]) -> None:

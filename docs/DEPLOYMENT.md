@@ -99,6 +99,12 @@ tenants. Deploy separate instances where hard data-plane tenancy is required.
 
 Setup exposes a **Verify TLS certificates** toggle for the Splunk MCP connection. Verification is enabled by default and should remain enabled for production connections.
 
+Changing the endpoint, demo/live mode, TLS verification, or private-CA trust advances the immutable
+Primary connection revision. Existing continuous-assurance and shadow-forecast schedules will require
+an administrator to rebind them in Settings and will be paused during that rebind. Recreate queued
+discovery work. This prevents a durable workflow approved for one Splunk instance from silently
+running against another.
+
 For an internal certificate authority, keep verification enabled and provide the CA bundle path in Setup. For a trusted development endpoint using a self-signed certificate, verification can be disabled explicitly. Disabling verification preserves transport encryption but does not validate the server certificate or identity.
 
 ## Outbound response webhook
