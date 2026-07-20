@@ -94,7 +94,9 @@ def test_optional_rbac_is_visible_and_keyboard_operable() -> None:
     assert 'value="viewer"' in INDEX_HTML
     assert 'value="analyst"' in INDEX_HTML
     assert 'value="admin"' in INDEX_HTML
-    assert 'id="newAuthPrimaryConnection"' in INDEX_HTML
+    assert 'id="newAuthConnections"' in INDEX_HTML
+    assert 'id="managedSplunkForm"' in INDEX_HTML
+    assert 'id="managedSplunkVerifyTls"' in INDEX_HTML
     assert "X-SignalRoom-CSRF" in APP_JS
     assert "await loadAuthStatus()" in APP_JS
     assert "if (state.auth.enabled && !state.auth.authenticated) return" in APP_JS

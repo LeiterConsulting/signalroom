@@ -59,6 +59,42 @@ def test_rbac_is_optional_and_bootstrap_is_session_safe(tmp_path) -> None:
     assert session["csrf_token"] not in tuple(stored)
 
 
+def test_connection_assignments_accept_registered_secondary_aliases(tmp_path) -> None:
+    service = AuthService(
+        AuthStore(tmp_path / "auth.db"),
+        AuditStore(tmp_path / "audit.db"),
+        lambda: [
+            {"id": "primary", "label": "Primary Splunk"},
+            {"id": "eu-prod", "label": "EU Production"},
+        ],
+    )
+    local = service.status()
+    assert local["principal"]["connection_ids"] == ["primary", "eu-prod"]
+    admin = bootstrap(service)["user"]
+    user = service.create_user(
+        AuthUserCreate(
+            username="eu-analyst",
+            display_name="EU Analyst",
+            role="analyst",
+            password="analyst password is long",
+            connection_ids=["eu-prod"],
+        ),
+        actor=admin,
+    )
+    assert user["connection_ids"] == ["eu-prod"]
+    with pytest.raises(ValueError, match="not recognized"):
+        service.create_user(
+            AuthUserCreate(
+                username="bad-alias",
+                display_name="Bad Alias",
+                role="analyst",
+                password="analyst password is long",
+                connection_ids=["retired"],
+            ),
+            actor=admin,
+        )
+
+
 def test_roles_and_connection_assignment_are_independent(tmp_path) -> None:
     service = auth_service(tmp_path)
     admin_session = bootstrap(service)

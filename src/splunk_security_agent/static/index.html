@@ -6,7 +6,7 @@
   <meta name="description" content="Local-first Splunk security agent with model routing, discovery, and evidence-backed chat.">
   <title>SignalRoom · Splunk Security Agent</title>
   <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 64 64%22><rect width=%2264%22 height=%2264%22 rx=%2214%22 fill=%22%2314251d%22/><path d=%22M17 40l10-10 8 8 13-15%22 fill=%22none%22 stroke=%22%233ed387%22 stroke-width=%226%22 stroke-linecap=%22round%22 stroke-linejoin=%22round%22/></svg>">
-  <link rel="stylesheet" href="/static/styles.css?v=20260720-splunk-scope-4">
+  <link rel="stylesheet" href="/static/styles.css?v=20260720-multi-splunk-2">
 </head>
 <body class="chat-active">
   <div class="app-shell">
@@ -500,8 +500,26 @@
           <p>SignalRoom binds durable work to the exact Splunk revision it was approved against. Changing the endpoint, TLS trust, demo/live mode, or tenant boundary creates a new immutable identity; saved work will not silently follow it.</p>
           <div class="connection-identity-card" id="connectionIdentityCard" aria-live="polite"><span>LOADING</span><div><b>Reading the Primary connection identity…</b><small>Tokens are never included in an identity fingerprint.</small></div></div>
           <div class="connection-workflow-bindings" id="connectionWorkflowBindings"></div>
+          <section class="managed-splunk-manager" aria-labelledby="managedSplunkTitle">
+            <header><div><h4 id="managedSplunkTitle">Additional Splunk instances</h4><p>Keep estates separate with an immutable endpoint identity, encrypted token, explicit tenant boundary, health gate, and per-user assignment.</p></div><button class="button ghost small" type="button" id="addSplunkConnection">Add Splunk instance</button></header>
+            <div class="managed-splunk-list" id="managedSplunkConnections"></div>
+            <div class="managed-splunk-form" id="managedSplunkForm" hidden>
+              <input id="managedSplunkEditingAlias" type="hidden">
+              <div class="form-grid">
+                <label><span>Stable alias</span><input id="managedSplunkAlias" minlength="3" maxlength="48" pattern="[a-z][a-z0-9-]{2,47}" placeholder="eu-production"><small class="field-help">Immutable label used in evidence provenance and user assignments.</small></label>
+                <label><span>Tenant scope ID</span><input id="managedSplunkTenant" minlength="3" maxlength="64" pattern="[a-z][a-z0-9._-]{2,63}" placeholder="tenant.eu-production"></label>
+                <label><span>Display name</span><input id="managedSplunkName" maxlength="240" placeholder="EU production Splunk"></label>
+                <label class="full"><span>MCP endpoint URL</span><input id="managedSplunkUrl" type="url" maxlength="2048" placeholder="https://eu-splunk.example:8089/services/mcp"></label>
+                <label class="full"><span>Encrypted MCP token</span><input id="managedSplunkToken" type="password" maxlength="4096" autocomplete="new-password" placeholder="Required when adding; leave blank while editing to keep it"><small class="field-help">Changing the token revokes execution admission until diagnostics succeed again.</small></label>
+                <label class="full switch-line nested-switch"><span><b>Verify TLS certificates</b><small>Recommended. A private CA path can be supplied for internal PKI.</small></span><input type="checkbox" id="managedSplunkVerifyTls" checked><span class="switch-control" aria-hidden="true"></span></label>
+                <div class="tls-warning full" id="managedSplunkTlsWarning" hidden><b>TLS verification is disabled</b><span>SignalRoom will not validate this Splunk server certificate or identity.</span></div>
+                <label class="full" id="managedSplunkCaLabel"><span>Private CA bundle path <em>optional</em></span><input id="managedSplunkCa" maxlength="4000" placeholder="C:\certs\organization-ca.pem or /etc/ssl/org-ca.pem"></label>
+              </div>
+              <footer><span id="managedSplunkFormResult" role="status" aria-live="polite"></span><div><button class="button ghost small" type="button" id="cancelSplunkConnection">Cancel</button><button class="button primary small" type="button" id="saveSplunkConnection">Save disabled connection</button></div></footer>
+            </div>
+          </section>
           <details class="future-mcp-catalog">
-            <summary><span>Future additional MCP connections</span><small>Purpose-led architecture preview · no connectors are executable yet</small></summary>
+            <summary><span>Further MCP connections</span><small>Purpose-led roadmap · Splunk multi-instance is available now</small></summary>
             <div class="future-mcp-intro" id="futureMcpIntro"></div>
             <div class="future-mcp-grid" id="futureMcpGrid"></div>
             <div class="future-mcp-admission" id="futureMcpAdmission"></div>
@@ -609,7 +627,7 @@
                 <label><span>Display name</span><input id="newAuthDisplayName" autocomplete="off" maxlength="120"></label>
                 <label><span>Role</span><select id="newAuthRole"><option value="viewer">Viewer · read only</option><option value="analyst" selected>Analyst · investigate and curate</option><option value="admin">Admin · platform control</option></select></label>
                 <label><span>Temporary password</span><input id="newAuthPassword" type="password" autocomplete="new-password" minlength="12" maxlength="1024"></label>
-                <label class="full access-connection-check"><input id="newAuthPrimaryConnection" type="checkbox" checked><span>Assign Primary Splunk connection</span></label>
+                <div class="full access-connection-options" id="newAuthConnections"></div>
               </div>
               <div class="access-actions"><button class="button ghost small" id="createAuthUser" type="button">Create user</button><span id="createAuthUserResult" role="status" aria-live="polite"></span></div>
             </div>
@@ -751,6 +769,6 @@
     </aside>
   </div>
   <div class="toast" id="toast" role="status"></div>
-  <script src="/static/app.js?v=20260720-splunk-scope-2" defer></script>
+  <script src="/static/app.js?v=20260720-multi-splunk-1" defer></script>
 </body>
 </html>

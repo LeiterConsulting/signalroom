@@ -211,6 +211,7 @@ function hideLogin() {
 
 function renderAuthUsers() {
   const users = state.authUsers || [];
+  const connections = state.auth?.available_connections || [{id:'primary',label:'Primary Splunk'}];
   $('#rbacUserCount').textContent = `${users.length} user${users.length === 1 ? '' : 's'}`;
   $('#rbacUsers').innerHTML = users.length ? users.map(user => {
     const external = user.auth_source === 'oidc';
@@ -221,7 +222,7 @@ function renderAuthUsers() {
       <div class="access-user-controls">
         <label><span>Role${external ? ' · group managed' : ''}</span><select data-auth-role ${external ? 'disabled' : ''}><option value="viewer" ${user.role === 'viewer' ? 'selected' : ''}>Viewer · read only</option><option value="analyst" ${user.role === 'analyst' ? 'selected' : ''}>Analyst · investigate</option><option value="admin" ${user.role === 'admin' ? 'selected' : ''}>Admin · platform control</option></select></label>
         <label><span>${external ? 'Credential authority' : 'Replace password · optional'}</span><input data-auth-password type="password" autocomplete="new-password" minlength="12" maxlength="1024" placeholder="${external ? 'Managed by identity provider' : 'Leave unchanged'}" ${external ? 'disabled' : ''}></label>
-        <div class="access-user-checks"><label><input data-auth-active type="checkbox" ${user.active ? 'checked' : ''}> Active account</label><label><input data-auth-primary type="checkbox" ${(user.connection_ids || []).includes('primary') ? 'checked' : ''} ${external ? 'disabled' : ''}> Primary Splunk assigned${external ? ' by OIDC policy' : ''}</label></div>
+        <div class="access-user-checks"><label><input data-auth-active type="checkbox" ${user.active ? 'checked' : ''}> Active account</label>${connections.map(item => `<label><input data-auth-connection="${escapeHtml(item.id)}" type="checkbox" ${(user.connection_ids || []).includes(item.id) ? 'checked' : ''} ${external ? 'disabled' : ''}> ${escapeHtml(item.label)}${external ? ' · policy managed' : ''}</label>`).join('')}</div>
         <button class="button ghost small" type="button" data-save-auth-user>Save access</button>
       </div>
     </article>`;
@@ -240,7 +241,7 @@ function applyAccessPermissions() {
   const authenticated = Boolean(state.auth?.authenticated);
   const canAdminister = Boolean(state.auth?.permissions?.can_administer);
   const canChange = Boolean(state.auth?.permissions?.can_change);
-  const canUseConnection = Boolean(state.auth?.permissions?.can_use_primary_connection);
+  const canUseConnection = Boolean(state.auth?.permissions?.can_use_connection ?? state.auth?.permissions?.can_use_primary_connection);
   document.body.dataset.accessRole = state.auth?.principal?.role || '';
   document.body.classList.toggle('settings-readonly', authenticated && !canAdminister);
   $('#accessReadOnlyNote').hidden = !authenticated || canAdminister;
@@ -322,7 +323,7 @@ function renderAuth() {
   $('#accessIdentity').textContent = principal?.display_name || 'Sign-in required';
   $('#accessAvatar').textContent = (principal?.display_name || '?').trim().charAt(0).toUpperCase();
   $('#accessMode').textContent = auth.enabled
-    ? `${principal?.role || 'locked'} · ${auth.permissions?.can_use_primary_connection ? 'Primary Splunk' : 'no Splunk assignment'}`
+    ? `${principal?.role || 'locked'} · ${(principal?.connection_ids || []).length ? `${principal.connection_ids.length} Splunk scope${principal.connection_ids.length === 1 ? '' : 's'}` : 'no Splunk assignment'}`
     : 'POC mode · RBAC off';
   $('#logoutButton').hidden = !auth.enabled || !auth.authenticated;
   $('#enterpriseLogin').hidden = !auth.oidc?.enabled;
@@ -345,6 +346,8 @@ function renderAuth() {
     ? `Named users, roles, protected sessions, and per-user Splunk connection assignment are active.${auth.oidc?.enabled ? ` Enterprise sign-in is available through ${auth.oidc.provider_label}.` : ''}`
     : 'SignalRoom is in local single-user mode. This keeps POC and guided-demo setup frictionless; keep the service bound to localhost until named access is enabled.';
   renderOidcPolicy();
+  const connectionOptions = auth.available_connections || [{id:'primary',label:'Primary Splunk'}];
+  $('#newAuthConnections').innerHTML = connectionOptions.map((item, index) => `<label class="access-connection-check"><input data-new-auth-connection="${escapeHtml(item.id)}" type="checkbox" ${index === 0 ? 'checked' : ''}><span>Assign ${escapeHtml(item.label)}</span></label>`).join('');
   applyAccessPermissions();
   if (auth.enabled && !auth.authenticated) showLogin(); else hideLogin();
 }
@@ -427,10 +430,10 @@ async function createAuthUser() {
       display_name:displayName,
       role:$('#newAuthRole').value,
       password,
-      connection_ids:$('#newAuthPrimaryConnection').checked ? ['primary'] : []
+      connection_ids:$$('[data-new-auth-connection]:checked').map(node => node.dataset.newAuthConnection)
     })});
     ['#newAuthUsername','#newAuthDisplayName','#newAuthPassword'].forEach(selector => $(selector).value = '');
-    $('#newAuthRole').value = 'analyst'; $('#newAuthPrimaryConnection').checked = true;
+    $('#newAuthRole').value = 'analyst'; $$('[data-new-auth-connection]').forEach((node, index) => { node.checked = index === 0; });
     await loadAuthUsers(); output.textContent = 'Named user created.';
   } catch (error) { output.textContent = error.message; }
 }
@@ -444,7 +447,7 @@ async function saveAuthUser(button) {
   } : {
     role:card.querySelector('[data-auth-role]').value,
     active:card.querySelector('[data-auth-active]').checked,
-    connection_ids:card.querySelector('[data-auth-primary]').checked ? ['primary'] : [],
+    connection_ids:Array.from(card.querySelectorAll('[data-auth-connection]:checked')).map(node => node.dataset.authConnection),
     password:password || null
   };
   try {
@@ -845,10 +848,134 @@ function renderConnections() {
   $('#connectionWorkflowBindings').innerHTML = rows.length
     ? `<header><b>Durable workflow bindings</b><span>${rows.length} tracked</span></header>${rows.join('')}`
     : '<div class="empty-inline compact-empty">No durable workflow bindings have been created.</div>';
+  renderManagedSplunkConnections();
   const catalog = value.additional_mcp_connections || {};
-  $('#futureMcpIntro').innerHTML = `<b>Why add another MCP?</b><p>${escapeHtml(catalog.mission || '')}</p><span>Architecture preview · connection setup will arrive in a future release</span>`;
+  $('#futureMcpIntro').innerHTML = `<b>Why add another MCP?</b><p>${escapeHtml(catalog.mission || '')}</p><span>Additional Splunk is executable now · other connector types remain governed roadmap candidates</span>`;
   $('#futureMcpGrid').innerHTML = (catalog.suggestions || []).map(item => `<article><header><span>${escapeHtml(item.priority || 'later')}</span><b>${escapeHtml(item.label)}</b></header><p>${escapeHtml(item.purpose)}</p><dl><dt>Expected value</dt><dd>${escapeHtml(item.expected_value)}</dd><dt>Authority boundary</dt><dd>${escapeHtml(item.authority)}</dd></dl></article>`).join('');
   $('#futureMcpAdmission').innerHTML = `<b>Admission contract before any connector is enabled</b><ul>${(catalog.admission_requirements || []).map(item => `<li>${escapeHtml(item)}</li>`).join('')}</ul><small>Tenant scope now gates evidence, cases, discovery history, and investigation retrieval. Separate per-tenant database files remain a future hard-isolation option.</small>`;
+}
+
+function renderManagedSplunkConnections() {
+  const holder = $('#managedSplunkConnections'); if (!holder) return;
+  const items = state.connections?.managed_splunk_connections || [];
+  const assigned = new Set(state.auth?.principal?.connection_ids || []);
+  holder.innerHTML = items.length ? items.map(item => {
+    const ready = Boolean(item.diagnostics_ready && item.diagnostics_fingerprint === item.fingerprint);
+    const status = item.enabled ? 'ENABLED' : ready ? 'READY TO ENABLE' : 'DIAGNOSTICS REQUIRED';
+    const statusClass = item.enabled ? 'enabled' : ready ? 'ready' : 'draft';
+    const assignment = !state.auth?.enabled || assigned.has(item.alias)
+      ? 'Available to this operator'
+      : 'Not assigned to this signed-in user';
+    return `<article class="managed-splunk-card ${statusClass}" data-managed-splunk="${escapeHtml(item.alias)}">
+      <header><div><span>${escapeHtml(status)}</span><h5>${escapeHtml(item.display_name || item.alias)}</h5><small><code>${escapeHtml(item.alias)}</code> · ${escapeHtml(item.tenant_scope_id)}</small></div><b>${item.verify_tls ? 'TLS verified' : 'TLS unverified'}</b></header>
+      <p>${escapeHtml(item.endpoint)} · revision <code>${escapeHtml(shortFingerprint(item.fingerprint))}</code>${item.ca_bundle_bound ? ' · private CA bound' : ''}</p>
+      <div class="managed-splunk-contract"><span>${item.token_configured ? 'Encrypted token stored' : 'Token missing'}</span><span>${escapeHtml(assignment)}</span><span>${item.diagnostics_checked_at ? `Last checked ${escapeHtml(new Date(item.diagnostics_checked_at).toLocaleString())}` : 'Never checked'}</span></div>
+      <div class="managed-splunk-progress" data-managed-splunk-progress role="status" aria-live="polite">${ready ? 'The exact current revision passed the quick discovery tool contract.' : 'Run diagnostics before this connection can enter an execution selector.'}</div>
+      <footer><button class="button ghost small" type="button" data-diagnose-managed-splunk="${escapeHtml(item.alias)}">Run diagnostics</button>${item.enabled ? `<button class="button ghost small" type="button" data-admit-managed-splunk="${escapeHtml(item.alias)}" data-enabled="false">Disable</button>` : `<button class="button primary small" type="button" data-admit-managed-splunk="${escapeHtml(item.alias)}" data-enabled="true" ${ready ? '' : 'disabled'}>Enable scope</button>`}<button class="button ghost small" type="button" data-edit-managed-splunk="${escapeHtml(item.alias)}">Edit</button><button class="button ghost small danger-action" type="button" data-archive-managed-splunk="${escapeHtml(item.alias)}">Archive</button></footer>
+    </article>`;
+  }).join('') : '<div class="empty-inline compact-empty">No additional Splunk instances are configured. Primary remains the only execution scope.</div>';
+}
+
+function resetManagedSplunkForm() {
+  ['#managedSplunkAlias','#managedSplunkTenant','#managedSplunkName','#managedSplunkUrl','#managedSplunkToken','#managedSplunkCa'].forEach(selector => { $(selector).value = ''; });
+  $('#managedSplunkEditingAlias').value = '';
+  $('#managedSplunkAlias').disabled = false;
+  $('#managedSplunkVerifyTls').checked = true;
+  $('#managedSplunkToken').required = true;
+  $('#managedSplunkFormResult').textContent = '';
+  updateManagedSplunkTlsControls();
+}
+
+function openManagedSplunkForm(alias = '') {
+  resetManagedSplunkForm();
+  if (alias) {
+    const item = (state.connections?.managed_splunk_connections || []).find(value => value.alias === alias);
+    if (!item) return;
+    $('#managedSplunkEditingAlias').value = alias;
+    $('#managedSplunkAlias').value = alias;
+    $('#managedSplunkAlias').disabled = true;
+    $('#managedSplunkTenant').value = item.tenant_scope_id || '';
+    $('#managedSplunkName').value = item.display_name || '';
+    $('#managedSplunkUrl').value = item.endpoint || '';
+    $('#managedSplunkVerifyTls').checked = Boolean(item.verify_tls);
+    $('#managedSplunkCa').value = item.ca_bundle || '';
+    $('#managedSplunkToken').required = false;
+    $('#managedSplunkToken').placeholder = item.token_configured ? 'Leave blank to keep the encrypted token' : 'Token required';
+  }
+  $('#managedSplunkForm').hidden = false;
+  updateManagedSplunkTlsControls();
+  $('#managedSplunkAlias').focus();
+}
+
+function updateManagedSplunkTlsControls() {
+  const verified = $('#managedSplunkVerifyTls').checked;
+  $('#managedSplunkTlsWarning').hidden = verified;
+  $('#managedSplunkCaLabel').hidden = !verified;
+}
+
+async function saveManagedSplunkConnection() {
+  const editing = $('#managedSplunkEditingAlias').value;
+  const verify = $('#managedSplunkVerifyTls').checked;
+  const token = $('#managedSplunkToken').value;
+  const alias = $('#managedSplunkAlias').value.trim();
+  const tenant = $('#managedSplunkTenant').value.trim();
+  const name = $('#managedSplunkName').value.trim();
+  const url = $('#managedSplunkUrl').value.trim();
+  const output = $('#managedSplunkFormResult');
+  if (!/^[a-z][a-z0-9-]{2,47}$/.test(alias) || !/^[a-z][a-z0-9._-]{2,63}$/.test(tenant) || !name || !url || (!editing && !token)) {
+    output.textContent = 'Enter a valid lowercase alias, tenant scope, display name, endpoint, and token.';
+    return;
+  }
+  const payload = {
+    tenant_scope_id:tenant,
+    display_name:name,
+    url,
+    verify_ssl:verify,
+    ca_bundle:verify ? ($('#managedSplunkCa').value.trim() || null) : null
+  };
+  if (!editing) { payload.alias = alias; payload.token = token; }
+  else if (token) payload.token = token;
+  output.textContent = 'Saving disabled revision…';
+  try {
+    await api(editing ? `/api/connections/splunk/${encodeURIComponent(editing)}` : '/api/connections/splunk', {method:editing ? 'PATCH' : 'POST',body:JSON.stringify(payload)});
+    $('#managedSplunkForm').hidden = true;
+    await Promise.all([loadConnections(), loadAuthStatus()]);
+    toast(editing ? 'Connection revision saved; re-run diagnostics if its contract changed' : 'Connection saved disabled; run diagnostics to admit it');
+  } catch (error) { output.textContent = error.message; }
+}
+
+async function diagnoseManagedSplunk(alias, button) {
+  const card = button.closest('[data-managed-splunk]');
+  const output = card.querySelector('[data-managed-splunk-progress]');
+  button.disabled = true; output.textContent = 'Starting configuration and network checks…';
+  try {
+    const result = await streamApi(`/api/connections/splunk/${encodeURIComponent(alias)}/diagnostics/stream`, {}, event => {
+      if (event.type === 'progress' || event.type === 'heartbeat') output.textContent = `${event.label || 'Working'} · ${event.detail || ''}`;
+    });
+    output.textContent = result.ready ? `Ready · ${result.tool_count || 0} MCP tools satisfy quick discovery.` : `Blocked at ${String(result.blocking_stage || 'preflight').replaceAll('-', ' ')}.`;
+    await loadConnections();
+    toast(result.ready ? 'Connection revision is ready for explicit admission' : 'Connection remains disabled');
+  } catch (error) { output.textContent = error.message; }
+  finally { button.disabled = false; }
+}
+
+async function setManagedSplunkAdmission(alias, enabled, button) {
+  button.disabled = true;
+  try {
+    await api(`/api/connections/splunk/${encodeURIComponent(alias)}/admission`, {method:'PATCH',body:JSON.stringify({enabled})});
+    await loadConnections();
+    toast(enabled ? 'Splunk scope admitted to selectors' : 'Splunk scope disabled; retained evidence is unchanged');
+  } catch (error) { toast(error.message); button.disabled = false; }
+}
+
+async function archiveManagedSplunk(alias) {
+  const item = (state.connections?.managed_splunk_connections || []).find(value => value.alias === alias);
+  if (!item || !confirm(`Archive “${item.display_name}”? Its encrypted token will be removed. Existing evidence and immutable provenance will be retained.`)) return;
+  try {
+    await api(`/api/connections/splunk/${encodeURIComponent(alias)}`, {method:'DELETE'});
+    await Promise.all([loadConnections(), loadAuthStatus()]);
+    toast('Connection archived; retained evidence remains bound to its immutable revision');
+  } catch (error) { toast(error.message); }
 }
 
 async function rebindConnectionWorkflow(button) {
@@ -4755,6 +4882,14 @@ function navigateView(name) {
 }
 
 document.addEventListener('click', async event => {
+  const diagnoseManaged = event.target.closest('[data-diagnose-managed-splunk]');
+  if (diagnoseManaged) { await diagnoseManagedSplunk(diagnoseManaged.dataset.diagnoseManagedSplunk, diagnoseManaged); return; }
+  const admitManaged = event.target.closest('[data-admit-managed-splunk]');
+  if (admitManaged) { await setManagedSplunkAdmission(admitManaged.dataset.admitManagedSplunk, admitManaged.dataset.enabled === 'true', admitManaged); return; }
+  const editManaged = event.target.closest('[data-edit-managed-splunk]');
+  if (editManaged) { openManagedSplunkForm(editManaged.dataset.editManagedSplunk); return; }
+  const archiveManaged = event.target.closest('[data-archive-managed-splunk]');
+  if (archiveManaged) { await archiveManagedSplunk(archiveManaged.dataset.archiveManagedSplunk); return; }
   const saveAccess = event.target.closest('[data-save-auth-user]');
   if (saveAccess) { await saveAuthUser(saveAccess); return; }
   const openDetectionButton = event.target.closest('[data-open-detection]');
@@ -5180,6 +5315,10 @@ $('#goldenSuite').addEventListener('change', renderGoldenBenchmarks);
 $('#contextPrevious').addEventListener('click', () => { state.contextPage -= 1; renderArtifacts(state.contextItems); $('#contextView').scrollIntoView({ behavior:'smooth', block:'start' }); });
 $('#contextNext').addEventListener('click', () => { state.contextPage += 1; renderArtifacts(state.contextItems); $('#contextView').scrollIntoView({ behavior:'smooth', block:'start' }); });
 $('#settingsForm').addEventListener('submit', saveSettings);
+$('#saveSplunkConnection').addEventListener('click', saveManagedSplunkConnection);
+$('#addSplunkConnection').addEventListener('click', () => openManagedSplunkForm());
+$('#cancelSplunkConnection').addEventListener('click', () => { resetManagedSplunkForm(); $('#managedSplunkForm').hidden = true; });
+$('#managedSplunkVerifyTls').addEventListener('change', updateManagedSplunkTlsControls);
 $('#connectionWorkflowBindings').addEventListener('click', event => {
   const button = event.target.closest('[data-rebind-connection]');
   if (button) rebindConnectionWorkflow(button);

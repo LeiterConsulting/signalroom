@@ -48,7 +48,7 @@ Before allowing another person or host to reach the service:
 
 1. Open **Setup → Access control · optional**.
 2. Create the first named administrator with a password of at least 12 characters.
-3. Add viewer, analyst, or admin identities and independently choose whether each may use Primary Splunk.
+3. Add viewer, analyst, or admin identities and independently assign Primary or any admitted additional Splunk aliases.
 4. Put SignalRoom behind a controlled HTTPS reverse proxy and verify the browser observes HTTPS.
 
 Enabling RBAC signs the first administrator into the current browser, so setup is not interrupted. Disabling it

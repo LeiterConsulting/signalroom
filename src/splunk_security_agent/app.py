@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import hmac
 import json
 import os
 import time
 from contextlib import asynccontextmanager
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -106,6 +108,9 @@ from .schemas import (
     EvaluationSuitePublishRequest,
     EvaluationSuiteUpdate,
     GoldenBenchmarkRunCreate,
+    ManagedSplunkAdmissionUpdate,
+    ManagedSplunkConnectionCreate,
+    ManagedSplunkConnectionUpdate,
     ModelActivateRequest,
     ModelArtifactApproval,
     ModelPullRequest,
@@ -115,6 +120,7 @@ from .schemas import (
     ModelTrustPolicyUpdate,
     QueryIntelligenceRequest,
     SettingsUpdate,
+    SplunkConnection,
     TimeSeriesAlertCandidateCreate,
     TimeSeriesBaselineAcceptRequest,
     TimeSeriesForecastRequest,
@@ -143,6 +149,9 @@ from .workload import (
 ROOT = Path(os.getenv("SIGNALROOM_ROOT", Path.cwd())).resolve()
 STATIC = Path(__file__).resolve().parent / "static"
 DATA = Path(os.getenv("SIGNALROOM_DATA_DIR", ROOT / "data")).resolve()
+_request_principal: ContextVar[dict[str, Any] | None] = ContextVar(
+    "signalroom_request_principal", default=None
+)
 
 
 class Services:
@@ -224,7 +233,7 @@ class Services:
             DATA / "audit_operations_exports",
         )
         self.auth_store = AuthStore(DATA / "auth.db")
-        self.auth = AuthService(self.auth_store, self.audit)
+        self.auth = AuthService(self.auth_store, self.audit, self.available_auth_connections)
         self.oidc = OIDCService(self.auth_store, self.auth, self.config, self.audit)
         self.discovery_job_store = DiscoveryJobStore(DATA / "discovery_jobs.db")
         self.assurance_store = AssuranceStore(DATA / "assurance.db")
@@ -259,6 +268,8 @@ class Services:
         self._discovery: DiscoveryPipeline | None = None
         self._splunk_models: SplunkModelInventoryService | None = None
         self._validations: ValidationService | None = None
+        self._scope_clients: dict[str, Any] = {}
+        self._scope_agents: dict[str, SecurityAgent] = {}
         self.assurance_response = AssuranceResponseService(self.assurance_store, lambda: self.validations)
         self.delivery = AssuranceDeliveryService(
             self.delivery_store,
@@ -268,7 +279,7 @@ class Services:
         )
         self.discovery_jobs = DiscoveryJobService(
             self.discovery_job_store,
-            lambda: self.splunk,
+            self.splunk_for_scope,
             self._assurance_pipeline,
             self._manual_discovery_complete,
             self.discovery_lock,
@@ -295,6 +306,19 @@ class Services:
         )
         return dict(self._connection_binding)
 
+    def available_auth_connections(self) -> list[dict[str, str]]:
+        values = [
+            {
+                "id": "primary",
+                "label": str(self.current_connection_binding().get("display_name") or "Primary Splunk"),
+            }
+        ]
+        values.extend(
+            {"id": item["alias"], "label": item.get("display_name") or item["alias"]}
+            for item in self.connection_registry.managed_connections()
+        )
+        return values
+
     def validate_connection_binding(
         self,
         alias: str,
@@ -311,11 +335,14 @@ class Services:
         tenant_scope_id: str = "workspace-primary",
     ) -> dict[str, Any]:
         """Resolve a request to one executable immutable Splunk identity."""
-        current = self.current_connection_binding()
-        resolved_alias = alias.strip() or str(current["alias"])
+        primary = self.current_connection_binding()
+        resolved_alias = alias.strip() or str(primary["alias"])
+        current = self.connection_registry.current(resolved_alias)
+        if current is None:
+            raise ValueError(f"Connection alias {resolved_alias!r} is no longer configured.")
         resolved_tenant = tenant_scope_id.strip() or str(current["tenant_scope_id"])
         resolved_fingerprint = fingerprint.strip() or (
-            str(current["fingerprint"]) if resolved_alias == current["alias"] else ""
+            str(current["fingerprint"])
         )
         valid, reason = self.connection_registry.validate(
             resolved_alias, resolved_fingerprint, resolved_tenant
@@ -336,7 +363,12 @@ class Services:
         self.assurance_store.bind_unbound(self._connection_binding)
         self.time_series_schedule_store.bind_unbound(self._connection_binding)
 
-    def connection_overview(self) -> dict[str, Any]:
+    def connection_overview(
+        self,
+        allowed_connection_ids: set[str] | None = None,
+        *,
+        include_all_managed: bool = False,
+    ) -> dict[str, Any]:
         current = self.current_connection_binding()
 
         def state(value: dict[str, Any]) -> dict[str, Any]:
@@ -358,7 +390,7 @@ class Services:
             state(item.model_dump(mode="json"))
             for item in self.discovery_job_store.list_jobs(limit=10)
         ]
-        return self.connection_registry.overview(
+        result = self.connection_registry.overview(
             {
                 "current_fingerprint": current["fingerprint"],
                 "assurance_policy": policy,
@@ -370,6 +402,82 @@ class Services:
                 ),
             }
         )
+        result["managed_splunk_connections"] = [
+            {
+                **item,
+                "token_configured": bool(self.config.secret(f"splunk_token:{item['alias']}")),
+            }
+            for item in result.get("managed_splunk_connections", [])
+        ]
+        if allowed_connection_ids is not None:
+            result["execution_scopes"] = [
+                item
+                for item in result.get("execution_scopes", [])
+                if item.get("alias") in allowed_connection_ids
+            ]
+            if not include_all_managed:
+                result["managed_splunk_connections"] = [
+                    item
+                    for item in result.get("managed_splunk_connections", [])
+                    if item.get("alias") in allowed_connection_ids
+                ]
+        return result
+
+    def managed_connection(self, alias: str) -> tuple[dict[str, Any], SplunkConnection, str]:
+        value = self.connection_registry.configuration(alias)
+        if value is None or value.get("archived"):
+            raise KeyError(alias)
+        connection = SplunkConnection(
+            name=value.get("display_name") or alias,
+            url=value["endpoint"],
+            verify_ssl=bool(value["verify_tls"]),
+            ca_bundle=value.get("ca_bundle"),
+        )
+        return value, connection, self.config.secret(f"splunk_token:{alias}")
+
+    async def diagnose_connection(
+        self, alias: str, progress: Any | None = None
+    ) -> dict[str, Any]:
+        if alias == "primary":
+            settings = self.config.load()
+            binding = self.current_connection_binding()
+            return await self.connection_diagnostics.run(
+                settings.splunk,
+                self.config.secret("splunk_token"),
+                demo_mode=settings.demo_mode,
+                progress=progress,
+                binding=binding,
+            )
+        binding, connection, token = self.managed_connection(alias)
+        result = await self.connection_diagnostics.run(
+            connection, token, progress=progress, binding=binding
+        )
+        self.connection_registry.record_diagnostic(
+            alias,
+            binding["fingerprint"],
+            ready=bool(result.get("ready")),
+            checked_at=str(result.get("checked_at") or ""),
+        )
+        return {**result, "connection_alias": alias, "connection_fingerprint": binding["fingerprint"]}
+
+    def invalidate_scope_runtime(self, alias: str = "") -> None:
+        if alias:
+            prefix = f"{alias}|"
+            self._scope_clients = {
+                key: value for key, value in self._scope_clients.items() if not key.startswith(prefix)
+            }
+            self._scope_agents = {
+                key: value for key, value in self._scope_agents.items() if not key.startswith(prefix)
+            }
+        else:
+            self._scope_clients.clear()
+            self._scope_agents.clear()
+
+    def invalidate_context_caches(self) -> None:
+        if self._agent is not None:
+            self._agent.invalidate_context_cache()
+        for agent in self._scope_agents.values():
+            agent.invalidate_context_cache()
 
     def _forecast_schedule_authorization(self, username: str) -> tuple[bool, str]:
         policy = self.auth_store.policy()
@@ -399,23 +507,17 @@ class Services:
         package = self.assurance_response.process(run_id, result)
         if package:
             self.delivery.consider_package(package)
-        if self._agent is not None:
-            self._agent.invalidate_context_cache()
+        self.invalidate_context_caches()
         self.model_setup.schedule_context_index()
 
     async def _manual_discovery_complete(self, _job_id: str, _result: dict[str, Any]) -> None:
-        if self._agent is not None:
-            self._agent.invalidate_context_cache()
+        self.invalidate_context_caches()
         self.model_setup.schedule_context_index()
 
-    async def _assurance_preflight(self, _depth: str, progress: Any) -> dict[str, Any]:
-        settings = self.config.load()
-        return await self.connection_diagnostics.run(
-            settings.splunk,
-            self.config.secret("splunk_token"),
-            demo_mode=settings.demo_mode,
-            progress=progress,
-        )
+    async def _assurance_preflight(
+        self, _depth: str, progress: Any, binding: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        return await self.diagnose_connection(str((binding or {}).get("alias") or "primary"), progress)
 
     def refresh(self, force: bool = False) -> None:
         settings = self.config.load()
@@ -462,6 +564,7 @@ class Services:
             self.cases,
             self.workload,
         )
+        self.invalidate_scope_runtime()
         self._fingerprint = fingerprint
 
     @property
@@ -483,16 +586,66 @@ class Services:
 
     def discovery_for_scope(self, scope: dict[str, Any]) -> DiscoveryPipeline:
         """Create a request-local pipeline so scope cannot change during another run."""
-        self.refresh()
-        assert self._splunk is not None and self._splunk_models is not None
+        client = self.splunk_for_scope(scope)
         return DiscoveryPipeline(
-            self._splunk,
+            client,
             self.evidence,
             DATA / "artifacts",
             self.config,
-            self._splunk_models,
+            SplunkModelInventoryService(self.config, client),
             scope,
         )
+
+    def splunk_for_scope(self, scope: dict[str, Any]) -> Any:
+        self.refresh()
+        alias = str(scope.get("alias") or "primary")
+        if alias == "primary":
+            assert self._splunk is not None
+            return self._splunk
+        valid, reason = self.connection_registry.validate(
+            alias,
+            str(scope.get("fingerprint") or ""),
+            str(scope.get("tenant_scope_id") or ""),
+        )
+        if not valid:
+            raise ValueError(reason)
+        binding, connection, token = self.managed_connection(alias)
+        if not token:
+            raise ValueError(f"Connection alias {alias!r} has no encrypted MCP token.")
+        token_revision = hashlib.sha256(token.encode()).hexdigest()[:16]
+        cache_key = f"{alias}|{binding['fingerprint']}|{token_revision}"
+        cached = self._scope_clients.get(cache_key)
+        if cached is not None:
+            return cached
+        raw = SplunkMCPClient(
+            connection.url,
+            token,
+            connection.verify_ssl,
+            connection.ca_bundle,
+        )
+        instance_id = self.workload.register_instance(
+            {
+                "connection_fingerprint": binding["fingerprint"],
+                "tenant_scope_id": binding["tenant_scope_id"],
+                "url": connection.url,
+                "verify_tls": connection.verify_ssl,
+                "ca_bundle": bool(connection.ca_bundle),
+            }
+        )
+        client = WorkloadControlledSplunkClient(raw, self.workload, instance_id)
+        self._scope_clients[cache_key] = client
+        return client
+
+    def agent_for_scope(self, scope: dict[str, Any]) -> SecurityAgent:
+        if str(scope.get("alias") or "primary") == "primary":
+            return self.agent
+        client = self.splunk_for_scope(scope)
+        cache_key = next(key for key, value in self._scope_clients.items() if value is client)
+        agent = self._scope_agents.get(cache_key)
+        if agent is None:
+            agent = SecurityAgent(self.config, self.evidence, client)
+            self._scope_agents[cache_key] = agent
+        return agent
 
     @property
     def splunk_models(self) -> SplunkModelInventoryService:
@@ -530,10 +683,19 @@ def _request_scope(
             "_enforced": False,
         }
     try:
-        return {
+        scope = {
             **resolver(connection_alias, connection_fingerprint, tenant_scope_id),
             "_enforced": True,
         }
+        principal = _request_principal.get() or {}
+        if services.auth_store.policy()["enabled"] and scope["alias"] not in set(
+            principal.get("connection_ids") or []
+        ):
+            raise HTTPException(
+                403,
+                f"This user is not assigned to the {scope['alias']} Splunk connection.",
+            )
+        return scope
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from exc
 
@@ -621,7 +783,11 @@ async def access_control(request: Request, call_next: Any) -> Response:
     if not policy["enabled"]:
         request.state.principal = services.auth.status()["principal"]
         request.state.auth_session = None
-        return await call_next(request)
+        principal_token = _request_principal.set(request.state.principal)
+        try:
+            return await call_next(request)
+        finally:
+            _request_principal.reset(principal_token)
 
     token = request.cookies.get(SESSION_COOKIE, "")
     session = services.auth.authenticate(token)
@@ -661,11 +827,13 @@ async def access_control(request: Request, call_next: Any) -> Response:
         return JSONResponse({"detail": reason}, status_code=403)
     request.state.principal = user
     request.state.auth_session = session
+    principal_token = _request_principal.set(user)
     audit_actor = bind_audit_actor(user["username"])
     try:
         return await call_next(request)
     finally:
         reset_audit_actor(audit_actor)
+        _request_principal.reset(principal_token)
 
 
 def _set_auth_cookies(response: Response, request: Request, session: dict[str, Any]) -> None:
@@ -703,7 +871,7 @@ async def index() -> FileResponse:
 
 @app.get("/api/health")
 async def health() -> dict[str, Any]:
-    latest_diagnostic = services.connection_diagnostics_store.latest() or {}
+    latest_diagnostic = services.connection_diagnostics_store.latest("primary") or {}
     auth_policy = services.auth_store.policy()
     return {
         "ok": True,
@@ -910,8 +1078,174 @@ async def get_settings() -> dict[str, Any]:
 
 
 @app.get("/api/connections")
-async def get_connections() -> dict[str, Any]:
-    return services.connection_overview()
+async def get_connections(request: Request) -> dict[str, Any]:
+    principal = getattr(request.state, "principal", {}) or {}
+    allowed = (
+        set(principal.get("connection_ids") or [])
+        if services.auth_store.policy()["enabled"]
+        else None
+    )
+    return services.connection_overview(
+        allowed,
+        include_all_managed=principal.get("role") == "admin",
+    )
+
+
+@app.post("/api/connections/splunk", status_code=201)
+async def create_managed_splunk_connection(
+    value: ManagedSplunkConnectionCreate,
+    request: Request,
+) -> dict[str, Any]:
+    try:
+        if services.connection_registry.current(value.alias) is not None:
+            raise ValueError("That connection alias already exists; edit its saved revision instead.")
+        connection = SplunkConnection(
+            name=value.display_name,
+            url=value.url,
+            verify_ssl=value.verify_ssl,
+            ca_bundle=value.ca_bundle if value.verify_ssl else None,
+        )
+        result = services.connection_registry.upsert_managed(
+            value.alias,
+            value.tenant_scope_id,
+            connection,
+            credentials_changed=True,
+        )
+        services.config.update_secrets(**{f"splunk_token:{value.alias}": value.token})
+        services.invalidate_scope_runtime(value.alias)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    actor = str((getattr(request.state, "principal", {}) or {}).get("username") or "local-operator")
+    services.audit.record(
+        "connection.splunk.created",
+        "create",
+        target_type="splunk-connection",
+        target_id=value.alias,
+        summary="Created a disabled additional Splunk connection pending diagnostics.",
+        metadata={
+            "connection_fingerprint": result["fingerprint"],
+            "tenant_scope_id": result["tenant_scope_id"],
+            "verify_tls": result["verify_tls"],
+        },
+        actor=actor,
+    )
+    return {**result, "token_configured": True}
+
+
+@app.patch("/api/connections/splunk/{alias}")
+async def update_managed_splunk_connection(
+    alias: str,
+    value: ManagedSplunkConnectionUpdate,
+    request: Request,
+) -> dict[str, Any]:
+    try:
+        current, connection, _token = services.managed_connection(alias)
+        fields = value.model_fields_set
+        updated = SplunkConnection(
+            name=value.display_name if "display_name" in fields else connection.name,
+            url=value.url if "url" in fields else connection.url,
+            verify_ssl=value.verify_ssl if "verify_ssl" in fields else connection.verify_ssl,
+            ca_bundle=value.ca_bundle if "ca_bundle" in fields else connection.ca_bundle,
+        )
+        if not updated.verify_ssl:
+            updated.ca_bundle = None
+        credentials_changed = "token" in fields and bool(value.token)
+        result = services.connection_registry.upsert_managed(
+            alias,
+            value.tenant_scope_id if "tenant_scope_id" in fields else current["tenant_scope_id"],
+            updated,
+            credentials_changed=credentials_changed,
+        )
+        if credentials_changed:
+            services.config.update_secrets(**{f"splunk_token:{alias}": value.token})
+        services.invalidate_scope_runtime(alias)
+    except KeyError as exc:
+        raise HTTPException(404, "Additional Splunk connection not found") from exc
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    actor = str((getattr(request.state, "principal", {}) or {}).get("username") or "local-operator")
+    services.audit.record(
+        "connection.splunk.updated",
+        "update",
+        target_type="splunk-connection",
+        target_id=alias,
+        summary="Updated an additional Splunk connection; changed trust or credentials require readmission.",
+        metadata={
+            "connection_fingerprint": result["fingerprint"],
+            "tenant_scope_id": result["tenant_scope_id"],
+            "credentials_changed": credentials_changed,
+        },
+        actor=actor,
+    )
+    return {
+        **result,
+        "token_configured": bool(services.config.secret(f"splunk_token:{alias}")),
+    }
+
+
+@app.post("/api/connections/splunk/{alias}/diagnostics/stream")
+async def diagnose_managed_splunk_connection(alias: str) -> StreamingResponse:
+    async def run(progress: Any) -> dict[str, Any]:
+        try:
+            return await services.diagnose_connection(alias, progress)
+        except KeyError as exc:
+            raise ValueError("Additional Splunk connection not found") from exc
+
+    return _stream_response(run)
+
+
+@app.patch("/api/connections/splunk/{alias}/admission")
+async def update_managed_splunk_admission(
+    alias: str,
+    value: ManagedSplunkAdmissionUpdate,
+    request: Request,
+) -> dict[str, Any]:
+    try:
+        result = services.connection_registry.set_enabled(alias, value.enabled)
+        services.invalidate_scope_runtime(alias)
+    except KeyError as exc:
+        raise HTTPException(404, "Additional Splunk connection not found") from exc
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    services.audit.record(
+        "connection.splunk.admission-changed",
+        "enable" if value.enabled else "disable",
+        target_type="splunk-connection",
+        target_id=alias,
+        summary=f"{'Enabled' if value.enabled else 'Disabled'} an additional Splunk execution scope.",
+        metadata={
+            "connection_fingerprint": result["fingerprint"],
+            "tenant_scope_id": result["tenant_scope_id"],
+        },
+        actor=str((getattr(request.state, "principal", {}) or {}).get("username") or "local-operator"),
+    )
+    return result
+
+
+@app.delete("/api/connections/splunk/{alias}")
+async def archive_managed_splunk_connection(alias: str, request: Request) -> dict[str, Any]:
+    try:
+        result = services.connection_registry.archive(alias)
+    except KeyError as exc:
+        raise HTTPException(404, "Additional Splunk connection not found") from exc
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    services.config.delete_secrets(f"splunk_token:{alias}")
+    services.invalidate_scope_runtime(alias)
+    services.audit.record(
+        "connection.splunk.archived",
+        "archive",
+        target_type="splunk-connection",
+        target_id=alias,
+        summary="Archived an additional Splunk connection and removed its encrypted token.",
+        metadata={
+            "connection_fingerprint": result["fingerprint"],
+            "tenant_scope_id": result["tenant_scope_id"],
+            "retained_evidence": True,
+        },
+        actor=str((getattr(request.state, "principal", {}) or {}).get("username") or "local-operator"),
+    )
+    return result
 
 
 @app.post("/api/connections/rebind/assurance")
@@ -1711,7 +2045,7 @@ async def chat(request: ChatRequest) -> dict[str, Any]:
         )
         request = _scoped_model(request, scope)
         async with services.workload.scope("investigate:chat"):
-            return (await services.agent.chat(request)).model_dump(mode="json")
+            return (await services.agent_for_scope(scope).chat(request)).model_dump(mode="json")
     except Exception as exc:
         raise HTTPException(502, str(exc)) from exc
 
@@ -1802,7 +2136,7 @@ def _stream_response(runner: Any) -> StreamingResponse:
 
 @app.get("/api/connection/diagnostics")
 async def latest_connection_diagnostics() -> dict[str, Any]:
-    latest = services.connection_diagnostics_store.latest()
+    latest = services.connection_diagnostics_store.latest("primary")
     return latest or {
         "ready": False,
         "stages": [],
@@ -1821,6 +2155,7 @@ async def run_connection_diagnostics() -> StreamingResponse:
             services.config.secret("splunk_token"),
             demo_mode=settings.demo_mode,
             progress=progress,
+            binding=services.current_connection_binding(),
         )
 
     return _stream_response(run)
@@ -2138,7 +2473,9 @@ async def chat_stream(request: ChatRequest) -> StreamingResponse:
 
     async def run(progress: Any) -> dict[str, Any]:
         async with services.workload.scope("investigate:chat", progress):
-            return (await services.agent.chat(request, progress=progress)).model_dump(mode="json")
+            return (
+                await services.agent_for_scope(scope).chat(request, progress=progress)
+            ).model_dump(mode="json")
 
     return _stream_response(run)
 
@@ -2153,7 +2490,7 @@ async def discovery(request: DiscoveryRequest) -> dict[str, Any]:
     async with services.discovery_lock:
         async with services.workload.scope(f"discovery:{request.depth}"):
             result = await services.discovery_for_scope(scope).run(request.depth)
-    services.agent.invalidate_context_cache()
+    services.invalidate_context_caches()
     services.model_setup.schedule_context_index()
     return result
 
@@ -2315,7 +2652,7 @@ async def discovery_stream(request: DiscoveryRequest) -> StreamingResponse:
                 result = await services.discovery_for_scope(scope).run(
                     request.depth, progress=progress
                 )
-        services.agent.invalidate_context_cache()
+        services.invalidate_context_caches()
         services.model_setup.schedule_context_index()
         return result
 
@@ -3083,7 +3420,7 @@ async def review_detection(detection_id: str, request: DetectionReviewRequest) -
         },
     )
     if request.decision == "approve":
-        services.agent.invalidate_context_cache()
+        services.invalidate_context_caches()
         services.model_setup.schedule_context_index()
     return detection
 
@@ -3733,7 +4070,7 @@ async def create_artifact(record: ArtifactCreate) -> dict[str, Any]:
     )
     record = _scoped_model(record, scope)
     created = services.evidence.add(record)
-    services.agent.invalidate_context_cache()
+    services.invalidate_context_caches()
     services.model_setup.schedule_context_index()
     services.audit.record(
         "artifact.created",
@@ -3763,7 +4100,7 @@ async def update_artifact(
     updated = services.evidence.update(artifact_id, record, scope["tenant_scope_id"])
     if not updated:
         raise HTTPException(404, "Artifact not found")
-    services.agent.invalidate_context_cache()
+    services.invalidate_context_caches()
     services.model_setup.schedule_context_index()
     services.audit.record(
         "artifact.updated",
@@ -3803,7 +4140,7 @@ async def upload_artifact(
         tenant_scope_id=scope["tenant_scope_id"],
     )
     created = services.evidence.add(record)
-    services.agent.invalidate_context_cache()
+    services.invalidate_context_caches()
     services.model_setup.schedule_context_index()
     services.audit.record(
         "artifact.uploaded",
@@ -3826,7 +4163,7 @@ async def delete_artifact(
     scope = _request_scope(connection_alias, connection_fingerprint, tenant_scope_id)
     if not services.evidence.delete(artifact_id, scope["tenant_scope_id"]):
         raise HTTPException(404, "Artifact not found")
-    services.agent.invalidate_context_cache()
+    services.invalidate_context_caches()
     services.audit.record(
         "artifact.deleted",
         "delete",

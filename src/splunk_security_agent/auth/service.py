@@ -6,6 +6,7 @@ import hmac
 import re
 import secrets
 import sqlite3
+from collections.abc import Callable
 from typing import Any
 
 from ..audit import AuditStore
@@ -16,7 +17,6 @@ SESSION_COOKIE = "signalroom_session"
 CSRF_COOKIE = "signalroom_csrf"
 USERNAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9._-]{2,63}$")
 ROLES = {"viewer", "analyst", "admin"}
-CONNECTION_IDS = {"primary"}
 UNSAFE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 ADMIN_MUTATION_PREFIXES = (
     "/api/auth/users",
@@ -30,7 +30,7 @@ ADMIN_MUTATION_PREFIXES = (
     "/api/workload/",
     "/api/audit-export/",
     "/api/audit-operations/",
-    "/api/connections/rebind/",
+    "/api/connections/",
 )
 ADMIN_MUTATION_PATHS = {
     "/api/auth/disable",
@@ -53,14 +53,37 @@ CONNECTION_MUTATION_PREFIXES = (
 class AuthService:
     """Optional local RBAC with durable users and opaque browser sessions."""
 
-    def __init__(self, store: AuthStore, audit: AuditStore):
+    def __init__(
+        self,
+        store: AuthStore,
+        audit: AuditStore,
+        connection_provider: Callable[[], list[dict[str, str]]] | None = None,
+    ):
         self.store = store
         self.audit = audit
+        self.connection_provider = connection_provider or (
+            lambda: [{"id": "primary", "label": "Primary Splunk"}]
+        )
+
+    def available_connections(self) -> list[dict[str, str]]:
+        values = self.connection_provider()
+        normalized: list[dict[str, str]] = []
+        seen: set[str] = set()
+        for item in values:
+            connection_id = str(item.get("id") or "").strip()
+            if not connection_id or connection_id in seen:
+                continue
+            seen.add(connection_id)
+            normalized.append(
+                {"id": connection_id, "label": str(item.get("label") or connection_id)}
+            )
+        return normalized
 
     def status(self, token: str = "", *, include_users: bool = False) -> dict[str, Any]:
         policy = self.store.policy()
         identity_count = self.store.user_count()
         if not policy["enabled"]:
+            connections = [item["id"] for item in self.available_connections()]
             return {
                 "enabled": False,
                 "mode": "local-single-user",
@@ -74,12 +97,12 @@ class AuthService:
                     "display_name": "Local operator",
                     "role": "admin",
                     "active": True,
-                    "connection_ids": ["primary"],
+                    "connection_ids": connections,
                 },
-                "permissions": self._permissions("admin", ["primary"]),
+                "permissions": self._permissions("admin", connections),
                 "session": None,
                 "users": self.store.users() if include_users else [],
-                "available_connections": [{"id": "primary", "label": "Primary Splunk"}],
+                "available_connections": self.available_connections(),
             }
         session = self.authenticate(token)
         if not session:
@@ -111,7 +134,7 @@ class AuthService:
                 "expires_at": session["expires_at"],
             },
             "users": self.store.users() if include_users and is_admin else [],
-            "available_connections": ([{"id": "primary", "label": "Primary Splunk"}] if is_admin else []),
+            "available_connections": self.available_connections() if is_admin else [],
         }
 
     def bootstrap(
@@ -364,8 +387,8 @@ class AuthService:
             return False, "Viewer access is read only"
         if self._admin_required(method, path) and role != "admin":
             return False, "Admin access is required for this operation"
-        if self._connection_required(method, path) and "primary" not in set(user.get("connection_ids") or []):
-            return False, "This user is not assigned to the Primary Splunk connection"
+        if self._connection_required(method, path) and not set(user.get("connection_ids") or []):
+            return False, "This user is not assigned to Primary Splunk or another admitted connection"
         return True, ""
 
     @staticmethod
@@ -411,6 +434,7 @@ class AuthService:
             "can_change": role in {"analyst", "admin"},
             "can_administer": role == "admin",
             "can_use_primary_connection": "primary" in connections,
+            "can_use_connection": bool(connections),
         }
 
     def _verify_credentials(self, username: str, password: str, source: str) -> dict[str, Any]:
@@ -504,10 +528,10 @@ class AuthService:
         if value.isspace() or "\x00" in value:
             raise ValueError("The password is not valid")
 
-    @staticmethod
-    def _connections(values: list[str]) -> list[str]:
+    def _connections(self, values: list[str]) -> list[str]:
         normalized = list(dict.fromkeys(str(item).strip() for item in values))
-        if any(item not in CONNECTION_IDS for item in normalized):
+        connection_ids = {item["id"] for item in self.available_connections()}
+        if any(item not in connection_ids for item in normalized):
             raise ValueError("The connection assignment is not recognized")
         return normalized
 

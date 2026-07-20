@@ -20,11 +20,11 @@ class DiscoveryJobService:
     def __init__(
         self,
         store: DiscoveryJobStore,
-        client_factory: Callable[[], Any],
+        client_factory: Callable[..., Any],
         pipeline_factory: Callable[[Any], Any],
         on_complete: Callable[[str, dict[str, Any]], Awaitable[None] | None] | None = None,
         run_lock: asyncio.Lock | None = None,
-        preflight: Callable[[str, Any], Awaitable[dict[str, Any]]] | None = None,
+        preflight: Callable[..., Awaitable[dict[str, Any]]] | None = None,
         audit: Any | None = None,
         connection_binding: Callable[[], dict[str, Any]] | None = None,
         validate_connection_binding: (
@@ -178,7 +178,14 @@ class DiscoveryJobService:
                 self.store.complete_job(job_id, "connection-blocked", summary, None, 0)
                 self._record_completion(running, "connection-blocked", summary, 0)
                 return
-        client = BudgetedSplunkClient(self.client_factory(), running.call_budget)
+        binding = {
+            "alias": running.connection_alias,
+            "fingerprint": running.connection_fingerprint,
+            "tenant_scope_id": running.tenant_scope_id,
+        }
+        factory_parameters = inspect.signature(self.client_factory).parameters
+        raw_client = self.client_factory(binding) if factory_parameters else self.client_factory()
+        client = BudgetedSplunkClient(raw_client, running.call_budget)
 
         async def progress(event: dict[str, Any]) -> None:
             current = self.store.get_job(job_id)
@@ -209,7 +216,12 @@ class DiscoveryJobService:
                         "metrics": {"splunk_calls": 0},
                     }
                 )
-                readiness = await self.preflight(running.depth, progress)
+                preflight_parameters = inspect.signature(self.preflight).parameters
+                readiness = await (
+                    self.preflight(running.depth, progress, binding)
+                    if len(preflight_parameters) >= 3
+                    else self.preflight(running.depth, progress)
+                )
                 if not readiness.get("depth_readiness", {}).get(running.depth, False):
                     blocking_stage = str(readiness.get("blocking_stage") or "tool-contract")
                     stage = next(

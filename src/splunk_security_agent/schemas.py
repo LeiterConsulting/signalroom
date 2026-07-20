@@ -150,6 +150,38 @@ class ConnectionRebindRequest(BaseModel):
     expected_updated_at: str = Field(min_length=1, max_length=80)
 
 
+class ManagedSplunkConnectionCreate(BaseModel):
+    alias: str = Field(min_length=3, max_length=48, pattern=r"^[a-z][a-z0-9-]{2,47}$")
+    tenant_scope_id: str = Field(
+        min_length=3,
+        max_length=64,
+        pattern=r"^[a-z][a-z0-9._-]{2,63}$",
+    )
+    display_name: str = Field(min_length=1, max_length=240)
+    url: str = Field(min_length=8, max_length=2048)
+    verify_ssl: bool = True
+    ca_bundle: str | None = Field(default=None, max_length=4000)
+    token: str = Field(min_length=1, max_length=4096)
+
+
+class ManagedSplunkConnectionUpdate(BaseModel):
+    tenant_scope_id: str | None = Field(
+        default=None,
+        min_length=3,
+        max_length=64,
+        pattern=r"^[a-z][a-z0-9._-]{2,63}$",
+    )
+    display_name: str | None = Field(default=None, min_length=1, max_length=240)
+    url: str | None = Field(default=None, min_length=8, max_length=2048)
+    verify_ssl: bool | None = None
+    ca_bundle: str | None = Field(default=None, max_length=4000)
+    token: str | None = Field(default=None, min_length=1, max_length=4096)
+
+
+class ManagedSplunkAdmissionUpdate(BaseModel):
+    enabled: bool
+
+
 class TimeSeriesReviewDecision(BaseModel):
     expected_run_fingerprint: str = Field(
         min_length=64,

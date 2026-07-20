@@ -51,12 +51,28 @@ class ConnectionDiagnosticsStore:
                 """
                 CREATE TABLE IF NOT EXISTS connection_diagnostics (
                     id TEXT PRIMARY KEY, endpoint TEXT NOT NULL, ready INTEGER NOT NULL,
+                    connection_alias TEXT NOT NULL DEFAULT 'primary',
+                    connection_fingerprint TEXT NOT NULL DEFAULT '',
                     result TEXT NOT NULL, checked_at TEXT NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS idx_connection_diagnostics_checked
                     ON connection_diagnostics(checked_at DESC);
                 """
             )
+            columns = {
+                str(row["name"])
+                for row in db.execute("PRAGMA table_info(connection_diagnostics)")
+            }
+            if "connection_alias" not in columns:
+                db.execute(
+                    """ALTER TABLE connection_diagnostics ADD COLUMN connection_alias
+                    TEXT NOT NULL DEFAULT 'primary'"""
+                )
+            if "connection_fingerprint" not in columns:
+                db.execute(
+                    """ALTER TABLE connection_diagnostics ADD COLUMN connection_fingerprint
+                    TEXT NOT NULL DEFAULT ''"""
+                )
 
     def connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.path)
@@ -68,11 +84,14 @@ class ConnectionDiagnosticsStore:
         with self._lock, self.connect() as db:
             db.execute(
                 """INSERT INTO connection_diagnostics
-                (id,endpoint,ready,result,checked_at) VALUES (?,?,?,?,?)""",
+                (id,endpoint,ready,connection_alias,connection_fingerprint,result,checked_at)
+                VALUES (?,?,?,?,?,?,?)""",
                 (
                     value["id"],
                     str(value.get("endpoint") or "")[:2000],
                     int(bool(value.get("ready"))),
+                    str(value.get("connection_alias") or "primary")[:48],
+                    str(value.get("connection_fingerprint") or "")[:64],
                     json.dumps(value, default=str),
                     value["checked_at"],
                 ),
@@ -83,18 +102,27 @@ class ConnectionDiagnosticsStore:
             )
         return value
 
-    def latest(self) -> dict[str, Any] | None:
+    def latest(self, connection_alias: str = "") -> dict[str, Any] | None:
         with self.connect() as db:
-            row = db.execute(
-                "SELECT result FROM connection_diagnostics ORDER BY checked_at DESC LIMIT 1"
-            ).fetchone()
+            row = (
+                db.execute(
+                    """SELECT result FROM connection_diagnostics WHERE connection_alias=?
+                    ORDER BY checked_at DESC LIMIT 1""",
+                    (connection_alias,),
+                ).fetchone()
+                if connection_alias
+                else db.execute(
+                    "SELECT result FROM connection_diagnostics ORDER BY checked_at DESC LIMIT 1"
+                ).fetchone()
+            )
         return json.loads(row["result"]) if row else None
 
-    def last_success(self) -> dict[str, Any] | None:
+    def last_success(self, connection_alias: str = "") -> dict[str, Any] | None:
         with self.connect() as db:
             row = db.execute(
                 """SELECT result FROM connection_diagnostics WHERE ready=1
-                ORDER BY checked_at DESC LIMIT 1"""
+                AND (?='' OR connection_alias=?) ORDER BY checked_at DESC LIMIT 1""",
+                (connection_alias, connection_alias),
             ).fetchone()
         return json.loads(row["result"]) if row else None
 
@@ -110,8 +138,10 @@ class SplunkConnectionDiagnostics:
         *,
         demo_mode: bool = False,
         progress: ProgressCallback | None = None,
+        binding: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         checked_at = datetime.now(UTC).isoformat()
+        binding = binding or {"alias": "primary", "fingerprint": "", "tenant_scope_id": ""}
         if demo_mode:
             health = await DemoSplunkClient().health()
             result = {
@@ -132,6 +162,9 @@ class SplunkConnectionDiagnostics:
                 "tools": health.get("tools", []),
                 "depth_readiness": {depth: True for depth in DEPTH_TOOL_CONTRACTS},
                 "last_success_at": checked_at,
+                "connection_alias": binding.get("alias") or "primary",
+                "connection_fingerprint": binding.get("fingerprint") or "",
+                "tenant_scope_id": binding.get("tenant_scope_id") or "",
             }
             return self.store.record(result)
 
@@ -155,7 +188,7 @@ class SplunkConnectionDiagnostics:
                     remediation="Copy the endpoint shown by the Splunk MCP Server app.",
                 )
             )
-            return self._finish(connection, checked_at, stages)
+            return self._finish(connection, checked_at, stages, binding=binding)
         host = parsed.hostname
         port = parsed.port or (443 if parsed.scheme == "https" else 80)
         if not parsed.path.rstrip("/").endswith("/services/mcp"):
@@ -221,7 +254,7 @@ class SplunkConnectionDiagnostics:
                     remediation=hint,
                 )
             )
-            return self._finish(connection, checked_at, stages)
+            return self._finish(connection, checked_at, stages, binding=binding)
 
         await report_progress(
             progress,
@@ -261,7 +294,7 @@ class SplunkConnectionDiagnostics:
                     ),
                 )
             )
-            return self._finish(connection, checked_at, stages)
+            return self._finish(connection, checked_at, stages, binding=binding)
 
         if parsed.scheme == "https":
             await report_progress(
@@ -279,7 +312,7 @@ class SplunkConnectionDiagnostics:
             tls = await self._tls_stage(connection, host, port)
             stages.append(tls)
             if tls["status"] == "error":
-                return self._finish(connection, checked_at, stages)
+                return self._finish(connection, checked_at, stages, binding=binding)
         else:
             stages.append(
                 self._stage(
@@ -319,7 +352,7 @@ class SplunkConnectionDiagnostics:
                     remediation=self._mcp_remediation(str(health.get("error") or "")),
                 )
             )
-            return self._finish(connection, checked_at, stages)
+            return self._finish(connection, checked_at, stages, binding=binding)
         stages.append(
             self._stage(
                 "mcp",
@@ -373,6 +406,7 @@ class SplunkConnectionDiagnostics:
             server=health.get("server", {}),
             depth_readiness=depth_readiness,
             missing_by_depth=missing,
+            binding=binding,
         )
 
     async def _tls_stage(self, connection: SplunkConnection, host: str, port: int) -> dict[str, Any]:
@@ -449,9 +483,11 @@ class SplunkConnectionDiagnostics:
         server: dict[str, Any] | None = None,
         depth_readiness: dict[str, bool] | None = None,
         missing_by_depth: dict[str, list[str]] | None = None,
+        binding: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        binding = binding or {"alias": "primary", "fingerprint": "", "tenant_scope_id": ""}
         ready = bool(depth_readiness and depth_readiness.get("quick"))
-        last_success = self.store.last_success()
+        last_success = self.store.last_success(str(binding.get("alias") or "primary"))
         result = {
             "checked_at": checked_at,
             "endpoint": connection.url,
@@ -470,6 +506,9 @@ class SplunkConnectionDiagnostics:
             "blocking_stage": next(
                 (item["id"] for item in stages if item["status"] == "error"), None
             ),
+            "connection_alias": binding.get("alias") or "primary",
+            "connection_fingerprint": binding.get("fingerprint") or "",
+            "tenant_scope_id": binding.get("tenant_scope_id") or "",
         }
         return self.store.record(result)
 

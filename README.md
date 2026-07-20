@@ -84,7 +84,7 @@ administrator. SignalRoom immediately establishes that administrator's session a
 - **Viewer:** read-only access to workspace evidence and state
 - **Analyst:** investigation, curation, validation, cases, and other non-policy workflows
 - **Admin:** workspace policy, model installation/routing, repository authority, and user administration
-- **Connection assignment:** a separate per-user grant for actions that call the Primary Splunk MCP connection
+- **Connection assignment:** separate per-user grants for Primary and each admitted additional Splunk alias
 
 Local passwords are scrypt-hashed; opaque sessions are time-limited, stored only as SHA-256 digests, use an
 HttpOnly same-site cookie, and require a separate same-site CSRF token for changes. Repeated failed logins are
@@ -98,7 +98,9 @@ exposure.
 After named access is active, an administrator can opt in to one enterprise OpenID Connect issuer. SignalRoom uses
 the authorization-code flow with S256 PKCE, one-time state and nonce values, exact issuer/audience/callback checks,
 provider signing keys, and asymmetric ID-token algorithms only. Admission can require an exact tenant and group.
-Provider groups map to viewer, analyst, or admin, while Primary Splunk assignment remains a separate policy.
+Provider groups map to viewer, analyst, or admin, while the current OIDC policy independently controls
+Primary Splunk assignment. Administrators can assign additional aliases to local named users; richer
+OIDC group-to-alias mapping remains on the roadmap.
 Configured `amr` and/or `acr` values must prove that the identity provider applied the required MFA assurance.
 
 OIDC identities bind only to `(issuer, sub)` and are never linked by matching email or username. Policy changes
@@ -121,16 +123,23 @@ Open **Setup** and configure:
 3. The **Verify TLS certificates** toggle; keep it enabled and provide a private CA bundle where possible, or disable it explicitly for a trusted self-signed development endpoint
 4. Disable demo mode and test the connection
 
+To add another Splunk estate, use **Setup → Connection identity and tenant scope → Add Splunk
+instance**. Save a stable alias, a distinct tenant scope, endpoint/TLS trust, and encrypted MCP token.
+The alias is created disabled. Run its streamed diagnostics, explicitly enable the successful exact
+revision, and—when optional RBAC is active—assign it to the appropriate named users. It will then appear
+in the global scope selector for Investigate, manual Discovery, Context, and Cases.
+
 The diagnostic action evaluates configuration, DNS, TCP reachability, TLS identity, MCP initialization,
 authentication, and the read-only tool contract required by each discovery depth. Results are secret-free and
 stored locally so the Discovery page can show the current blocking stage and last known successful check.
 Continuous assurance runs this same preflight and records `connection-blocked` with zero Splunk tool calls when
 the selected discovery depth is not ready.
 
-Connection identity is evaluated before transport preflight. Discovery jobs, assurance, and scheduled shadow
-forecasts retain the exact Primary Splunk revision and `workspace-primary` tenant scope they were approved
-against. Endpoint, TLS-trust, or demo/live changes never silently move durable work; administrators can explicitly
-rebind schedules and assurance policy, which pauses them for review. See [Connection identities and future MCPs](docs/CONNECTIONS.md).
+Connection identity is evaluated before transport preflight. Manual discovery jobs retain the exact
+selected alias, revision, and tenant scope. Assurance and scheduled shadow forecasts remain bound to
+Primary and `workspace-primary` until their policies gain an explicit secondary target. Endpoint,
+TLS-trust, scope, or credential changes never silently preserve secondary admission; administrators
+must diagnose and enable the replacement revision. See [Connection identities and additional MCPs](docs/CONNECTIONS.md).
 
 The client discovers available tools and resolves common aliases such as `splunk_run_query` / `run_splunk_query`, `splunk_get_indexes` / `get_indexes`, and related SAIA SPL helpers.
 

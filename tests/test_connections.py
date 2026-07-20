@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from splunk_security_agent.assurance import AssuranceStore
+from splunk_security_agent.config import ConfigStore
 from splunk_security_agent.connections import ConnectionRegistryStore
 from splunk_security_agent.discovery import DiscoveryJobService, DiscoveryJobStore
 from splunk_security_agent.forecasting import TimeSeriesScheduleStore
@@ -63,6 +64,120 @@ def test_connection_identity_is_canonical_immutable_and_secret_free(tmp_path: Pa
     assert valid is False
     assert changed["fingerprint"][:12] in detail
     assert len(store.overview()["revisions"]) == 2
+
+
+def test_additional_connection_requires_exact_diagnostics_before_admission(tmp_path: Path):
+    store = ConnectionRegistryStore(tmp_path / "connections.db")
+    store.sync_primary(_connection(), demo_mode=False)
+    draft = store.upsert_managed(
+        "eu-prod",
+        "tenant.eu-prod",
+        _connection(name="EU Production", url="https://eu.example:8089/services/mcp"),
+        credentials_changed=True,
+    )
+
+    assert draft["enabled"] is False
+    assert store.overview()["execution_scopes"] == [store.current("primary")]
+    with pytest.raises(ValueError, match="successful diagnostics"):
+        store.set_enabled("eu-prod", True)
+
+    store.record_diagnostic(
+        "eu-prod",
+        draft["fingerprint"],
+        ready=True,
+        checked_at="2026-07-20T12:00:00+00:00",
+    )
+    admitted = store.set_enabled("eu-prod", True)
+    assert admitted["enabled"] is True
+    assert [item["alias"] for item in store.overview()["execution_scopes"]] == [
+        "primary",
+        "eu-prod",
+    ]
+
+    changed = store.upsert_managed(
+        "eu-prod",
+        "tenant.eu-prod",
+        _connection(
+            name="EU Production",
+            url="https://eu.example:8089/services/mcp",
+            verify=False,
+        ),
+    )
+    assert changed["fingerprint"] != draft["fingerprint"]
+    assert changed["enabled"] is False
+    valid, detail = store.validate(
+        "eu-prod", changed["fingerprint"], changed["tenant_scope_id"]
+    )
+    assert valid is False
+    assert "disabled pending admission" in detail
+
+
+def test_additional_connection_token_is_encrypted_and_archive_retains_identity(tmp_path: Path):
+    config = ConfigStore(tmp_path / "data")
+    config.update_secrets(**{"splunk_token:eu-prod": "mcp-secret-token"})
+    assert config.secret("splunk_token:eu-prod") == "mcp-secret-token"
+    assert b"mcp-secret-token" not in (tmp_path / "data" / "secrets.enc").read_bytes()
+
+    store = ConnectionRegistryStore(tmp_path / "connections.db")
+    store.sync_primary(_connection(), demo_mode=False)
+    draft = store.upsert_managed(
+        "eu-prod",
+        "tenant.eu-prod",
+        _connection(name="EU Production", url="https://eu.example:8089/services/mcp"),
+    )
+    archived = store.archive("eu-prod")
+    assert archived["archived"] is True
+    assert store.identity(draft["fingerprint"])["fingerprint"] == draft["fingerprint"]
+    assert store.managed_connections() == []
+
+
+def test_services_construct_alias_specific_client_and_agent(tmp_path: Path, monkeypatch) -> None:
+    from splunk_security_agent import app as app_module
+
+    created: list[tuple[str, str, bool, str | None]] = []
+
+    class FakeSplunkClient:
+        def __init__(self, url, token, verify_ssl, ca_bundle, **_kwargs):
+            self.url = url
+            self.token = token
+            self.verify_ssl = verify_ssl
+            self.ca_bundle = ca_bundle
+            created.append((url, token, verify_ssl, ca_bundle))
+
+    monkeypatch.setattr(app_module, "DATA", tmp_path / "service-data")
+    monkeypatch.setattr(app_module, "SplunkMCPClient", FakeSplunkClient)
+    services = app_module.Services()
+    connection = _connection(
+        name="EU Production",
+        url="https://eu.example:8089/services/mcp",
+    )
+    draft = services.connection_registry.upsert_managed(
+        "eu-prod", "tenant.eu-prod", connection, credentials_changed=True
+    )
+    services.config.update_secrets(**{"splunk_token:eu-prod": "alias-token"})
+    services.connection_registry.record_diagnostic(
+        "eu-prod",
+        draft["fingerprint"],
+        ready=True,
+        checked_at="2026-07-20T12:00:00+00:00",
+    )
+    admitted = services.connection_registry.set_enabled("eu-prod", True)
+    scope = services.resolve_scope(
+        "eu-prod", admitted["fingerprint"], admitted["tenant_scope_id"]
+    )
+
+    client = services.splunk_for_scope(scope)
+    agent = services.agent_for_scope(scope)
+
+    assert client.client.url == "https://eu.example:8089/services/mcp"
+    assert client.client.token == "alias-token"
+    assert agent.splunk is client
+    assert created[-1] == (
+        "https://eu.example:8089/services/mcp",
+        "alias-token",
+        True,
+        None,
+    )
 
 
 def test_rebinding_pauses_schedules_and_assurance_with_exact_concurrency(tmp_path: Path):

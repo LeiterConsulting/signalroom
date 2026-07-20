@@ -409,9 +409,9 @@ there is deliberately no remote recovery route.
 
 ## Next production increments
 
-1. Per-alias credentials, connection health, authorization, and identity lifecycle provisioning/deprovisioning
-2. Alias-aware Splunk client construction and durable scheduling-policy selection
-3. Multi-instance comparison with source-preserving provenance and optional data-plane isolation
+1. Durable scheduling-policy selection for admitted secondary Splunk aliases
+2. Multi-instance comparison with source-preserving provenance and optional data-plane isolation
+3. OIDC group-to-alias assignment policy and credential backup/restore controls
 4. Read-only deployment reconciliation for the audit operations pack when the Splunk MCP contract exposes the
    required index and knowledge-object configuration fields
 
@@ -434,5 +434,10 @@ conversation memory and retrieval caches include the tenant and connection revis
 files and replacement knowledge documents are revision/scope specific. The case cockpit resolves
 artifact references only inside the case tenant.
 
-Primary is the only executable scope today. The schema and UI boundary are multi-instance ready, but
-client credentials and authorization remain intentionally single-alias until the next increment.
+Primary is always executable through its existing workspace configuration. Administrators may also
+provision secondary live aliases with encrypted per-alias tokens. Secondary revisions fail closed on
+create, endpoint/TLS/scope change, or token rotation; successful diagnostics plus explicit admission
+are required before they appear in the selector. Request-time client, workload, discovery, and chat
+construction is alias aware. Optional RBAC filters scopes and rechecks the selected alias on every
+scoped API request. Platform-wide assurance and forecasting schedules remain explicitly Primary-bound
+until their policies gain a reviewed target-alias field.

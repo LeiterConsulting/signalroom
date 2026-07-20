@@ -8,7 +8,7 @@ The local prototype defaults to localhost, opt-in demo mode, local specialist ex
 - Secret values are never included in the settings response.
 - Environment variables may supply secrets without persistence.
 - Named access is optional. Local single-user mode preserves the zero-login POC path; enabling RBAC creates or authenticates a first admin and immediately protects API and MCP routes with named sessions.
-- RBAC separates viewer, analyst, and admin roles from per-user Primary Splunk connection assignment. Administrative platform policy and identity operations require the admin role.
+- RBAC separates viewer, analyst, and admin roles from per-user Splunk alias assignments. Administrative platform policy, connection lifecycle, and identity operations require the admin role.
 - Passwords use salted scrypt hashes. Opaque session and CSRF values are stored only as SHA-256 digests; browser sessions use strict same-site cookies, an HttpOnly session cookie, and a separate header-bound CSRF cookie.
 - Failed login attempts are throttled per normalized username and source. Role, connection, active-state, and password changes revoke affected sessions; disabling RBAC revokes all sessions and requires the current admin password.
 - Request-scoped audit events inherit the authenticated username. Authentication enablement, disablement, login, logout, user changes, and authorization denials are explicitly audited.

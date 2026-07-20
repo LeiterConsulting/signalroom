@@ -1,10 +1,10 @@
-# Connection identities, tenant scopes, and future MCPs
+# Connection identities, tenant scopes, and additional MCPs
 
 SignalRoom treats a connection as a security boundary, not only an endpoint URL.
 
-## Primary Splunk today
+## Primary and additional Splunk connections
 
-The current release executes against one mutable alias, `primary`. That alias points to an immutable
+Every installation retains the backward-compatible mutable alias `primary`. That alias points to an immutable
 connection identity inside `data/connection_registry.db`. The identity fingerprint covers:
 
 - the normalized Splunk MCP endpoint;
@@ -24,9 +24,17 @@ tools. Every result retains the alias, immutable connection fingerprint, and ten
 produced it. This is shared-database row filtering, not a claim of separate tenant databases or
 complete multi-tenant isolation.
 
-The application header exposes the active executable scope across Investigate, Discovery, Context,
-and Cases. Only Primary appears today. SignalRoom deliberately does not render fictitious tenants or
-non-executable architecture-preview connectors.
+Administrators can add live Splunk aliases such as `production-us`, `production-eu`, or `security-lab`
+in Settings. Each alias has its own encrypted MCP token, tenant scope, endpoint/TLS identity, diagnostic
+state, and enable/disable lifecycle. A new or changed revision is disabled. It enters the application
+header selector only after diagnostics prove that the exact current revision satisfies the quick
+discovery tool contract and an administrator explicitly enables it. Token rotation also revokes
+admission even though the token is deliberately excluded from the identity fingerprint.
+
+The selected alias is used to construct a separate MCP client, workload-controller identity, model
+inventory, discovery pipeline, and investigation agent. Context and case retrieval remain tenant and
+revision scoped. Archiving removes the encrypted token and selector entry but preserves existing
+evidence, cases, jobs, and immutable provenance.
 
 ## Durable workflow behavior
 
@@ -49,23 +57,31 @@ Records created before this feature have no recoverable historical identity. Sig
 documented migration that binds only blank legacy records to the current Primary revision. It does not
 automatically rebind them again.
 
-## Multiple Splunk instances
+## Multiple Splunk instance lifecycle
 
-The registry separates immutable identities from mutable aliases so a future release can add aliases
-such as `production-us`, `production-eu`, or `security-lab` without changing the durable workflow
-contract. Before execution can span instances, SignalRoom still needs:
+The registry separates immutable identities from mutable aliases. The current lifecycle is:
 
-- per-alias credential storage and health checks;
-- per-user and OIDC-group connection assignments;
-- cross-instance comparison rules that preserve source attribution; and
-- migration and backup controls for tenant-isolated data.
+1. Create a stable lowercase alias and tenant scope.
+2. Save its endpoint, TLS policy, optional private CA path, and encrypted MCP token.
+3. Run streamed configuration, DNS, TCP, TLS, MCP-authentication, and tool-contract diagnostics.
+4. Explicitly enable the exact successful revision.
+5. Assign the alias to named local users when optional RBAC is active.
+6. Select the admitted scope in the header before investigating, discovering, or curating Context and Cases.
+7. Disable or archive the alias without deleting retained evidence.
 
-Tenant-scoped evidence/case rules and the shared instance selector are implemented. Before a second
-alias becomes executable, SignalRoom still needs per-alias credential/health lifecycle, per-user alias
-grants, alias-aware client construction, and scheduling-policy selection.
+Local POC mode can use every admitted alias. With RBAC enabled, the selector is filtered to the exact
+aliases assigned to the signed-in user, and every scoped API request rechecks that assignment. Roles
+and connection grants remain separate controls.
 
-Until those controls ship, the additional-connection catalog in Settings is an architecture preview,
-not an executable connector manager.
+Continuous assurance, scheduled shadow forecasting, detection deployment verification, and other
+platform-wide durable automation remain Primary-bound in this increment. Manual discovery jobs can
+bind and execute against an admitted secondary alias. The next scheduling increment must make the
+target alias an explicit policy field rather than inferring it from a browser selector.
+
+Cross-instance comparison, OIDC group-to-alias mapping beyond the current Primary grant, backup and
+migration tooling for connection credentials, and optional per-tenant data-plane isolation remain
+future work. Comparisons must preserve source attribution instead of merging results into an
+unqualified global answer.
 
 ## Why additional MCP connections belong in SignalRoom
 
@@ -74,7 +90,7 @@ be admitted only when it adds corroborating context or a governed handoff:
 
 | Connection | Security purpose | Initial authority |
 | --- | --- | --- |
-| Additional Splunk MCP | Separate estates and instance-aware comparison | Read-only metadata and search |
+| Additional Splunk MCP | Separate estates and instance-aware investigation | Read-only metadata and search; available now |
 | Asset inventory / CMDB | Ownership, criticality, and business purpose | Read-only lookup |
 | Identity / directory | Account, device, group, privilege, and lifecycle context | Read-only lookup |
 | Threat intelligence | Sourced, time-bounded indicator context | Read-only enrichment |

@@ -54,9 +54,13 @@ class SplunkWorkloadService:
         return hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:20]
 
     def set_current_instance(self, identity: dict[str, Any]) -> str:
-        self.current_instance_id = self.instance_id(identity)
-        self._state(self.current_instance_id)
+        self.current_instance_id = self.register_instance(identity)
         return self.current_instance_id
+
+    def register_instance(self, identity: dict[str, Any]) -> str:
+        instance_id = self.instance_id(identity)
+        self._state(instance_id)
+        return instance_id
 
     def _state(self, instance_id: str) -> _InstanceState:
         return self._states.setdefault(instance_id, _InstanceState())
