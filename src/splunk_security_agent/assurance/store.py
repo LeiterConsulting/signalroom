@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 from datetime import UTC, datetime, timedelta
@@ -539,14 +540,32 @@ class AssuranceStore:
         *,
         authoritative: bool,
         authoritative_kinds: set[str] | None = None,
+        scope_key: str = "",
     ) -> list[dict[str, Any]]:
         """Correlate deterministic signals while protecting partial reads from false resolution."""
         now = _now().isoformat()
+        signals = [
+            {
+                **item,
+                "fingerprint": self.scoped_signal_fingerprint(
+                    scope_key,
+                    str(item.get("fingerprint") or ""),
+                ),
+            }
+            for item in signals
+        ]
         seen = {item["fingerprint"] for item in signals if item.get("fingerprint")}
         with self._lock, self.connect() as db:
-            active_rows = db.execute(
-                "SELECT * FROM assurance_signals WHERE status!='resolved'"
-            ).fetchall()
+            if scope_key:
+                active_rows = db.execute(
+                    """SELECT * FROM assurance_signals
+                    WHERE status!='resolved' AND fingerprint LIKE ?""",
+                    (f"{self._scope_prefix(scope_key)}%",),
+                ).fetchall()
+            else:
+                active_rows = db.execute(
+                    "SELECT * FROM assurance_signals WHERE status!='resolved'"
+                ).fetchall()
             for item in signals:
                 fingerprint = item.get("fingerprint", "")
                 if not fingerprint:
@@ -637,6 +656,17 @@ class AssuranceStore:
             if (item := self.get_signal(fingerprint)) is not None
         ]
 
+    @staticmethod
+    def _scope_prefix(scope_key: str) -> str:
+        digest = hashlib.sha256(scope_key.encode("utf-8")).hexdigest()[:16]
+        return f"{digest}:"
+
+    @classmethod
+    def scoped_signal_fingerprint(cls, scope_key: str, fingerprint: str) -> str:
+        if not scope_key or not fingerprint:
+            return fingerprint
+        return f"{cls._scope_prefix(scope_key)}{fingerprint}"
+
     def get_signal(self, fingerprint: str) -> dict[str, Any] | None:
         with self.connect() as db:
             row = db.execute(
@@ -644,19 +674,24 @@ class AssuranceStore:
             ).fetchone()
         return self._signal(row) if row else None
 
-    def signals(self, limit: int = 50) -> list[dict[str, Any]]:
+    def signals(self, limit: int = 50, *, scope_key: str = "") -> list[dict[str, Any]]:
         with self.connect() as db:
-            rows = db.execute(
-                """SELECT * FROM assurance_signals ORDER BY
-                CASE status WHEN 'persistent' THEN 0 WHEN 'watching' THEN 1 ELSE 2 END,
-                CASE severity WHEN 'critical' THEN 0 WHEN 'high' THEN 1
-                WHEN 'medium' THEN 2 ELSE 3 END, last_seen_at DESC LIMIT ?""",
-                (limit,),
-            ).fetchall()
+            query = """SELECT * FROM assurance_signals"""
+            parameters: tuple[Any, ...]
+            if scope_key:
+                query += " WHERE fingerprint LIKE ?"
+                parameters = (f"{self._scope_prefix(scope_key)}%", limit)
+            else:
+                parameters = (limit,)
+            query += """ ORDER BY
+            CASE status WHEN 'persistent' THEN 0 WHEN 'watching' THEN 1 ELSE 2 END,
+            CASE severity WHEN 'critical' THEN 0 WHEN 'high' THEN 1
+            WHEN 'medium' THEN 2 ELSE 3 END, last_seen_at DESC LIMIT ?"""
+            rows = db.execute(query, parameters).fetchall()
         return [self._signal(row) for row in rows]
 
-    def signal_counts(self) -> dict[str, int]:
-        signals = self.signals(limit=10000)
+    def signal_counts(self, *, scope_key: str = "") -> dict[str, int]:
+        signals = self.signals(limit=10000, scope_key=scope_key)
         counts = {
             "actionable": sum(item["status"] == "persistent" for item in signals),
             "repeated": sum(
@@ -881,8 +916,8 @@ class AssuranceStore:
         ]
         return value
 
-    @staticmethod
-    def _package(row: sqlite3.Row) -> dict[str, Any]:
+    def _package(self, row: sqlite3.Row) -> dict[str, Any]:
+        run = self.get_run(str(row["source_run_id"]))
         return {
             "id": row["id"],
             "source_run_id": row["source_run_id"],
@@ -896,4 +931,7 @@ class AssuranceStore:
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
             "closed_at": row["closed_at"],
+            "connection_alias": run.connection_alias if run else "primary",
+            "connection_fingerprint": run.connection_fingerprint if run else "",
+            "tenant_scope_id": run.tenant_scope_id if run else "",
         }

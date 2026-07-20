@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -10,7 +11,7 @@ from .schedule_store import TimeSeriesScheduleStore
 from .service import TimeSeriesForecastService
 
 ProgressCallback = Callable[[dict[str, Any]], Awaitable[None]]
-AuthorizationCheck = Callable[[str], tuple[bool, str]]
+AuthorizationCheck = Callable[..., tuple[bool, str]]
 ConnectionBindingCheck = Callable[[str, str, str], tuple[bool, str]]
 
 
@@ -25,7 +26,7 @@ class TimeSeriesScheduleService:
         authorize_owner: AuthorizationCheck,
         validate_connection_binding: ConnectionBindingCheck | None = None,
         *,
-        splunk_factory: Callable[[], Any] | None = None,
+        splunk_factory: Callable[..., Any] | None = None,
         poll_seconds: float = 2.0,
     ):
         self.store = store
@@ -203,7 +204,12 @@ class TimeSeriesScheduleService:
             self.store.update_progress(attempt_id, event)
 
         try:
-            allowed, reason = self.authorize_owner(schedule["created_by"])
+            authorization_parameters = inspect.signature(self.authorize_owner).parameters
+            allowed, reason = (
+                self.authorize_owner(schedule["created_by"], running["connection_alias"])
+                if len(authorization_parameters) >= 2
+                else self.authorize_owner(schedule["created_by"])
+            )
             if not allowed:
                 raise PermissionError(reason)
             if self.validate_connection_binding is not None:
@@ -217,9 +223,35 @@ class TimeSeriesScheduleService:
             run_options = {
                 "actor": schedule["created_by"],
                 "seasonal_comparison": schedule["seasonal_comparison"],
+                "binding": {
+                    "alias": running["connection_alias"],
+                    "fingerprint": running["connection_fingerprint"],
+                    "tenant_scope_id": running["tenant_scope_id"],
+                },
             }
             if self.splunk_factory is not None:
-                run_options["splunk_client"] = self.splunk_factory()
+                binding = {
+                    "alias": running["connection_alias"],
+                    "fingerprint": running["connection_fingerprint"],
+                    "tenant_scope_id": running["tenant_scope_id"],
+                }
+                factory_parameters = inspect.signature(self.splunk_factory).parameters
+                run_options["splunk_client"] = (
+                    self.splunk_factory(binding)
+                    if factory_parameters
+                    else self.splunk_factory()
+                )
+            forecast_parameters = inspect.signature(self.forecast.run).parameters
+            accepts_options = any(
+                parameter.kind is inspect.Parameter.VAR_KEYWORD
+                for parameter in forecast_parameters.values()
+            )
+            if not accepts_options:
+                run_options = {
+                    key: value
+                    for key, value in run_options.items()
+                    if key in forecast_parameters
+                }
             result = await self.forecast.run(
                 TimeSeriesForecastRequest(**schedule["request"]),
                 progress,

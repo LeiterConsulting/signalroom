@@ -213,6 +213,62 @@ async def test_assurance_preflight_blocks_before_any_splunk_or_pipeline_call(tmp
     assert fake_splunk.calls == []
 
 
+@pytest.mark.asyncio
+async def test_assurance_execution_passes_immutable_secondary_binding_to_dependencies(
+    tmp_path,
+):
+    store = AssuranceStore(tmp_path / "assurance.db")
+    binding = {
+        "alias": "soc-east",
+        "fingerprint": "a" * 64,
+        "tenant_scope_id": "tenant-east",
+    }
+    store.bind_unbound(binding)
+    captured: dict[str, Any] = {}
+
+    def client_factory(target):
+        captured["client_binding"] = target
+        return FakeSplunk()
+
+    async def preflight(depth, progress, target):
+        captured["preflight_binding"] = target
+        return {
+            "ready": True,
+            "blocking_stage": "",
+            "depth_readiness": {"quick": True},
+            "stages": [],
+        }
+
+    class Pipeline:
+        async def run(self, depth: str, progress):
+            return {
+                "run_id": "discovery-secondary",
+                "findings": [],
+                "coverage": {"score": 100},
+                "changes": {"inventory": {}, "coverage": {}},
+                "collection_status": {"failed_calls": 0},
+                "splunk_models": {"summary": {}},
+            }
+
+    service = AssuranceService(
+        store,
+        client_factory,
+        lambda _client: Pipeline(),
+        preflight=preflight,
+    )
+    run = service.enqueue("quick")
+
+    await service._execute(run.id)
+
+    completed = store.get_run(run.id)
+    assert completed is not None and completed.status == "complete"
+    assert completed.connection_alias == "soc-east"
+    assert captured == {
+        "client_binding": binding,
+        "preflight_binding": binding,
+    }
+
+
 def test_assurance_policy_rejects_a_budget_below_selected_depth(tmp_path):
     service = AssuranceService(
         AssuranceStore(tmp_path / "assurance.db"),
@@ -301,6 +357,46 @@ def test_assurance_correlates_transient_persistent_and_resolved_signals(tmp_path
     assert duplicate["occurrence_count"] == 2
     assert unresolved is not None and unresolved["status"] == "persistent"
     assert resolved is not None and resolved["status"] == "resolved"
+
+
+def test_assurance_recurrence_and_resolution_are_isolated_by_connection_scope(tmp_path):
+    store = AssuranceStore(tmp_path / "assurance.db")
+    signal = {
+        "fingerprint": "shared-finding-content",
+        "kind": "finding",
+        "severity": "medium",
+        "title": "Same title in two estates",
+        "detail": "The observation text is intentionally identical.",
+        "subject": "identity",
+        "source_ref": "D1",
+    }
+    east_scope = f"soc-east|{'a' * 64}|tenant-east"
+    west_scope = f"soc-west|{'b' * 64}|tenant-west"
+
+    east = store.correlate_signals(
+        "east-1",
+        [signal],
+        authoritative=True,
+        scope_key=east_scope,
+    )[0]
+    west = store.correlate_signals(
+        "west-1",
+        [signal],
+        authoritative=True,
+        scope_key=west_scope,
+    )[0]
+    store.correlate_signals(
+        "east-2",
+        [],
+        authoritative=True,
+        scope_key=east_scope,
+    )
+
+    assert east["fingerprint"] != west["fingerprint"]
+    assert east["status"] == "watching"
+    assert west["status"] == "watching"
+    assert store.get_signal(east["fingerprint"])["status"] == "resolved"
+    assert store.get_signal(west["fingerprint"])["status"] == "watching"
 
 
 def test_partial_observations_do_not_accumulate_recurrence(tmp_path):

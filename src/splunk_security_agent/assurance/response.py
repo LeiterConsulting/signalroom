@@ -25,7 +25,13 @@ class AssuranceResponseService:
         self.store = store
         self.validation_service = validation_service
 
-    def process(self, run_id: str, result: dict[str, Any]) -> dict[str, Any] | None:
+    def process(
+        self,
+        run_id: str,
+        result: dict[str, Any],
+        *,
+        scope_key: str = "",
+    ) -> dict[str, Any] | None:
         signals = self._signals(result)
         collection = result.get("collection_status", {})
         failed_calls = int(collection.get("failed_calls") or 0)
@@ -38,10 +44,12 @@ class AssuranceResponseService:
             signals,
             authoritative=failed_calls == 0,
             authoritative_kinds=authoritative_kinds,
+            scope_key=scope_key,
         )
         covered = self.store.covered_signal_fingerprints()
         authoritative = {
-            item["fingerprint"]: str(item.get("authoritative", "true")).lower() != "false"
+            self.store.scoped_signal_fingerprint(scope_key, item["fingerprint"]):
+            str(item.get("authoritative", "true")).lower() != "false"
             for item in signals
         }
         eligible = [

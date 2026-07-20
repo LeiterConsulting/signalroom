@@ -568,6 +568,7 @@ class TimeSeriesForecastService:
         actor: str = "local-operator",
         seasonal_comparison: bool = True,
         splunk_client: Any | None = None,
+        binding: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         self.validate_contract(request)
         run_id = f"forecast-{uuid4().hex[:16]}"
@@ -649,6 +650,11 @@ class TimeSeriesForecastService:
                 "value_field": request.value_field,
                 "interval_seconds": request.interval_seconds,
                 "query_fingerprint": query_fingerprint,
+                "connection_alias": str((binding or {}).get("alias") or "primary"),
+                "connection_fingerprint": str((binding or {}).get("fingerprint") or ""),
+                "tenant_scope_id": str(
+                    (binding or {}).get("tenant_scope_id") or "workspace-primary"
+                ),
             },
             "series": {key: value for key, value in prepared.items() if key not in {"values", "timestamps"}},
             "series_sha256": series_fingerprint,

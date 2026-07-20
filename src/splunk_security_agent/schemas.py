@@ -100,6 +100,12 @@ class TimeSeriesForecastRequest(BaseModel):
     backtest_points: int = Field(default=24, ge=8, le=128)
 
 
+class TimeSeriesForecastExecutionRequest(TimeSeriesForecastRequest):
+    connection_alias: str = Field(default="primary", min_length=3, max_length=48)
+    connection_fingerprint: str = Field(default="", max_length=64)
+    tenant_scope_id: str = Field(default="workspace-primary", min_length=3, max_length=64)
+
+
 class TimeSeriesBaselineAcceptRequest(BaseModel):
     expected_run_fingerprint: str = Field(
         min_length=64,
@@ -129,6 +135,9 @@ class TimeSeriesScheduleCreate(BaseModel):
     interval_minutes: int = Field(default=360, ge=60, le=10_080)
     max_runs_per_day: int = Field(default=4, ge=1, le=12)
     seasonal_comparison: bool = True
+    connection_alias: str = Field(default="primary", min_length=3, max_length=48)
+    connection_fingerprint: str = Field(default="", max_length=64)
+    tenant_scope_id: str = Field(default="workspace-primary", min_length=3, max_length=64)
 
 
 class TimeSeriesScheduleUpdate(BaseModel):
@@ -148,6 +157,9 @@ class ConnectionRebindRequest(BaseModel):
         pattern=r"^[0-9a-f]{64}$",
     )
     expected_updated_at: str = Field(min_length=1, max_length=80)
+    connection_alias: str = Field(default="primary", min_length=3, max_length=48)
+    connection_fingerprint: str = Field(default="", max_length=64)
+    tenant_scope_id: str = Field(default="workspace-primary", min_length=3, max_length=64)
 
 
 class ManagedSplunkConnectionCreate(BaseModel):
@@ -593,6 +605,13 @@ class AssurancePolicyUpdate(BaseModel):
     max_runs_per_day: int = Field(default=4, ge=1, le=48)
     notify_on_drift: bool = True
     notify_on_high_findings: bool = True
+
+
+class AssurancePolicyExecutionUpdate(AssurancePolicyUpdate):
+    connection_alias: str = Field(default="primary", min_length=3, max_length=48)
+    connection_fingerprint: str = Field(default="", max_length=64)
+    tenant_scope_id: str = Field(default="workspace-primary", min_length=3, max_length=64)
+    expected_policy_updated_at: str = Field(default="", max_length=80)
 
 
 class WorkloadPolicyUpdate(BaseModel):

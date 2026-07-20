@@ -73,12 +73,18 @@ Local POC mode can use every admitted alias. With RBAC enabled, the selector is 
 aliases assigned to the signed-in user, and every scoped API request rechecks that assignment. Roles
 and connection grants remain separate controls.
 
-Continuous assurance, scheduled shadow forecasting, detection deployment verification, and other
-platform-wide durable automation remain Primary-bound in this increment. Manual discovery jobs can
-bind and execute against an admitted secondary alias. The next scheduling increment must make the
-target alias an explicit policy field rather than inferring it from a browser selector.
+Continuous assurance and scheduled shadow forecasting now expose an explicit admitted target in their
+own policy forms rather than inferring one from the browser's active scope. Their workers recheck the
+owner's alias assignment and exact immutable revision before every run, construct the alias-specific
+Splunk client only after that check, and retain alias/scope provenance in run history. Direct forecast
+experiments and comparison baselines are also partitioned by alias, revision, and tenant scope.
+Changing a durable target requires exact prior fingerprint and `updated_at` concurrency values and
+pauses the cadence for review.
 
-Cross-instance comparison, OIDC group-to-alias mapping beyond the current Primary grant, backup and
+Detection deployment verification and other platform-wide durable automation that do not yet expose
+a target remain Primary-bound.
+
+Source-preserving cross-instance comparison, OIDC group-to-alias mapping beyond the current Primary grant, backup and
 migration tooling for connection credentials, and optional per-tenant data-plane isolation remain
 future work. Comparisons must preserve source attribution instead of merging results into an
 unqualified global answer.

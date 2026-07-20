@@ -170,6 +170,17 @@ def test_splunk_scope_selector_is_global_and_readable() -> None:
     assert "@media(max-width:1100px){.chat-layout{grid-template-columns:1fr}" in STYLES_CSS
 
 
+def test_durable_analytics_expose_explicit_splunk_targets_and_provenance() -> None:
+    assert 'id="assuranceTarget"' in INDEX_HTML
+    assert 'id="forecastTarget"' in APP_JS
+    assert 'id="forecastScheduleTarget"' in APP_JS
+    assert "Retained baselines are isolated by target and revision." in APP_JS
+    assert "data-rebind-forecast-schedule" in APP_JS
+    assert "expected_policy_updated_at" in APP_JS
+    assert "connection_fingerprint" in APP_JS
+    assert ".forecast-schedule-binding" in STYLES_CSS
+
+
 def test_remote_audit_export_is_explicit_and_accessible() -> None:
     assert 'id="auditExportForm"' in INDEX_HTML
     assert 'id="auditExportEnabled"' in INDEX_HTML

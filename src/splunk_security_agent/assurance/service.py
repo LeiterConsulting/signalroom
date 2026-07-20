@@ -54,11 +54,11 @@ class AssuranceService:
     def __init__(
         self,
         store: AssuranceStore,
-        client_factory: Callable[[], Any],
+        client_factory: Callable[..., Any],
         pipeline_factory: Callable[[Any], Any],
         on_complete: Callable[[str, dict[str, Any]], Awaitable[None] | None] | None = None,
         run_lock: asyncio.Lock | None = None,
-        preflight: Callable[[str, Any], Awaitable[dict[str, Any]]] | None = None,
+        preflight: Callable[..., Awaitable[dict[str, Any]]] | None = None,
         validate_connection_binding: (
             Callable[[str, str, str], tuple[bool, str]] | None
         ) = None,
@@ -98,10 +98,14 @@ class AssuranceService:
         self._active_run_id = ""
 
     def update_policy(self, value: AssurancePolicyUpdate) -> dict[str, Any]:
-        self._validate_budget(value.discovery_depth, value.max_splunk_calls_per_run)
+        self.validate_policy(value)
         result = self.store.update_policy(value)
         self._wake.set()
         return result
+
+    def validate_policy(self, value: AssurancePolicyUpdate) -> None:
+        """Validate a policy before any connection rebind mutates durable state."""
+        self._validate_budget(value.discovery_depth, value.max_splunk_calls_per_run)
 
     def enqueue(self, depth: str | None = None, trigger: str = "manual") -> AssuranceRunRecord:
         policy = self.store.policy()
@@ -140,17 +144,40 @@ class AssuranceService:
     def overview(self) -> dict[str, Any]:
         policy = self.store.policy()
         active = self.store.active_run()
+        scope_key = (
+            f"{policy['connection_alias']}|{policy['connection_fingerprint']}|"
+            f"{policy['tenant_scope_id']}"
+        )
+        runs = [
+            item
+            for item in self.store.list_runs()
+            if item.connection_alias == policy["connection_alias"]
+            and item.connection_fingerprint == policy["connection_fingerprint"]
+            and item.tenant_scope_id == policy["tenant_scope_id"]
+        ]
+        run_ids = {item.id for item in runs}
+        packages = [
+            item
+            for item in self.store.packages()
+            if item["connection_alias"] == policy["connection_alias"]
+            and item["connection_fingerprint"] == policy["connection_fingerprint"]
+            and item["tenant_scope_id"] == policy["tenant_scope_id"]
+        ]
         return {
             "policy": policy,
             "required_calls": DISCOVERY_CALL_ESTIMATES,
             "usage_today": self.store.usage_today(),
             "active_run": active.model_dump(mode="json") if active else None,
             "active_events": self.store.events(active.id) if active else [],
-            "runs": [item.model_dump(mode="json") for item in self.store.list_runs()],
-            "notifications": self.store.notifications(),
-            "signals": self.store.signals(),
-            "signal_counts": self.store.signal_counts(),
-            "response_packages": self.store.packages(),
+            "runs": [item.model_dump(mode="json") for item in runs],
+            "notifications": [
+                item
+                for item in self.store.notifications()
+                if not item["run_id"] or item["run_id"] in run_ids
+            ],
+            "signals": self.store.signals(scope_key=scope_key),
+            "signal_counts": self.store.signal_counts(scope_key=scope_key),
+            "response_packages": packages,
             "worker": {
                 "online": bool(self._worker and not self._worker.done()),
                 "single_run_concurrency": 1,
@@ -250,7 +277,14 @@ class AssuranceService:
                     reason,
                 )
                 return
-        client = BudgetedSplunkClient(self.client_factory(), running.call_budget)
+        binding = {
+            "alias": running.connection_alias,
+            "fingerprint": running.connection_fingerprint,
+            "tenant_scope_id": running.tenant_scope_id,
+        }
+        factory_parameters = inspect.signature(self.client_factory).parameters
+        raw_client = self.client_factory(binding) if factory_parameters else self.client_factory()
+        client = BudgetedSplunkClient(raw_client, running.call_budget)
 
         async def progress(event: dict[str, Any]) -> None:
             current = self.store.get_run(run_id)
@@ -278,7 +312,12 @@ class AssuranceService:
                         "metrics": {"splunk_calls": 0},
                     }
                 )
-                readiness = await self.preflight(running.depth, progress)
+                preflight_parameters = inspect.signature(self.preflight).parameters
+                readiness = await (
+                    self.preflight(running.depth, progress, binding)
+                    if len(preflight_parameters) >= 3
+                    else self.preflight(running.depth, progress)
+                )
                 if not readiness.get("depth_readiness", {}).get(running.depth, False):
                     blocking_stage = str(readiness.get("blocking_stage") or "tool-contract")
                     stage = next(

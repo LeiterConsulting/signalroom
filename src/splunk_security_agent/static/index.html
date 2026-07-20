@@ -129,6 +129,7 @@
             <form id="assuranceForm" class="assurance-policy-form">
               <label class="switch-line assurance-enable"><span><b>Enable scheduled assurance</b><small>Disabled by default; enabling schedules the first run after the selected interval</small></span><input type="checkbox" id="assuranceEnabled"><span class="switch-control" aria-hidden="true"></span></label>
               <div class="assurance-policy-grid">
+                <label class="full"><span>Splunk assurance target</span><select id="assuranceTarget" required aria-describedby="assuranceTargetHelp"></select><small id="assuranceTargetHelp">Every run revalidates this exact admitted connection revision. Changing it pauses scheduling for review.</small></label>
                 <label><span>Scheduled discovery depth</span><select id="assuranceDepth"><option value="quick">Quick · 4 calls</option><option value="standard">Standard · up to 9 calls</option><option value="deep">Deep · up to 12 calls</option></select></label>
                 <label><span>Run interval</span><select id="assuranceInterval"><option value="15">Every 15 minutes</option><option value="60">Hourly</option><option value="360">Every 6 hours</option><option value="1440">Daily</option><option value="10080">Weekly</option></select></label>
                 <label><span>Splunk-call ceiling</span><input id="assuranceCallBudget" type="number" min="4" max="50" value="12"><small id="assuranceBudgetHelp">Hard limit for each run</small></label>

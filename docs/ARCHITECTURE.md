@@ -75,7 +75,8 @@ or case.
 
 `TimeSeriesExperimentStore` retains each completed or data-quality-blocked run as immutable local experiment
 state without raw Splunk result rows. Its logical series identity removes only the explicit `timechart` span,
-allowing deterministic window and span comparisons while keeping the rest of the SPL and field contract bound.
+allowing deterministic window and span comparisons while keeping the rest of the SPL, field contract, Splunk
+alias, immutable connection revision, and tenant scope bound.
 Baseline acceptance requires an eligible run, its exact fingerprint, and an analyst review note. A logical
 series may have one general fallback plus one reviewed reference per weekday. New runs prefer the matching
 weekday and retain the general comparison alongside it; operators may deliberately choose general-only
@@ -87,8 +88,10 @@ create an alert, or bypass the existing evidence requirement for detection engin
 contract. Schedules default paused, first become due only after one full configured interval, and coalesce missed
 intervals instead of replaying a backlog. The durable store binds attempts to their schedule, trigger, progress
 events, retained experiment, and exact fingerprint. It enforces per-schedule plus global UTC-day run ceilings,
-rechecks the creating user's active analyst role and Primary connection assignment, and converts interruption
-into a fresh read-only retry. Only no-baseline, review, and material-drift outcomes enter the analyst queue.
+rechecks the creating user's active analyst role and exact target-alias assignment, validates the immutable
+connection revision, constructs the alias-specific client, and converts interruption into a fresh read-only
+retry. Target changes use exact optimistic concurrency and pause the cadence. Only no-baseline, review, and
+material-drift outcomes enter the analyst queue.
 Fingerprint-bound acknowledgement or dismissal is a local disposition, never alerting authority.
 
 `ModelTrustService` forms a separate local supply-chain authority. It observes the publisher, immutable source
@@ -199,7 +202,10 @@ retain the requesting username in the local audit chain.
 `AssuranceService` owns one local worker. Scheduled assurance, durable manual discovery, compatibility discovery
 requests, and MLTK scans share an async execution lock; no second scheduled assurance run is queued while one is
 active. A `BudgetedSplunkClient` counts before delegation and refuses calls beyond the configured ceiling, including
-calls launched concurrently. On shutdown, active work is re-queued for a fresh read-only collection; an explicit
+calls launched concurrently. The policy binds an explicit admitted alias, immutable connection revision, and
+tenant scope. The worker validates that exact binding, performs alias-specific connection diagnostics, and only
+then constructs the target client. A reviewed target change uses optimistic concurrency and leaves scheduling
+paused. On shutdown, active work is re-queued for a fresh read-only collection; an explicit
 cancellation is terminal and persists across restart.
 
 The scheduler creates local notifications from deterministic result fields. `AssuranceResponseService` fingerprints
@@ -409,8 +415,8 @@ there is deliberately no remote recovery route.
 
 ## Next production increments
 
-1. Durable scheduling-policy selection for admitted secondary Splunk aliases
-2. Multi-instance comparison with source-preserving provenance and optional data-plane isolation
+1. Multi-instance comparison with source-preserving provenance and explicit, non-merging analyst views
+2. Optional per-tenant data-plane isolation for higher-assurance deployments
 3. OIDC group-to-alias assignment policy and credential backup/restore controls
 4. Read-only deployment reconciliation for the audit operations pack when the Splunk MCP contract exposes the
    required index and knowledge-object configuration fields
@@ -439,5 +445,7 @@ provision secondary live aliases with encrypted per-alias tokens. Secondary revi
 create, endpoint/TLS/scope change, or token rotation; successful diagnostics plus explicit admission
 are required before they appear in the selector. Request-time client, workload, discovery, and chat
 construction is alias aware. Optional RBAC filters scopes and rechecks the selected alias on every
-scoped API request. Platform-wide assurance and forecasting schedules remain explicitly Primary-bound
-until their policies gain a reviewed target-alias field.
+scoped API request. Continuous assurance, direct forecasting, and forecasting schedules expose their
+own explicit target controls, persist the immutable target, and require a reviewed pause/rebind before
+moving to another revision or alias. Other platform-wide automations remain Primary-bound until they
+gain the same explicit target contract.

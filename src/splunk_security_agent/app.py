@@ -63,6 +63,7 @@ from .schemas import (
     AnalystFeedbackCreate,
     ArtifactCreate,
     ArtifactUpdate,
+    AssurancePolicyExecutionUpdate,
     AssurancePolicyUpdate,
     AssuranceRunCreate,
     AuditExportPolicyUpdate,
@@ -123,6 +124,7 @@ from .schemas import (
     SplunkConnection,
     TimeSeriesAlertCandidateCreate,
     TimeSeriesBaselineAcceptRequest,
+    TimeSeriesForecastExecutionRequest,
     TimeSeriesForecastRequest,
     TimeSeriesReviewDecision,
     TimeSeriesRuntimeUpdate,
@@ -260,7 +262,7 @@ class Services:
             self.audit,
             self._forecast_schedule_authorization,
             self.validate_connection_binding,
-            splunk_factory=lambda: self.splunk,
+            splunk_factory=self.splunk_for_scope,
         )
         self._fingerprint = ""
         self._splunk: Any = None
@@ -290,7 +292,7 @@ class Services:
         )
         self.assurance = AssuranceService(
             self.assurance_store,
-            lambda: self.splunk,
+            self.splunk_for_scope,
             self._assurance_pipeline,
             self._assurance_complete,
             self.discovery_lock,
@@ -479,18 +481,23 @@ class Services:
         for agent in self._scope_agents.values():
             agent.invalidate_context_cache()
 
-    def _forecast_schedule_authorization(self, username: str) -> tuple[bool, str]:
+    def _forecast_schedule_authorization(
+        self, username: str, connection_alias: str = "primary"
+    ) -> tuple[bool, str]:
         policy = self.auth_store.policy()
         if not policy["enabled"]:
-            return True, "Local single-user mode has Primary Splunk access."
+            return True, "Local single-user mode can use every admitted Splunk connection."
         user = self.auth_store.get_user_by_username(username)
         if user is None or not user.get("active"):
             return False, "The schedule owner is no longer an active SignalRoom user."
         if user.get("role") not in {"analyst", "admin"}:
             return False, "The schedule owner no longer has analyst execution permission."
-        if "primary" not in (user.get("connection_ids") or []):
-            return False, "The schedule owner no longer has access to the Primary Splunk connection."
-        return True, "The schedule owner retains analyst and Primary Splunk access."
+        if connection_alias not in (user.get("connection_ids") or []):
+            return (
+                False,
+                f"The schedule owner no longer has access to the {connection_alias} Splunk connection.",
+            )
+        return True, f"The schedule owner retains analyst and {connection_alias} access."
 
     def _assurance_pipeline(self, client: Any) -> DiscoveryPipeline:
         model_inventory = SplunkModelInventoryService(self.config, client)
@@ -504,7 +511,13 @@ class Services:
         )
 
     async def _assurance_complete(self, run_id: str, result: dict[str, Any]) -> None:
-        package = self.assurance_response.process(run_id, result)
+        run = self.assurance_store.get_run(run_id)
+        scope_key = (
+            f"{run.connection_alias}|{run.connection_fingerprint}|{run.tenant_scope_id}"
+            if run
+            else ""
+        )
+        package = self.assurance_response.process(run_id, result, scope_key=scope_key)
         if package:
             self.delivery.consider_package(package)
         self.invalidate_context_caches()
@@ -687,17 +700,28 @@ def _request_scope(
             **resolver(connection_alias, connection_fingerprint, tenant_scope_id),
             "_enforced": True,
         }
-        principal = _request_principal.get() or {}
-        if services.auth_store.policy()["enabled"] and scope["alias"] not in set(
-            principal.get("connection_ids") or []
-        ):
-            raise HTTPException(
-                403,
-                f"This user is not assigned to the {scope['alias']} Splunk connection.",
-            )
+        _authorize_connection_alias(scope["alias"])
         return scope
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from exc
+
+
+def _authorize_connection_alias(alias: str) -> None:
+    principal = _request_principal.get() or {}
+    if services.auth_store.policy()["enabled"] and alias not in set(
+        principal.get("connection_ids") or []
+    ):
+        raise HTTPException(
+            403,
+            f"This user is not assigned to the {alias} Splunk connection.",
+        )
+
+
+def _allowed_connection_ids() -> set[str] | None:
+    if not services.auth_store.policy()["enabled"]:
+        return None
+    principal = _request_principal.get() or {}
+    return set(principal.get("connection_ids") or [])
 
 
 def _scoped_model(value: Any, scope: dict[str, Any]) -> Any:
@@ -1256,8 +1280,12 @@ async def rebind_assurance_connection(
     active = services.assurance_store.active_run()
     if active is not None:
         raise HTTPException(409, "Wait for the active assurance run before rebinding its policy")
-    binding = services.current_connection_binding()
     try:
+        binding = _request_scope(
+            value.connection_alias,
+            value.connection_fingerprint,
+            value.tenant_scope_id,
+        )
         result = services.assurance_store.rebind_policy(
             binding,
             expected_connection_fingerprint=value.expected_connection_fingerprint,
@@ -1269,9 +1297,13 @@ async def rebind_assurance_connection(
         "connection.binding.rebound",
         "rebind",
         target_type="assurance-policy",
-        target_id="primary",
-        summary="Continuous assurance was paused and rebound to the current Primary Splunk revision.",
+        target_id=binding["alias"],
+        summary=(
+            "Continuous assurance was paused and rebound to an explicitly selected "
+            "Splunk revision."
+        ),
         metadata={
+            "connection_alias": binding["alias"],
             "previous_fingerprint": value.expected_connection_fingerprint,
             "connection_fingerprint": binding["fingerprint"],
             "tenant_scope_id": binding["tenant_scope_id"],
@@ -1291,8 +1323,12 @@ async def rebind_time_series_schedule_connection(
     active = services.time_series_schedule_store.active_attempt()
     if active and active["schedule_id"] == schedule_id:
         raise HTTPException(409, "Wait for the active shadow forecast before rebinding its schedule")
-    binding = services.current_connection_binding()
     try:
+        binding = _request_scope(
+            value.connection_alias,
+            value.connection_fingerprint,
+            value.tenant_scope_id,
+        )
         result = services.time_series_schedule_store.rebind(
             schedule_id,
             binding,
@@ -1308,8 +1344,9 @@ async def rebind_time_series_schedule_connection(
         "rebind",
         target_type="forecast-schedule",
         target_id=schedule_id,
-        summary="A shadow forecast was paused and rebound to the current Primary Splunk revision.",
+        summary="A shadow forecast was paused and rebound to an explicitly selected Splunk revision.",
         metadata={
+            "connection_alias": binding["alias"],
             "previous_fingerprint": value.expected_connection_fingerprint,
             "connection_fingerprint": binding["fingerprint"],
             "tenant_scope_id": binding["tenant_scope_id"],
@@ -1603,13 +1640,32 @@ async def start_time_series_runtime(request: Request) -> StreamingResponse:
 
 
 @app.post("/api/model-capabilities/time-series/forecast/stream")
-async def run_time_series_forecast(value: TimeSeriesForecastRequest, request: Request) -> StreamingResponse:
+async def run_time_series_forecast(
+    value: TimeSeriesForecastExecutionRequest,
+    request: Request,
+) -> StreamingResponse:
     principal = getattr(request.state, "principal", {}) or {}
     actor = str(principal.get("username") or "local-operator")
+    scope = _request_scope(
+        value.connection_alias,
+        value.connection_fingerprint,
+        value.tenant_scope_id,
+    )
+    forecast_request = TimeSeriesForecastRequest.model_validate(
+        value.model_dump(
+            exclude={"connection_alias", "connection_fingerprint", "tenant_scope_id"}
+        )
+    )
 
     async def run(progress: Any) -> dict[str, Any]:
         try:
-            result = await services.time_series.run(value, progress, actor=actor)
+            result = await services.time_series.run(
+                forecast_request,
+                progress,
+                actor=actor,
+                splunk_client=services.splunk_for_scope(scope),
+                binding=scope,
+            )
         except (ValueError, PermissionError, RuntimeError) as exc:
             services.audit.record(
                 "model.capability.time-series.forecast-failed",
@@ -1639,6 +1695,9 @@ async def run_time_series_forecast(value: TimeSeriesForecastRequest, request: Re
                 "network_inference": False,
                 "source_persisted": False,
                 "experiment_fingerprint": (result.get("experiment", {}).get("run_fingerprint", "")),
+                "connection_alias": scope["alias"],
+                "connection_fingerprint": scope["fingerprint"],
+                "tenant_scope_id": scope["tenant_scope_id"],
             },
             actor=actor,
         )
@@ -1649,15 +1708,43 @@ async def run_time_series_forecast(value: TimeSeriesForecastRequest, request: Re
 
 @app.get("/api/model-capabilities/time-series/experiments")
 async def list_time_series_experiments(limit: int = 30) -> dict[str, Any]:
-    return services.time_series.experiments(limit)
+    result = services.time_series.experiments(limit)
+    allowed = _allowed_connection_ids()
+    if allowed is None:
+        return result
+    result["runs"] = [
+        item
+        for item in result.get("runs", [])
+        if str((item.get("source") or {}).get("connection_alias") or "primary")
+        in allowed
+    ]
+    run_ids = {item["id"] for item in result["runs"]}
+    series_keys = {item["series_key"] for item in result["runs"]}
+    result["series"] = [
+        item
+        for item in result.get("series", [])
+        if item.get("series_key") in series_keys
+    ]
+    result["alert_candidates"] = [
+        item
+        for item in result.get("alert_candidates", [])
+        if item.get("run_id") in run_ids
+    ]
+    return result
+
+
+def _authorize_time_series_experiment(run_id: str) -> dict[str, Any]:
+    result = services.time_series.experiment(run_id)
+    if result is None:
+        raise HTTPException(404, "Time-series experiment not found")
+    source = result.get("source") or {}
+    _authorize_connection_alias(str(source.get("connection_alias") or "primary"))
+    return result
 
 
 @app.get("/api/model-capabilities/time-series/experiments/{run_id}")
 async def get_time_series_experiment(run_id: str) -> dict[str, Any]:
-    result = services.time_series.experiment(run_id)
-    if result is None:
-        raise HTTPException(404, "Time-series experiment not found")
-    return result
+    return _authorize_time_series_experiment(run_id)
 
 
 @app.post("/api/model-capabilities/time-series/experiments/{run_id}/baseline")
@@ -1668,6 +1755,7 @@ async def accept_time_series_baseline(
 ) -> dict[str, Any]:
     principal = getattr(request.state, "principal", {}) or {}
     actor = str(principal.get("username") or "local-operator")
+    _authorize_time_series_experiment(run_id)
     try:
         result = services.time_series.accept_baseline(
             run_id,
@@ -1708,6 +1796,7 @@ async def create_time_series_alert_candidate(
 ) -> dict[str, Any]:
     principal = getattr(request.state, "principal", {}) or {}
     actor = str(principal.get("username") or "local-operator")
+    _authorize_time_series_experiment(run_id)
     try:
         result = services.time_series.create_alert_candidate(
             run_id,
@@ -1744,7 +1833,26 @@ async def create_time_series_alert_candidate(
 
 @app.get("/api/model-capabilities/time-series/schedules")
 async def list_time_series_schedules(limit: int = 30) -> dict[str, Any]:
-    return services.time_series_schedules.overview(limit)
+    result = services.time_series_schedules.overview(limit)
+    allowed = _allowed_connection_ids()
+    if allowed is None:
+        return result
+    result["schedules"] = [
+        item for item in result.get("schedules", []) if item["connection_alias"] in allowed
+    ]
+    schedule_ids = {item["id"] for item in result["schedules"]}
+    result["attempts"] = [
+        item
+        for item in result.get("attempts", [])
+        if item.get("schedule_id") in schedule_ids
+    ]
+    attempt_ids = {item["id"] for item in result["attempts"]}
+    result["reviews"] = [
+        item
+        for item in result.get("reviews", [])
+        if item.get("attempt_id") in attempt_ids
+    ]
+    return result
 
 
 @app.post("/api/model-capabilities/time-series/schedules", status_code=201)
@@ -1755,11 +1863,16 @@ async def create_time_series_schedule(
     principal = getattr(request.state, "principal", {}) or {}
     actor = str(principal.get("username") or "local-operator")
     try:
+        binding = _request_scope(
+            value.connection_alias,
+            value.connection_fingerprint,
+            value.tenant_scope_id,
+        )
         services.time_series.validate_contract(value.request)
         result = services.time_series_schedule_store.create(
             value,
             actor=actor,
-            binding=services.current_connection_binding(),
+            binding=binding,
         )
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
@@ -1779,6 +1892,7 @@ async def create_time_series_schedule(
             "max_runs_per_day": result["max_runs_per_day"],
             "seasonal_comparison": result["seasonal_comparison"],
             "automatic_alerting": False,
+            "connection_alias": result["connection_alias"],
             "connection_fingerprint": result["connection_fingerprint"],
             "tenant_scope_id": result["tenant_scope_id"],
         },
@@ -1795,9 +1909,21 @@ async def update_time_series_schedule(
 ) -> dict[str, Any]:
     principal = getattr(request.state, "principal", {}) or {}
     actor = str(principal.get("username") or "local-operator")
+    current = services.time_series_schedule_store.get(schedule_id)
+    if current is None:
+        raise HTTPException(404, "Shadow forecast schedule not found")
+    _authorize_connection_alias(current["connection_alias"])
     try:
         if value.request is not None:
             services.time_series.validate_contract(value.request)
+        if value.enabled or (value.enabled is None and current["enabled"]):
+            valid, reason = services.validate_connection_binding(
+                current["connection_alias"],
+                current["connection_fingerprint"],
+                current["tenant_scope_id"],
+            )
+            if not valid:
+                raise ValueError(reason)
         result = services.time_series_schedule_store.update(schedule_id, value)
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from exc
@@ -1832,6 +1958,10 @@ async def archive_time_series_schedule(
 ) -> dict[str, Any]:
     principal = getattr(request.state, "principal", {}) or {}
     actor = str(principal.get("username") or "local-operator")
+    current = services.time_series_schedule_store.get(schedule_id)
+    if current is None:
+        raise HTTPException(404, "Shadow forecast schedule not found")
+    _authorize_connection_alias(current["connection_alias"])
     active = services.time_series_schedule_store.active_attempt()
     if active and active["schedule_id"] == schedule_id:
         raise HTTPException(409, "Wait for the active shadow forecast to finish before archiving")
@@ -1863,6 +1993,14 @@ async def run_time_series_schedule_now(
 ) -> StreamingResponse:
     principal = getattr(request.state, "principal", {}) or {}
     actor = str(principal.get("username") or "local-operator")
+    schedule = services.time_series_schedule_store.get(schedule_id)
+    if schedule is None:
+        raise HTTPException(404, "Shadow forecast schedule not found")
+    _request_scope(
+        schedule["connection_alias"],
+        schedule["connection_fingerprint"],
+        schedule["tenant_scope_id"],
+    )
 
     async def run(progress: Any) -> dict[str, Any]:
         try:
@@ -1896,6 +2034,13 @@ async def decide_time_series_review(
 ) -> dict[str, Any]:
     principal = getattr(request.state, "principal", {}) or {}
     actor = str(principal.get("username") or "local-operator")
+    review = services.time_series_schedule_store.review(review_id)
+    if review is None:
+        raise HTTPException(404, "Shadow forecast review not found")
+    schedule = services.time_series_schedule_store.get(review["schedule_id"])
+    if schedule is None:
+        raise HTTPException(404, "Source shadow forecast schedule not found")
+    _authorize_connection_alias(schedule["connection_alias"])
     try:
         result = services.time_series_schedule_store.decide_review(
             review_id,
@@ -2660,7 +2805,11 @@ async def discovery_stream(request: DiscoveryRequest) -> StreamingResponse:
 
 
 @app.get("/api/assurance")
-async def assurance_overview() -> dict[str, Any]:
+async def assurance_overview(request: Request) -> dict[str, Any]:
+    policy = services.assurance_store.policy()
+    principal = getattr(request.state, "principal", {}) or {}
+    if principal.get("role") != "admin":
+        _authorize_connection_alias(policy["connection_alias"])
     result = services.assurance.overview()
     result["delivery"] = services.delivery.overview()
     result["audit"] = services.audit.overview(20)
@@ -2670,26 +2819,83 @@ async def assurance_overview() -> dict[str, Any]:
 
 
 @app.put("/api/assurance/policy")
-async def update_assurance_policy(request: AssurancePolicyUpdate) -> dict[str, Any]:
+async def update_assurance_policy(
+    value: AssurancePolicyExecutionUpdate,
+    request: Request,
+) -> dict[str, Any]:
     try:
-        services.assurance.update_policy(request)
+        binding = _request_scope(
+            value.connection_alias,
+            value.connection_fingerprint,
+            value.tenant_scope_id,
+        )
+        current = services.assurance_store.policy()
+        changed_binding = any(
+            (
+                current["connection_alias"] != binding["alias"],
+                current["connection_fingerprint"] != binding["fingerprint"],
+                current["tenant_scope_id"] != binding["tenant_scope_id"],
+            )
+        )
+        if changed_binding:
+            if services.assurance_store.active_run() is not None:
+                raise ValueError(
+                    "Wait for the active assurance run before changing its target connection."
+                )
+        policy_update = AssurancePolicyUpdate.model_validate(
+            {
+                **value.model_dump(
+                    exclude={
+                        "connection_alias",
+                        "connection_fingerprint",
+                        "tenant_scope_id",
+                        "expected_policy_updated_at",
+                    }
+                ),
+                "enabled": value.enabled and not changed_binding,
+            }
+        )
+        services.assurance.validate_policy(policy_update)
+        if changed_binding:
+            services.assurance_store.rebind_policy(
+                binding,
+                expected_connection_fingerprint=current["connection_fingerprint"],
+                expected_updated_at=value.expected_policy_updated_at,
+            )
+        services.assurance.update_policy(policy_update)
     except ValueError as exc:
-        raise HTTPException(400, str(exc)) from exc
+        raise HTTPException(409, str(exc)) from exc
     services.audit.record(
         "assurance.policy.updated",
         "update",
         target_type="assurance-policy",
-        target_id="primary",
-        summary=(f"Continuous assurance scheduling was {'enabled' if request.enabled else 'disabled'}."),
-        metadata=request.model_dump(mode="json"),
+        target_id=binding["alias"],
+        summary=(
+            "Continuous assurance target changed and scheduling was paused for review."
+            if changed_binding
+            else f"Continuous assurance scheduling was {'enabled' if value.enabled else 'disabled'}."
+        ),
+        metadata={
+            **policy_update.model_dump(mode="json"),
+            "connection_alias": binding["alias"],
+            "connection_fingerprint": binding["fingerprint"],
+            "tenant_scope_id": binding["tenant_scope_id"],
+            "target_changed": changed_binding,
+        },
     )
-    return await assurance_overview()
+    return await assurance_overview(request)
 
 
 @app.post("/api/assurance/runs", status_code=202)
-async def create_assurance_run(request: AssuranceRunCreate) -> dict[str, Any]:
+async def create_assurance_run(value: AssuranceRunCreate) -> dict[str, Any]:
     try:
-        run = services.assurance.enqueue(request.depth)
+        policy = services.assurance_store.policy()
+        _request_scope(
+            policy["connection_alias"],
+            policy["connection_fingerprint"],
+            policy["tenant_scope_id"],
+        )
+        run = services.assurance.enqueue(value.depth)
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from exc
     services.audit.record(
@@ -2701,6 +2907,7 @@ async def create_assurance_run(request: AssuranceRunCreate) -> dict[str, Any]:
         metadata={
             "depth": run.depth,
             "call_budget": run.call_budget,
+            "connection_alias": run.connection_alias,
             "connection_fingerprint": run.connection_fingerprint,
             "tenant_scope_id": run.tenant_scope_id,
         },
@@ -2710,6 +2917,10 @@ async def create_assurance_run(request: AssuranceRunCreate) -> dict[str, Any]:
 
 @app.post("/api/assurance/runs/{run_id}/cancel")
 async def cancel_assurance_run(run_id: str) -> dict[str, Any]:
+    current = services.assurance_store.get_run(run_id)
+    if current is None:
+        raise HTTPException(404, "Continuous assurance run not found")
+    _authorize_connection_alias(current.connection_alias)
     run = await services.assurance.cancel(run_id)
     if run is None:
         raise HTTPException(404, "Continuous assurance run not found")
@@ -2726,6 +2937,12 @@ async def cancel_assurance_run(run_id: str) -> dict[str, Any]:
 
 @app.post("/api/assurance/notifications/{notification_id}/acknowledge")
 async def acknowledge_assurance_notification(notification_id: str) -> dict[str, Any]:
+    current = services.assurance_store.get_notification(notification_id)
+    if current is None:
+        raise HTTPException(404, "Continuous assurance notification not found")
+    source_run = services.assurance_store.get_run(current["run_id"])
+    if source_run is not None:
+        _authorize_connection_alias(source_run.connection_alias)
     notification = services.assurance_store.acknowledge(notification_id)
     if notification is None:
         raise HTTPException(404, "Continuous assurance notification not found")
@@ -2742,6 +2959,7 @@ async def acknowledge_assurance_notification(notification_id: str) -> dict[str, 
 
 @app.post("/api/assurance/packages/{package_id}/close")
 async def close_assurance_package(package_id: str) -> dict[str, Any]:
+    _authorize_assurance_package(package_id)
     package = services.assurance_store.close_package(package_id)
     if package is None:
         raise HTTPException(404, "Assurance response package not found")
@@ -2754,6 +2972,14 @@ async def close_assurance_package(package_id: str) -> dict[str, Any]:
         summary="An assurance response package was closed by the local operator.",
         metadata={"severity": package["severity"], "status": package["status"]},
     )
+    return package
+
+
+def _authorize_assurance_package(package_id: str) -> dict[str, Any]:
+    package = services.assurance_store.get_package(package_id)
+    if package is None:
+        raise HTTPException(404, "Assurance response package not found")
+    _authorize_connection_alias(str(package.get("connection_alias") or "primary"))
     return package
 
 
@@ -2780,6 +3006,7 @@ async def test_delivery_destination() -> dict[str, Any]:
 
 @app.post("/api/assurance/packages/{package_id}/delivery/preview")
 async def preview_assurance_delivery(package_id: str) -> dict[str, Any]:
+    _authorize_assurance_package(package_id)
     try:
         return services.delivery.preview(package_id)
     except KeyError as exc:
@@ -2790,6 +3017,7 @@ async def preview_assurance_delivery(package_id: str) -> dict[str, Any]:
 
 @app.post("/api/assurance/packages/{package_id}/delivery/approve", status_code=202)
 async def approve_assurance_delivery(package_id: str, request: DeliveryApproval) -> dict[str, Any]:
+    _authorize_assurance_package(package_id)
     try:
         return services.delivery.approve(package_id, request.expected_payload_sha256)
     except KeyError as exc:

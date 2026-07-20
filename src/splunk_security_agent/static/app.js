@@ -788,9 +788,52 @@ function scopeLabel(value = {}) {
   return `${label} · ${value.tenant_scope_id || 'workspace-primary'}`;
 }
 
+function executionScopes() {
+  return state.connections?.execution_scopes || (state.connections?.primary ? [state.connections.primary] : []);
+}
+
+function normalizedBinding(value = {}) {
+  return {
+    alias:value.alias || value.connection_alias || 'primary',
+    fingerprint:value.fingerprint || value.connection_fingerprint || '',
+    tenant_scope_id:value.tenant_scope_id || 'workspace-primary'
+  };
+}
+
+function bindingPayload(value = {}) {
+  const binding = normalizedBinding(value);
+  return {
+    connection_alias:binding.alias,
+    connection_fingerprint:binding.fingerprint,
+    tenant_scope_id:binding.tenant_scope_id
+  };
+}
+
+function scopeOptions(selected = {}, {sameAliasFallback = false} = {}) {
+  const scopes = executionScopes(); const requested = normalizedBinding(selected);
+  const exact = scopes.find(item => scopeKey(item) === scopeKey(requested));
+  const fallback = sameAliasFallback ? scopes.find(item => item.alias === requested.alias) : null;
+  const selectedKey = scopeKey(exact || fallback || selected);
+  const missing = !exact && !fallback && requested.fingerprint
+    ? `<option value="" selected disabled>Unavailable · ${escapeHtml(requested.alias)} · ${escapeHtml(shortFingerprint(requested.fingerprint))}</option>`
+    : '';
+  return missing + scopes.map(item => `<option value="${escapeHtml(scopeKey(item))}" ${scopeKey(item) === selectedKey ? 'selected' : ''}>${escapeHtml(scopeLabel(item))} · revision ${escapeHtml(shortFingerprint(item.fingerprint))}</option>`).join('');
+}
+
+function selectedScope(selector) {
+  return selectedScopeElement($(selector));
+}
+
+function selectedScopeElement(select) {
+  const key = select?.value || '';
+  const scope = executionScopes().find(item => scopeKey(item) === key);
+  if (!scope) throw new Error('Choose an admitted Splunk target before continuing.');
+  return scope;
+}
+
 function renderScopeSelector() {
   const select = $('#scopeSelect'); if (!select) return;
-  const scopes = state.connections?.execution_scopes || (state.connections?.primary ? [state.connections.primary] : []);
+  const scopes = executionScopes();
   if (!scopes.length) return;
   select.innerHTML = scopes.map(item => `<option value="${escapeHtml(scopeKey(item))}">${escapeHtml(scopeLabel(item))}</option>`).join('');
   select.value = scopeKey(state.activeScope || scopes[0]);
@@ -825,7 +868,7 @@ function connectionBindingRow(kind, item, label) {
       : '<span class="binding-action-note">No action needed</span>';
   const itemId = kind === 'forecast' ? ` data-workflow-id="${escapeHtml(item.id)}"` : '';
   return `<article class="connection-binding-row ${current ? 'current' : 'stale'}"${itemId}>
-    <i aria-hidden="true"></i><div><b>${escapeHtml(label)}</b><small>${escapeHtml(item.tenant_scope_id || 'No tenant scope')} · revision ${escapeHtml(shortFingerprint(item.connection_fingerprint))}</small><p>${escapeHtml(item.binding_detail || '')}</p></div>${action}
+    <i aria-hidden="true"></i><div><b>${escapeHtml(label)}</b><small>${escapeHtml(item.connection_alias || 'primary')} · ${escapeHtml(item.tenant_scope_id || 'No tenant scope')} · revision ${escapeHtml(shortFingerprint(item.connection_fingerprint))}</small><p>${escapeHtml(item.binding_detail || '')}</p></div>${action}
   </article>`;
 }
 
@@ -986,7 +1029,12 @@ async function rebindConnectionWorkflow(button) {
     ? workflows.assurance_policy
     : (workflows.forecast_schedules || []).find(value => value.id === row?.dataset.workflowId);
   if (!item) return;
-  if (!confirm(`Rebind this ${kind === 'assurance' ? 'assurance policy' : 'shadow forecast'} to the current Primary Splunk revision? Scheduling will be paused for review.`)) return;
+  const target = executionScopes().find(value => value.alias === item.connection_alias);
+  if (!target) {
+    toast(`Readmit ${item.connection_alias || 'the bound Splunk alias'} before rebinding this workflow.`);
+    return;
+  }
+  if (!confirm(`Rebind this ${kind === 'assurance' ? 'assurance policy' : 'shadow forecast'} to ${scopeLabel(target)} revision ${shortFingerprint(target.fingerprint)}? Scheduling will be paused for review.`)) return;
   button.disabled = true;
   try {
     const path = kind === 'assurance'
@@ -994,7 +1042,8 @@ async function rebindConnectionWorkflow(button) {
       : `/api/connections/rebind/time-series-schedules/${encodeURIComponent(item.id)}`;
     await api(path, {method:'POST',body:JSON.stringify({
       expected_connection_fingerprint:item.connection_fingerprint,
-      expected_updated_at:item.updated_at
+      expected_updated_at:item.updated_at,
+      ...bindingPayload(target)
     })});
     await loadConnections();
     if (kind === 'assurance') await loadAssurance();
@@ -1418,6 +1467,7 @@ function openTimeSeriesWorkbench() {
         </form>
       </details>
       <form id="timeSeriesForecastForm" class="forecast-form">
+        <label class="full"><span>Splunk forecast target</span><select id="forecastTarget" required>${scopeOptions(state.activeScope || {})}</select><small>The source query executes only against this exact admitted connection revision. Retained baselines are isolated by target and revision.</small></label>
         <label class="full"><span>Forecast title</span><input id="forecastTitle" value="Splunk event-rate forecast" maxlength="240" required></label>
         <label class="full"><span>Read-only timechart SPL</span><textarea id="forecastSpl" rows="4" required spellcheck="false">index=_internal | timechart span=5m count as value</textarea><small>Return exactly one timestamp field and one numeric value field. SignalRoom validates the interval and rejects duplicate buckets.</small></label>
         <label><span>Earliest</span><select id="forecastEarliest"><option value="-24h">Last 24 hours</option><option value="-7d" selected>Last 7 days</option><option value="-14d">Last 14 days</option><option value="-30d">Last 30 days</option></select></label>
@@ -1442,6 +1492,7 @@ function openTimeSeriesWorkbench() {
         <details class="forecast-schedule-create">
           <summary>Create a shadow schedule from the current contract</summary>
           <form id="timeSeriesScheduleForm">
+            <label class="full"><span>Scheduled Splunk target</span><select id="forecastScheduleTarget" required>${scopeOptions(state.activeScope || {})}</select><small>The owner’s access and this immutable connection revision are revalidated before every scheduled run.</small></label>
             <label class="full"><span>Schedule title</span><input id="forecastScheduleTitle" value="Splunk event-rate shadow" maxlength="240" required><small>The saved forecast title, SPL, fields, window, horizon, and backtest are copied from the form above.</small></label>
             <label><span>Cadence</span><select id="forecastScheduleInterval"><option value="60">Every hour</option><option value="360" selected>Every 6 hours</option><option value="720">Every 12 hours</option><option value="1440">Daily</option><option value="10080">Weekly</option></select></label>
             <label><span>Per-schedule UTC daily ceiling</span><input id="forecastScheduleDailyLimit" type="number" value="4" min="1" max="12" required></label>
@@ -1596,10 +1647,13 @@ function renderTimeSeriesSchedules() {
       const events = latest?.events || []; const lastEvent = events.at(-1);
       const usageToday = schedule.usage_today || {};
       const active = latest && ['queued','running'].includes(latest.status);
+      const scheduleBinding = normalizedBinding(schedule);
+      const canAdmin = Boolean(state.auth?.permissions?.can_administer);
       const eventSteps = active ? `<ol class="forecast-attempt-steps">${events.slice(-5).map(item => `<li class="${escapeHtml(item.status)}"><i></i><span><b>${escapeHtml(item.label)}</b><small>${escapeHtml(item.detail)}</small></span></li>`).join('')}</ol>` : '';
       return `<article class="forecast-schedule ${schedule.enabled ? 'enabled' : 'paused'}">
         <header><div><span>${schedule.enabled ? 'CADENCE ACTIVE' : 'PAUSED'} · ${escapeHtml(schedule.created_by)}</span><h4>${escapeHtml(schedule.title)}</h4></div><b>${schedule.enabled ? 'active' : 'paused'}</b></header>
         <p>${escapeHtml(schedule.request.spl)}</p>
+        <div class="forecast-schedule-binding ${schedule.binding_current ? 'current' : 'stale'}"><div><b>${escapeHtml(scheduleBinding.alias)} · ${escapeHtml(scheduleBinding.tenant_scope_id)}</b><span>Immutable Splunk revision <code>${escapeHtml(shortFingerprint(scheduleBinding.fingerprint))}</code>${schedule.binding_current ? ' · executable' : ' · rebind required'}</span></div><label><span class="sr-only">Move schedule target</span><select data-forecast-rebind-target="${escapeHtml(schedule.id)}" ${canAdmin && !active ? '' : 'disabled'}>${scopeOptions(scheduleBinding, {sameAliasFallback:true})}</select></label><button class="button ghost small" type="button" data-rebind-forecast-schedule="${escapeHtml(schedule.id)}" ${canAdmin && !active && executionScopes().length ? '' : 'disabled'}>${schedule.binding_current ? 'Move target and pause' : 'Rebind and pause'}</button></div>
         <div class="forecast-schedule-metrics"><span><b>${escapeHtml(forecastScheduleCadence(schedule.interval_minutes))}</b>cadence</span><span><b>${Number(usageToday.schedule_runs || 0)}/${Number(schedule.max_runs_per_day)}</b>schedule budget today</span><span><b>${escapeHtml(forecastScheduleTime(schedule.next_run_at, 'Paused'))}</b>next eligible run</span><span><b>${escapeHtml(schedule.seasonal_comparison ? 'weekday → general' : 'general only')}</b>comparison</span></div>
         ${latest ? `<div class="forecast-attempt ${escapeHtml(latest.status)}"><div><b>${escapeHtml(latest.label)}</b><span>${escapeHtml(latest.trigger)} · ${escapeHtml(forecastScheduleTime(latest.updated_at))}</span></div><p>${escapeHtml(latest.error || latest.detail)}</p>${active ? `<div class="operation-progress" role="progressbar" aria-label="Latest shadow attempt progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${Number(latest.progress)}"><i style="width:${Number(latest.progress)}%"></i></div>` : ''}${eventSteps}${lastEvent?.metrics && Object.keys(lastEvent.metrics).length ? `<div class="operation-metrics">${Object.entries(lastEvent.metrics).slice(0,4).map(([key,value]) => formatMetric(key,value)).join('')}</div>` : ''}</div>` : '<div class="forecast-attempt empty"><p>No attempts yet. Starting the cadence waits until the next interval; Run now remains explicit.</p></div>'}
         <footer><button class="button ghost small" type="button" data-run-forecast-schedule="${escapeHtml(schedule.id)}" ${active ? 'disabled' : ''}>Run now</button><button class="button ghost small" type="button" data-toggle-forecast-schedule="${escapeHtml(schedule.id)}" data-enable="${schedule.enabled ? 'false' : 'true'}">${schedule.enabled ? 'Pause cadence' : 'Start cadence'}</button><button class="button ghost small danger-action" type="button" data-archive-forecast-schedule="${escapeHtml(schedule.id)}" ${active ? 'disabled' : ''}>Archive</button></footer>
@@ -1607,7 +1661,10 @@ function renderTimeSeriesSchedules() {
     }).join('')}</div>`;
   }
   const pending = reviews.filter(item => item.state === 'pending');
-  reviewPanel.innerHTML = `<section class="forecast-review-queue"><header><div><span>ANALYST REVIEW QUEUE</span><h4>${pending.length} forecast change${pending.length === 1 ? '' : 's'} awaiting interpretation</h4><p>Acknowledging records that the change was reviewed. Dismissing records why it is noise. Neither action creates an alert, validation, or threshold.</p></div></header>${pending.length ? pending.map(item => `<article class="${escapeHtml(item.comparison_decision)}"><header><div><span>${escapeHtml(item.comparison_decision.replaceAll('-', ' '))}</span><h5>${escapeHtml(item.summary)}</h5></div><code>${escapeHtml(shortDigest(item.run_fingerprint))}</code></header><ul>${(item.reasons || []).map(reason => `<li>${escapeHtml(reason)}</li>`).join('')}</ul><form data-time-series-review-form="${escapeHtml(item.id)}" data-run-fingerprint="${escapeHtml(item.run_fingerprint)}"><label><span>Analyst disposition note</span><textarea name="note" rows="2" minlength="3" maxlength="4000" required placeholder="Explain the operating change, seasonality, collection issue, or reason this needs follow-up…"></textarea></label><div><button class="button primary small" type="submit" data-review-decision="acknowledge">Acknowledge review</button><button class="button ghost small" type="submit" data-review-decision="dismiss">Dismiss as noise</button></div></form></article>`).join('') : '<div class="empty-inline compact-empty">No forecast changes need review. Stable shadow runs remain in attempt history without creating queue noise.</div>'}</section>`;
+  reviewPanel.innerHTML = `<section class="forecast-review-queue"><header><div><span>ANALYST REVIEW QUEUE</span><h4>${pending.length} forecast change${pending.length === 1 ? '' : 's'} awaiting interpretation</h4><p>Acknowledging records that the change was reviewed. Dismissing records why it is noise. Neither action creates an alert, validation, or threshold.</p></div></header>${pending.length ? pending.map(item => {
+    const schedule = schedules.find(value => value.id === item.schedule_id) || {};
+    return `<article class="${escapeHtml(item.comparison_decision)}"><header><div><span>${escapeHtml(item.comparison_decision.replaceAll('-', ' '))} · ${escapeHtml(schedule.connection_alias || 'primary')} · ${escapeHtml(schedule.tenant_scope_id || 'workspace-primary')}</span><h5>${escapeHtml(item.summary)}</h5></div><code>${escapeHtml(shortDigest(item.run_fingerprint))}</code></header><ul>${(item.reasons || []).map(reason => `<li>${escapeHtml(reason)}</li>`).join('')}</ul><form data-time-series-review-form="${escapeHtml(item.id)}" data-run-fingerprint="${escapeHtml(item.run_fingerprint)}"><label><span>Analyst disposition note</span><textarea name="note" rows="2" minlength="3" maxlength="4000" required placeholder="Explain the operating change, seasonality, collection issue, or reason this needs follow-up…"></textarea></label><div><button class="button primary small" type="submit" data-review-decision="acknowledge">Acknowledge review</button><button class="button ghost small" type="submit" data-review-decision="dismiss">Dismiss as noise</button></div></form></article>`;
+  }).join('') : '<div class="empty-inline compact-empty">No forecast changes need review. Stable shadow runs remain in attempt history without creating queue noise.</div>'}</section>`;
   reviewPanel.querySelectorAll('[data-time-series-review-form]').forEach(form => form.addEventListener('submit', decideTimeSeriesReview));
   applyAccessPermissions();
 }
@@ -1617,6 +1674,7 @@ async function createTimeSeriesSchedule(event) {
   const button = event.currentTarget.querySelector('button[type="submit"]');
   button.disabled = true; button.textContent = 'Saving bounded schedule…';
   try {
+    const target = selectedScope('#forecastScheduleTarget');
     await api('/api/model-capabilities/time-series/schedules', {
       method:'POST',
       body:JSON.stringify({
@@ -1625,7 +1683,8 @@ async function createTimeSeriesSchedule(event) {
         enabled:$('#forecastScheduleEnabled').value === 'true',
         interval_minutes:Number($('#forecastScheduleInterval').value),
         max_runs_per_day:Number($('#forecastScheduleDailyLimit').value),
-        seasonal_comparison:$('#forecastScheduleSeasonal').value === 'true'
+        seasonal_comparison:$('#forecastScheduleSeasonal').value === 'true',
+        ...bindingPayload(target)
       })
     });
     await loadTimeSeriesSchedules();
@@ -1634,6 +1693,36 @@ async function createTimeSeriesSchedule(event) {
     toast(error.message);
   } finally {
     button.disabled = false; button.textContent = 'Save shadow schedule';
+  }
+}
+
+async function rebindTimeSeriesSchedule(button) {
+  const schedule = (state.timeSeriesSchedules?.schedules || []).find(item => item.id === button.dataset.rebindForecastSchedule);
+  const select = document.querySelector(`[data-forecast-rebind-target="${CSS.escape(button.dataset.rebindForecastSchedule)}"]`);
+  if (!schedule || !select) return;
+  let target;
+  try { target = selectedScopeElement(select); }
+  catch (error) { toast(error.message); return; }
+  const current = normalizedBinding(schedule);
+  if (scopeKey(target) === scopeKey(current)) {
+    toast('This schedule is already bound to that exact Splunk revision.');
+    return;
+  }
+  if (!confirm(`Move “${schedule.title}” to ${scopeLabel(target)} revision ${shortFingerprint(target.fingerprint)}? The cadence will be paused and no query will run.`)) return;
+  button.disabled = true;
+  try {
+    await api(`/api/connections/rebind/time-series-schedules/${encodeURIComponent(schedule.id)}`, {
+      method:'POST',
+      body:JSON.stringify({
+        expected_connection_fingerprint:schedule.connection_fingerprint,
+        expected_updated_at:schedule.updated_at,
+        ...bindingPayload(target)
+      })
+    });
+    await Promise.all([loadTimeSeriesSchedules(), loadConnections()]);
+    toast('Shadow schedule target changed and cadence paused for review');
+  } catch (error) {
+    toast(error.message); button.disabled = false;
   }
 }
 
@@ -1763,11 +1852,11 @@ function renderTimeSeriesExperiments() {
       </form></details>` : '';
     const referenceLabel = baselineSlots.length ? baselineSlots.map(slot => slot === 'general' ? 'general' : `weekday ${Number(slot.split('-')[1]) + 1}`).join(' + ') : '';
     return `<article class="forecast-experiment ${escapeHtml(decision)} ${isReference ? 'baseline' : ''}">
-      <header><div><span>${escapeHtml(isReference ? `REVIEWED REFERENCE · ${referenceLabel}` : 'RETAINED RUN')} · ${escapeHtml(created)}</span><h4>${escapeHtml(run.title)}</h4></div><b>${escapeHtml(isReference ? 'reference' : decision.replaceAll('-', ' '))}</b></header>
+      <header><div><span>${escapeHtml(isReference ? `REVIEWED REFERENCE · ${referenceLabel}` : 'RETAINED RUN')} · ${escapeHtml(source.connection_alias || 'primary')} · ${escapeHtml(source.tenant_scope_id || 'workspace-primary')} · ${escapeHtml(created)}</span><h4>${escapeHtml(run.title)}</h4></div><b>${escapeHtml(isReference ? 'reference' : decision.replaceAll('-', ' '))}</b></header>
       <div class="forecast-experiment-metrics"><span><b>${mase}</b>MASE</span><span><b>${Math.round(Number(series.imputation_ratio || 0) * 100)}%</b>imputed</span><span><b>${escapeHtml(forecastIntervalLabel(source.interval_seconds))}</b>span</span><span><b>${escapeHtml(source.earliest_time || 'unknown')}</b>window</span></div>
       <p>${escapeHtml(comparison.selection_reason || '')} ${escapeHtml((comparison.reasons || ['No comparison detail recorded.']).join(' '))}</p>
       ${comparison.baseline_run_id ? `<dl class="forecast-drift"><div><dt>Series mean</dt><dd>${escapeHtml(forecastDriftMetric(metrics.series_mean_change_percent))}</dd></div><div><dt>Forecast center</dt><dd>${escapeHtml(forecastDriftMetric(metrics.forecast_center_change_percent))}</dd></div><div><dt>MASE delta</dt><dd>${escapeHtml(forecastDriftMetric(metrics.mase_delta, ''))}</dd></div><div><dt>Imputation delta</dt><dd>${escapeHtml(forecastDriftMetric(Number(metrics.imputation_delta_points || 0) * 100, ' pts'))}</dd></div></dl>` : ''}
-      <details><summary>Exact retained contract</summary><dl><div><dt>Run fingerprint</dt><dd><code>${escapeHtml(run.run_fingerprint)}</code></dd></div><div><dt>Series key</dt><dd><code>${escapeHtml(run.series_key)}</code></dd></div><div><dt>Model revision</dt><dd><code>${escapeHtml(run.runtime?.source_revision || 'not attested')}</code></dd></div><div><dt>Source rows</dt><dd>${Number(series.source_rows || 0).toLocaleString()} counted · not retained</dd></div></dl></details>
+      <details><summary>Exact retained contract</summary><dl><div><dt>Splunk revision</dt><dd><code>${escapeHtml(source.connection_fingerprint || 'legacy unbound')}</code></dd></div><div><dt>Run fingerprint</dt><dd><code>${escapeHtml(run.run_fingerprint)}</code></dd></div><div><dt>Series key</dt><dd><code>${escapeHtml(run.series_key)}</code></dd></div><div><dt>Model revision</dt><dd><code>${escapeHtml(run.runtime?.source_revision || 'not attested')}</code></dd></div><div><dt>Source rows</dt><dd>${Number(series.source_rows || 0).toLocaleString()} counted · not retained</dd></div></dl></details>
       <footer><button class="button ghost small" type="button" data-rerun-time-series="${escapeHtml(run.id)}">Load exact contract</button></footer>
       ${baselineAction}${candidateAction}
     </article>`;
@@ -1802,8 +1891,12 @@ function loadRetainedTimeSeriesContract(event) {
   $('#forecastHorizon').value = request.horizon || 24;
   $('#forecastBacktest').value = request.backtest_points || 24;
   $('#forecastRows').value = request.row_limit || 2048;
+  if ($('#forecastTarget')) {
+    $('#forecastTarget').innerHTML = scopeOptions(run.source || {}, {sameAliasFallback:true});
+  }
   $('#timeSeriesForecastForm').scrollIntoView({behavior:'smooth', block:'start'});
-  toast('Exact retained contract loaded; running it remains an explicit action');
+  const exactTarget = executionScopes().some(item => scopeKey(item) === scopeKey(normalizedBinding(run.source || {})));
+  toast(exactTarget ? 'Exact retained contract and Splunk target loaded; running it remains explicit' : 'Contract loaded; its old Splunk revision is unavailable, so review the selected current target');
 }
 
 async function acceptTimeSeriesBaseline(event) {
@@ -1899,7 +1992,7 @@ function renderTimeSeriesResult(result) {
     <div class="forecast-metrics"><span><b>${mase}</b>MASE vs naive</span><span><b>${Math.round(Number(result.series.imputation_ratio || 0) * 100)}%</b>imputed</span><span><b>${Number(result.series.expected_points || 0).toLocaleString()}</b>context points</span><span><b>${Number(result.forecast?.horizon || 0)}</b>forecast points</span></div>
     ${forecastChart(result)}
     ${experiment.run_fingerprint ? `<div class="forecast-retained ${escapeHtml(comparison.decision || 'no-baseline')}"><b>Immutable experiment retained · ${escapeHtml((comparison.decision || 'no-baseline').replaceAll('-', ' '))}</b><span>${escapeHtml((comparison.reasons || []).join(' '))}</span><code>${escapeHtml(shortDigest(experiment.run_fingerprint))}</code></div>` : ''}
-    <details><summary>Exact provenance and boundary</summary><dl><div><dt>Query fingerprint</dt><dd><code>${escapeHtml(result.source.query_fingerprint)}</code></dd></div><div><dt>Series SHA-256</dt><dd><code>${escapeHtml(result.series_sha256)}</code></dd></div><div><dt>Model revision</dt><dd><code>${escapeHtml(result.runtime.source_revision || 'not attested')}</code></dd></div><div><dt>Runtime</dt><dd>${escapeHtml(`${result.runtime.network_scope || 'local'} · ${result.runtime.backend || 'backend not reported'}`)}</dd></div></dl></details>
+    <details><summary>Exact provenance and boundary</summary><dl><div><dt>Splunk target</dt><dd>${escapeHtml(`${result.source.connection_alias || 'primary'} · ${result.source.tenant_scope_id || 'workspace-primary'}`)}<br><code>${escapeHtml(result.source.connection_fingerprint || 'legacy unbound')}</code></dd></div><div><dt>Query fingerprint</dt><dd><code>${escapeHtml(result.source.query_fingerprint)}</code></dd></div><div><dt>Series SHA-256</dt><dd><code>${escapeHtml(result.series_sha256)}</code></dd></div><div><dt>Model revision</dt><dd><code>${escapeHtml(result.runtime.source_revision || 'not attested')}</code></dd></div><div><dt>Runtime</dt><dd>${escapeHtml(`${result.runtime.network_scope || 'local'} · ${result.runtime.backend || 'backend not reported'}`)}</dd></div></dl></details>
     <footer><button class="button ghost small" type="button" data-time-series-case>Preserve review to case</button><button class="button ghost small" type="button" data-time-series-investigate>Investigate the operational meaning</button></footer>
   </article>`;
 }
@@ -1912,9 +2005,10 @@ async function runTimeSeriesForecast(event) {
   progress.querySelector('.operation-progress i').style.width = '0%';
   $('#timeSeriesOutput').innerHTML = '';
   try {
+    const target = selectedScope('#forecastTarget');
     state.timeSeriesResult = await streamApi(
       '/api/model-capabilities/time-series/forecast/stream',
-      timeSeriesRequestFromForm(),
+      {...timeSeriesRequestFromForm(), ...bindingPayload(target)},
       event => updateOperation(progress, event)
     );
     renderTimeSeriesResult(state.timeSeriesResult);
@@ -3014,7 +3108,7 @@ function renderAssurancePackages(value) {
     const deliveryReady = value.delivery?.policy?.enabled && value.delivery?.destination?.configured;
     const deliveryAction = deliveryReady ? `<button class="button ghost small" data-preview-assurance-delivery="${escapeHtml(item.id)}">Preview delivery</button>` : '';
     const actions = item.status === 'review' ? `<button class="button primary small" data-review-assurance-package="${escapeHtml(item.id)}" ${taskCount ? '' : 'disabled'}>Review ${taskCount} draft${taskCount === 1 ? '' : 's'}</button><button class="button ghost small" data-investigate-assurance-package="${escapeHtml(item.id)}">Investigate</button><button class="button ghost small" data-case-assurance-package="${escapeHtml(item.id)}">Add to case</button>${deliveryAction}<button class="button ghost small" data-close-assurance-package="${escapeHtml(item.id)}">Close package</button>` : `<button class="button ghost small" data-investigate-assurance-package="${escapeHtml(item.id)}">Revisit in Investigate</button>`;
-    return `<article class="assurance-package ${escapeHtml(item.status)} ${escapeHtml(item.severity)}"><header><div><span>${escapeHtml(item.status)} · ${escapeHtml(item.severity)}</span><h5>${escapeHtml(item.title)}</h5></div><b>${taskCount} draft${taskCount === 1 ? '' : 's'}</b></header><p>${escapeHtml(item.summary)}</p><ul>${signalRows}</ul><footer><time>${item.status === 'review' ? `Expires ${escapeHtml(assuranceTime(item.expires_at))}` : `${escapeHtml(item.status)} · ${escapeHtml(assuranceTime(item.closed_at || item.expires_at))}`}</time><div>${actions}</div></footer></article>`;
+    return `<article class="assurance-package ${escapeHtml(item.status)} ${escapeHtml(item.severity)}"><header><div><span>${escapeHtml(item.status)} · ${escapeHtml(item.severity)} · ${escapeHtml(item.connection_alias || 'primary')} · ${escapeHtml(item.tenant_scope_id || 'workspace-primary')}</span><h5>${escapeHtml(item.title)}</h5></div><b>${taskCount} draft${taskCount === 1 ? '' : 's'}</b></header><p>${escapeHtml(item.summary)}</p><ul>${signalRows}</ul><footer><time>${item.status === 'review' ? `Expires ${escapeHtml(assuranceTime(item.expires_at))}` : `${escapeHtml(item.status)} · ${escapeHtml(assuranceTime(item.closed_at || item.expires_at))}`}</time><div>${actions}</div></footer></article>`;
   }).join('') : '<div class="empty-inline compact-empty">No response package is open. Medium and low signals must repeat; high-severity signals package immediately.</div>';
 }
 
@@ -3664,6 +3758,7 @@ async function reconcileDelivery(button) {
 
 function hydrateAssurancePolicy(policy) {
   if (!policy || state.assurancePolicyDirty) return;
+  $('#assuranceTarget').innerHTML = scopeOptions(policy, {sameAliasFallback:true});
   $('#assuranceEnabled').checked = Boolean(policy.enabled);
   $('#assuranceDepth').value = policy.discovery_depth;
   $('#assuranceInterval').value = String(policy.interval_minutes);
@@ -3687,7 +3782,8 @@ function renderAssurance() {
   $('#assuranceWorker').textContent = value.worker?.online ? 'Worker online · concurrency 1' : 'Worker offline';
   $('#assuranceWorker').className = `subtle-pill ${value.worker?.online ? 'ok' : 'warn'}`;
   $('#assuranceScheduleStatus').textContent = policy.enabled ? `Next scheduled run · ${assuranceTime(policy.next_run_at)}` : 'Scheduling is off · manual runs remain available';
-  $('#assuranceUsage').innerHTML = `<span><b>${usage.runs || 0}/${policy.max_runs_per_day || 0}</b> runs today</span><span><b>${usage.splunk_calls || 0}</b> Splunk calls today</span><span><b>${policy.max_splunk_calls_per_run || 0}</b> call ceiling</span><span><b>${escapeHtml(value.worker?.restart_recovery || 'unknown')}</b> restart policy</span>`;
+  $('#assuranceTargetHelp').textContent = `${policy.connection_alias || 'primary'} · ${policy.tenant_scope_id || 'workspace-primary'} · revision ${shortFingerprint(policy.connection_fingerprint)}. Every run revalidates this exact admitted identity.`;
+  $('#assuranceUsage').innerHTML = `<span><b>${escapeHtml(policy.connection_alias || 'primary')}</b> Splunk target</span><span><b>${escapeHtml(policy.tenant_scope_id || 'workspace-primary')}</b> tenant scope</span><span><b>${usage.runs || 0}/${policy.max_runs_per_day || 0}</b> runs today</span><span><b>${usage.splunk_calls || 0}</b> Splunk calls today</span><span><b>${policy.max_splunk_calls_per_run || 0}</b> call ceiling</span><span><b>${escapeHtml(value.worker?.restart_recovery || 'unknown')}</b> restart policy</span>`;
   renderAssurancePackages(value);
   renderDelivery(value);
   const panel = $('#assuranceProgress'); panel.hidden = !active;
@@ -3700,14 +3796,14 @@ function renderAssurance() {
     panel.querySelector('.operation-metrics').innerHTML = Object.entries({...(active.metrics || {}), splunk_calls:active.calls_used, call_budget:active.call_budget}).slice(0,5).map(([key,item]) => formatMetric(key,item)).join('');
     const events = value.active_events || [];
     panel.querySelector('.operation-steps').innerHTML = events.map((event,index) => `<li class="${event.status === 'error' ? 'error' : index === events.length - 1 && active.status === 'running' ? 'running' : 'complete'}"><i></i><div><b>${escapeHtml(event.label)}</b><span>${escapeHtml(event.detail)}</span></div></li>`).join('');
-    $('#assuranceRunContract').textContent = `${active.trigger} · ${active.depth} · ${active.calls_used}/${active.call_budget} calls${active.recovery_count ? ` · recovered ${active.recovery_count}×` : ''}`;
+    $('#assuranceRunContract').textContent = `${active.connection_alias || 'primary'} · ${active.tenant_scope_id || 'workspace-primary'} · ${active.trigger} · ${active.depth} · ${active.calls_used}/${active.call_budget} calls${active.recovery_count ? ` · recovered ${active.recovery_count}×` : ''}`;
     $('#cancelAssuranceRun').disabled = Boolean(active.cancel_requested);
     $('#cancelAssuranceRun').textContent = active.cancel_requested ? 'Stopping…' : 'Cancel run';
   }
   const notices = value.notifications || [];
   $('#assuranceNotifications').innerHTML = notices.length ? notices.map(item => `<article class="assurance-notice ${escapeHtml(item.severity)} ${item.acknowledged ? 'acknowledged' : ''}"><header><span>${escapeHtml(item.category)}</span><b>${escapeHtml(item.severity)}</b></header><h5>${escapeHtml(item.title)}</h5><p>${escapeHtml(item.detail)}</p><footer><time>${escapeHtml(assuranceTime(item.created_at))}</time>${item.acknowledged ? '<span>Acknowledged</span>' : `<button data-ack-assurance="${escapeHtml(item.id)}">Acknowledge</button>`}</footer></article>`).join('') : '<div class="empty-inline compact-empty">No drift or control notifications require attention.</div>';
   const runs = value.runs || [];
-  $('#assuranceRuns').innerHTML = runs.length ? runs.slice(0,10).map(run => `<article class="assurance-run ${escapeHtml(run.status)}"><header><span>${escapeHtml(run.trigger)} · ${escapeHtml(run.depth)}</span><b>${escapeHtml(run.status.replaceAll('-', ' '))}</b></header><p>${escapeHtml(run.summary?.headline || run.detail || run.error || 'Waiting to start.')}</p><footer><time>${escapeHtml(assuranceTime(run.completed_at || run.created_at))}</time><span>${run.calls_used}/${run.call_budget} calls${run.recovery_count ? ` · ${run.recovery_count} recovery` : ''}</span></footer></article>`).join('') : '<div class="empty-inline compact-empty">No continuous assurance runs have been queued.</div>';
+  $('#assuranceRuns').innerHTML = runs.length ? runs.slice(0,10).map(run => `<article class="assurance-run ${escapeHtml(run.status)}"><header><span>${escapeHtml(run.connection_alias || 'primary')} · ${escapeHtml(run.trigger)} · ${escapeHtml(run.depth)}</span><b>${escapeHtml(run.status.replaceAll('-', ' '))}</b></header><p>${escapeHtml(run.summary?.headline || run.detail || run.error || 'Waiting to start.')}</p><footer><time>${escapeHtml(assuranceTime(run.completed_at || run.created_at))}</time><span>${escapeHtml(run.tenant_scope_id || 'workspace-primary')} · ${run.calls_used}/${run.call_budget} calls${run.recovery_count ? ` · ${run.recovery_count} recovery` : ''}</span></footer></article>`).join('') : '<div class="empty-inline compact-empty">No continuous assurance runs have been queued.</div>';
   $('#runAssuranceNow').disabled = Boolean(active) || Number(usage.runs || 0) >= Number(policy.max_runs_per_day || 0);
 }
 
@@ -3718,6 +3814,12 @@ async function loadAssurance() {
 
 async function saveAssurancePolicy(event) {
   event.preventDefault();
+  let target;
+  try { target = selectedScope('#assuranceTarget'); }
+  catch (error) { toast(error.message); return; }
+  const current = normalizedBinding(state.assurance?.policy || {});
+  const changingTarget = scopeKey(target) !== scopeKey(current);
+  if (changingTarget && !confirm(`Move continuous assurance to ${scopeLabel(target)} revision ${shortFingerprint(target.fingerprint)}? Scheduling will be paused so the new target can be reviewed before it is re-enabled.`)) return;
   const payload = {
     enabled:$('#assuranceEnabled').checked,
     interval_minutes:Number($('#assuranceInterval').value),
@@ -3725,9 +3827,11 @@ async function saveAssurancePolicy(event) {
     max_splunk_calls_per_run:Number($('#assuranceCallBudget').value),
     max_runs_per_day:Number($('#assuranceDailyRuns').value),
     notify_on_drift:$('#assuranceNotifyDrift').checked,
-    notify_on_high_findings:$('#assuranceNotifyFindings').checked
+    notify_on_high_findings:$('#assuranceNotifyFindings').checked,
+    expected_policy_updated_at:state.assurance?.policy?.updated_at || '',
+    ...bindingPayload(target)
   };
-  try { state.assurance = await api('/api/assurance/policy', {method:'PUT',body:JSON.stringify(payload)}); state.assurancePolicyDirty = false; renderAssurance(); toast('Continuous assurance policy saved'); }
+  try { state.assurance = await api('/api/assurance/policy', {method:'PUT',body:JSON.stringify(payload)}); state.assurancePolicyDirty = false; renderAssurance(); toast(changingTarget ? 'Assurance target changed and scheduling paused for review' : 'Continuous assurance policy saved'); }
   catch (error) { toast(error.message); }
 }
 
@@ -5151,6 +5255,8 @@ document.addEventListener('click', async event => {
   if (runForecastSchedule) { await runTimeSeriesSchedule(runForecastSchedule); return; }
   const toggleForecastSchedule = event.target.closest('[data-toggle-forecast-schedule]');
   if (toggleForecastSchedule) { await toggleTimeSeriesSchedule(toggleForecastSchedule); return; }
+  const rebindForecastSchedule = event.target.closest('[data-rebind-forecast-schedule]');
+  if (rebindForecastSchedule) { await rebindTimeSeriesSchedule(rebindForecastSchedule); return; }
   const archiveForecastSchedule = event.target.closest('[data-archive-forecast-schedule]');
   if (archiveForecastSchedule) { await archiveTimeSeriesSchedule(archiveForecastSchedule); return; }
   if (event.target.closest('[data-review-model-trust]')) {

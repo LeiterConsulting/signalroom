@@ -223,6 +223,63 @@ async def test_stable_shadow_execution_does_not_create_review_noise(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_shadow_execution_revalidates_owner_and_builds_secondary_client(tmp_path):
+    store = TimeSeriesScheduleStore(tmp_path / "schedules.db")
+    binding = {
+        "alias": "soc-west",
+        "fingerprint": "b" * 64,
+        "tenant_scope_id": "tenant-west",
+    }
+    schedule = store.create(schedule_value(), actor="tier-two", binding=binding)
+    attempt = store.enqueue(schedule["id"], trigger="manual")
+    captured = {}
+
+    class ScopedForecast(FakeForecast):
+        async def run(
+            self,
+            request,
+            progress,
+            *,
+            actor,
+            seasonal_comparison=True,
+            splunk_client=None,
+            binding=None,
+        ):
+            captured["binding"] = binding
+            captured["splunk_client"] = splunk_client
+            return await super().run(
+                request,
+                progress,
+                actor=actor,
+                seasonal_comparison=seasonal_comparison,
+            )
+
+    def authorize(owner, alias):
+        captured["authorization"] = (owner, alias)
+        return True, ""
+
+    def splunk_factory(target):
+        captured["factory_binding"] = target
+        return {"client": target["alias"]}
+
+    service = TimeSeriesScheduleService(
+        store,
+        ScopedForecast(decision="stable"),
+        AuditStore(tmp_path / "audit.db"),
+        authorize,
+        splunk_factory=splunk_factory,
+    )
+
+    await service._execute(attempt["id"])
+
+    assert store.attempt(attempt["id"])["status"] == "complete"
+    assert captured["authorization"] == ("tier-two", "soc-west")
+    assert captured["factory_binding"] == binding
+    assert captured["binding"] == binding
+    assert captured["splunk_client"] == {"client": "soc-west"}
+
+
+@pytest.mark.asyncio
 async def test_shadow_preflight_denies_deprovisioned_owner_before_forecast(tmp_path):
     store = TimeSeriesScheduleStore(tmp_path / "schedules.db")
     schedule = store.create(schedule_value(), actor="former-analyst")

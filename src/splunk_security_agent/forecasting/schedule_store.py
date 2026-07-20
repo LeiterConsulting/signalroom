@@ -661,6 +661,14 @@ class TimeSeriesScheduleStore:
             ).fetchall()
         return [self._review(row) for row in rows]
 
+    def review(self, review_id: str) -> dict[str, Any] | None:
+        with self.connect() as db:
+            row = db.execute(
+                "SELECT * FROM time_series_schedule_reviews WHERE id=?",
+                (review_id,),
+            ).fetchone()
+        return self._review(row) if row else None
+
     def decide_review(
         self,
         review_id: str,

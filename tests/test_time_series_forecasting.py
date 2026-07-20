@@ -244,6 +244,43 @@ async def test_forecast_registry_accepts_exact_baseline_and_tracks_drift(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_forecast_baselines_are_isolated_by_splunk_identity_revision(tmp_path):
+    splunk = FakeSplunk(rows(96))
+    model = FakeProvider()
+    experiments = TimeSeriesExperimentStore(tmp_path / "experiments.db")
+    service = TimeSeriesForecastService(
+        ConfigStore(tmp_path / "config"),
+        lambda: splunk,
+        experiment_store=experiments,
+    )
+    service.provider = lambda: model
+    east = {
+        "alias": "soc-east",
+        "fingerprint": "a" * 64,
+        "tenant_scope_id": "tenant-east",
+    }
+    west = {
+        "alias": "soc-west",
+        "fingerprint": "b" * 64,
+        "tenant_scope_id": "tenant-west",
+    }
+
+    first = await service.run(request(), actor="analyst", binding=east)
+    service.accept_baseline(
+        first["run_id"],
+        expected_fingerprint=first["experiment"]["run_fingerprint"],
+        actor="analyst",
+        review_note="Representative east-coast series",
+    )
+    second = await service.run(request(), actor="analyst", binding=west)
+
+    assert first["source"]["connection_alias"] == "soc-east"
+    assert second["source"]["connection_alias"] == "soc-west"
+    assert first["experiment"]["series_key"] != second["experiment"]["series_key"]
+    assert second["experiment"]["comparison"]["decision"] == "no-baseline"
+
+
+@pytest.mark.asyncio
 async def test_forecast_prefers_matching_weekday_baseline_and_retains_general_reference(
     tmp_path,
 ):

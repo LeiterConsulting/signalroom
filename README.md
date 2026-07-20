@@ -8,7 +8,7 @@ This is a focused reimplementation inspired by [LeiterConsulting/splunk-discover
 
 - A polished local web workspace with setup, investigation chat, discovery, durable cases, context, and model views
 - Splunk MCP tool discovery and alias resolution for common server naming differences
-- Immutable Splunk connection revisions and tenant-scoped durable workflow bindings that fail closed before a call when Primary moves
+- Immutable Splunk connection revisions and tenant-scoped durable workflow bindings that fail closed before a call when any target moves
 - An explicit Splunk-scope selector with tenant-gated artifacts, hybrid RAG, discovery state, investigation memory, cases, exports, and SignalRoom MCP tools
 - Layered Splunk MCP diagnostics across configuration, DNS, TCP, TLS identity, authentication, and depth-specific tool contracts
 - Parallel read-only quick, standard, and deep discovery with change detection, JSON blueprints, and briefs
@@ -16,7 +16,7 @@ This is a focused reimplementation inspired by [LeiterConsulting/splunk-discover
 - Durable manual discovery jobs with live retained progress, hard call ceilings, cancellation, restart recovery, and per-run results
 - Delta-aware model-team reuse with exact input fingerprints and visible cache provenance
 - Read-only Splunk MLTK model inventory with definition drift and endpoint-scoped dependency checks
-- Opt-in continuous assurance with durable schedules, cross-run signal correlation, response packages, and hard Splunk-call budgets
+- Opt-in, explicitly targeted continuous assurance with durable schedules, cross-run signal correlation, response packages, and hard Splunk-call budgets
 - A restart-safe validation queue with bounded SPL preview, explicit analyst approval, expiring assurance drafts, live progress, and preserved results
 - An evidence-first agent with bounded multi-tool plans, investigation modes, and a structured ledger
 - Durable local investigation cases with an evidence-health cockpit, next-best actions, case-scoped context packets, chronological timelines, and handoff exports
@@ -135,11 +135,13 @@ stored locally so the Discovery page can show the current blocking stage and las
 Continuous assurance runs this same preflight and records `connection-blocked` with zero Splunk tool calls when
 the selected discovery depth is not ready.
 
-Connection identity is evaluated before transport preflight. Manual discovery jobs retain the exact
-selected alias, revision, and tenant scope. Assurance and scheduled shadow forecasts remain bound to
-Primary and `workspace-primary` until their policies gain an explicit secondary target. Endpoint,
-TLS-trust, scope, or credential changes never silently preserve secondary admission; administrators
-must diagnose and enable the replacement revision. See [Connection identities and additional MCPs](docs/CONNECTIONS.md).
+Connection identity is evaluated before transport preflight. Manual discovery jobs, continuous
+assurance policy/runs, direct forecasts, and scheduled shadow forecasts retain the exact selected
+alias, revision, and tenant scope. Assurance and forecast forms expose an explicit target instead of
+inferring it from the global browser selector. Endpoint, TLS-trust, scope, or credential changes never
+silently preserve secondary admission; administrators must diagnose and enable the replacement
+revision, then explicitly rebind and review paused schedules. See
+[Connection identities and additional MCPs](docs/CONNECTIONS.md).
 
 The client discovers available tools and resolves common aliases such as `splunk_run_query` / `run_splunk_query`, `splunk_get_indexes` / `get_indexes`, and related SAIA SPL helpers.
 
@@ -250,8 +252,9 @@ a bounded review to a case.
 
 Completed and data-quality-blocked runs are also retained in `data/time_series_experiments.db` as immutable local
 experiments. The registry stores the exact run contract, aggregate series statistics, backtest and forecast
-output, model identity, and fingerprints—not raw Splunk result rows. A logical series key normalizes the
-`timechart` span so analysts can compare windows and bucket sizes. Accepting a general or matching-weekday
+output, model identity, and fingerprints—not raw Splunk result rows. A logical series key binds the
+Splunk alias, immutable connection revision, and tenant scope while normalizing the `timechart` span,
+so analysts can compare windows and bucket sizes without mixing estates. Accepting a general or matching-weekday
 baseline requires the exact promotion-eligible run fingerprint and a review note. Later runs prefer their
 reviewed weekday reference, fall back to the general reference, and retain both comparisons for deterministic
 performance, imputation, series-mean, forecast-center, span, window, and model-revision drift.
@@ -259,7 +262,9 @@ performance, imputation, series-mean, forecast-center, span, window, and model-r
 The same workbench can save the current contract as a paused-by-default shadow schedule. Starting its cadence is
 explicit and never runs an immediate query. One durable worker executes at most one local forecast at a time,
 enforces per-schedule and 24-run global UTC daily ceilings, coalesces missed intervals, rechecks the owner's
-Primary Splunk authority, and restarts an interrupted attempt as a fresh read-only run. Each attempt streams and
+role plus exact target-alias assignment, revalidates the immutable connection revision, and restarts an
+interrupted attempt as a fresh read-only run. Changing targets is an optimistic-concurrency rebind that
+pauses the cadence. Each attempt streams and
 retains its phases. Stable results remain in history; no-baseline, review, and material-drift results enter a
 fingerprint-bound analyst disposition queue. A disposition records review only—it never creates an alert,
 threshold, validation, case, or Splunk write.
@@ -546,9 +551,11 @@ stores the smaller projection that excludes raw inventory catalogs.
 
 ### Continuous assurance
 
-The Discovery page can opt in to a local recurring schedule. The policy selects quick, standard, or deep
-discovery, an interval, a hard per-run Splunk MCP call ceiling, a maximum number of runs per UTC day, and
-notification categories. Scheduling is disabled by default. Manual and scheduled assurance runs share the daily
+The Discovery page can opt in to a local recurring schedule. The policy selects an admitted Splunk
+target and immutable revision, quick, standard, or deep discovery, an interval, a hard per-run Splunk
+MCP call ceiling, a maximum number of runs per UTC day, and notification categories. Scheduling is
+disabled by default. A target change requires the prior policy revision, pauses the schedule, and must
+be reviewed before re-enablement. Manual and scheduled assurance runs share the daily
 assurance budget. Assurance, durable manual discovery, compatibility discovery endpoints, and MLTK inventory
 share one per-instance read-only execution lane.
 

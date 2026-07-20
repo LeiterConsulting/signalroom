@@ -108,7 +108,9 @@ class TimeSeriesExperimentStore:
         return connection
 
     @staticmethod
-    def series_key(request: dict[str, Any]) -> str:
+    def series_key(
+        request: dict[str, Any], result: dict[str, Any] | None = None
+    ) -> str:
         spl = re.sub(r"\s+", " ", str(request.get("spl") or "").strip())
         spl_template = re.sub(
             r"\bspan\s*=\s*\d+\s*[smhd]\b",
@@ -116,11 +118,15 @@ class TimeSeriesExperimentStore:
             spl,
             flags=re.IGNORECASE,
         )
+        source = (result or {}).get("source") or {}
         return _digest(
             {
                 "spl_template": spl_template,
                 "timestamp_field": str(request.get("timestamp_field") or ""),
                 "value_field": str(request.get("value_field") or ""),
+                "connection_alias": str(source.get("connection_alias") or ""),
+                "connection_fingerprint": str(source.get("connection_fingerprint") or ""),
+                "tenant_scope_id": str(source.get("tenant_scope_id") or ""),
             }
         )
 
@@ -137,7 +143,7 @@ class TimeSeriesExperimentStore:
         actor: str,
         seasonal_comparison: bool = True,
     ) -> dict[str, Any]:
-        series_key = self.series_key(request)
+        series_key = self.series_key(request, result)
         fingerprint = self.run_fingerprint(request, result)
         seasonal_slot = self.seasonal_slot(result)
         references = self.baselines(
