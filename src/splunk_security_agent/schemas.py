@@ -569,6 +569,15 @@ class TenantDataMigrationActionRequest(ConnectionScopeReference):
     pass
 
 
+class TenantReverseMigrationActionRequest(ConnectionScopeReference):
+    expected_source_digest: str = Field(
+        min_length=64, max_length=64, pattern=r"^[a-f0-9]{64}$"
+    )
+    expected_shared_target_digest: str = Field(
+        min_length=64, max_length=64, pattern=r"^[a-f0-9]{64}$"
+    )
+
+
 DiscoveryJobStatus = Literal[
     "queued",
     "running",

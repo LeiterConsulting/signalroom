@@ -900,7 +900,7 @@ function renderConnections() {
   const catalog = value.additional_mcp_connections || {};
   $('#futureMcpIntro').innerHTML = `<b>Why add another MCP?</b><p>${escapeHtml(catalog.mission || '')}</p><span>Additional Splunk is executable now · other connector types remain governed roadmap candidates</span>`;
   $('#futureMcpGrid').innerHTML = (catalog.suggestions || []).map(item => `<article><header><span>${escapeHtml(item.priority || 'later')}</span><b>${escapeHtml(item.label)}</b></header><p>${escapeHtml(item.purpose)}</p><dl><dt>Expected value</dt><dd>${escapeHtml(item.expected_value)}</dd><dt>Authority boundary</dt><dd>${escapeHtml(item.authority)}</dd></dl></article>`).join('');
-  $('#futureMcpAdmission').innerHTML = `<b>Admission contract before any connector is enabled</b><ul>${(catalog.admission_requirements || []).map(item => `<li>${escapeHtml(item)}</li>`).join('')}</ul><small>Tenant scope now gates evidence, cases, discovery history, and investigation retrieval. Separate per-tenant database files remain a future hard-isolation option.</small>`;
+  $('#futureMcpAdmission').innerHTML = `<b>Admission contract before any connector is enabled</b><ul>${(catalog.admission_requirements || []).map(item => `<li>${escapeHtml(item)}</li>`).join('')}</ul><small>Tenant scope gates evidence, cases, discovery history, and investigation retrieval. Administrators can stage digest-verified physical tenant generations and build a verified return path before finalizing shared duplicates.</small>`;
   renderEstateComparisonControls();
   renderTenantIsolation();
 }
@@ -975,10 +975,16 @@ function renderTenantDataPlane(scope, plan) {
   const migrations = (dataPlane.migrations || []).filter(item =>
     item.tenant_scope_id === scope.tenant_scope_id && item.connection_alias === scope.alias
   );
+  const reverseMigrations = (dataPlane.reverse_migrations || []).filter(item =>
+    item.tenant_scope_id === scope.tenant_scope_id && item.connection_alias === scope.alias
+  );
   const migration = migrations[0] || null;
   const activeMigration = route.generation_id
     ? migrations.find(item => item.generation_id === route.generation_id) || null
     : null;
+  const reverse = route.generation_id
+    ? reverseMigrations.find(item => item.generation_id === route.generation_id && !['superseded','failed'].includes(item.status)) || null
+    : reverseMigrations[0] || null;
   const requiredComponents = dataPlane.contract?.components || [];
   const activeComponents = new Set((activeMigration?.components || []).map(item => item.id));
   const expansionRequired = route.mode === 'isolated-routing' && requiredComponents.some(id => !activeComponents.has(id));
@@ -997,9 +1003,20 @@ function renderTenantDataPlane(scope, plan) {
   if (status === 'verified' && migration) {
     action = `<button class="button primary small" type="button" data-cutover-tenant="${escapeHtml(migration.id)}">Activate verified route</button>`;
   } else if (route.mode === 'isolated-routing' && activeMigration?.status === 'cutover') {
-    action = `<button class="button ghost small" type="button" data-rollback-tenant="${escapeHtml(activeMigration.id)}" ${Number(route.writes_since_cutover || 0) ? 'disabled' : ''}>Rollback active generation</button>`;
+    if (!Number(route.writes_since_cutover || 0) && !route.shared_source_purged) {
+      action = `<button class="button ghost small" type="button" data-rollback-tenant="${escapeHtml(activeMigration.id)}">Rollback zero-write generation</button>`;
+    }
     if (expansionRequired && plan?.migration_executable) {
       action += '<button class="button primary small" type="button" id="stageTenantMigration">Stage expanded ten-component generation</button>';
+    } else if (reverse?.apply_available) {
+      action += `<button class="button primary small" type="button" data-apply-tenant-reverse="${escapeHtml(reverse.id)}">Return safely to shared routing</button>`;
+      if (reverse.finalization_available && !route.shared_source_purged) {
+        action += `<button class="button ghost small danger-action" type="button" data-finalize-tenant-source="${escapeHtml(reverse.id)}">Finalize shared duplicates</button>`;
+      }
+    } else if (reverse?.status === 'copying') {
+      action += '<button class="button primary small" type="button" disabled>Building verified return path…</button>';
+    } else {
+      action += '<button class="button primary small" type="button" id="stageTenantReverse">Build verified return path</button>';
     }
   } else if (plan?.migration_executable && !['copying','verified','cutover'].includes(migration?.status || '')) {
     action = '<button class="button primary small" type="button" id="stageTenantMigration">Stage and verify ten components</button>';
@@ -1014,12 +1031,18 @@ function renderTenantDataPlane(scope, plan) {
       : 'Zero isolated writes · sealed-source rollback remains available'
     : 'Shared source remains authoritative; routing has not changed';
   holder.innerHTML = `<article class="tenant-data-plane ${escapeHtml(status)}">
-    <header><div><span>DATA-PLANE ROUTING</span><h5>${escapeHtml(labels[status] || status)}</h5><p>${escapeHtml(writeBoundary)}</p></div>${action}</header>
+    <header><div><span>DATA-PLANE ROUTING</span><h5>${escapeHtml(labels[status] || status)}</h5><p>${escapeHtml(writeBoundary)}</p></div>${action ? `<div class="tenant-route-actions">${action}</div>` : ''}</header>
     <div class="tenant-copy-boundary"><b>Staging authority</b><span>Unlike readiness planning, staging locally copies the selected tenant's eight workflow databases plus manifested discovery and case-export files. Global policies stay in the control plane. Nothing is sent externally, and no runtime route changes until a separate cutover.</span></div>
     ${migration ? `<div class="tenant-migration-identity"><span><b>Migration</b><code>${escapeHtml(migration.id.slice(0,12))}</code></span><span><b>Generation</b><code>${escapeHtml(migration.generation_id.slice(0,12))}</code></span><span><b>Source digest</b><code>${escapeHtml((migration.source_digest || 'pending').slice(0,12))}</code></span><span><b>Target digest</b><code>${escapeHtml((migration.target_digest || 'pending').slice(0,12))}</code></span></div>` : ''}
     ${components.length ? `<div class="tenant-copy-components">${components.map(item => `<span class="${item.verified ? 'verified' : 'failed'}"><b>${escapeHtml(item.id.replaceAll('-', ' '))}</b>${Number(item.source_records || 0)} source records · ${Number(item.target_records || 0)} target records</span>`).join('')}</div>` : ''}
     ${migration?.error ? `<div class="tenant-migration-error"><b>Migration stopped</b><span>${escapeHtml(migration.error)}</span></div>` : ''}
-    ${route.mode === 'isolated-routing' ? '<div class="tenant-source-retained"><b>Routing isolation is active; physical cleanup is not final.</b><span>The original shared rows are sealed as the rollback source. A future purge/finalization gate must verify a reverse-migration path before claiming complete physical separation.</span></div>' : ''}
+    ${reverse ? `<section class="tenant-reverse-path ${escapeHtml(reverse.status)}"><header><div><span>VERIFIED RETURN PATH</span><b>${escapeHtml(reverse.status.replaceAll('-', ' '))}</b></div><small>${Number(reverse.components?.length || 0)} components · ${escapeHtml(String(reverse.id || '').slice(0,12))}</small></header><p>The staged local snapshot merges this isolated generation into the currently shared stores. Apply is admitted only while both the isolated source and shared-state digests still match.</p><div><span><b>Isolated source</b><code>${escapeHtml((reverse.source_digest || 'pending').slice(0,12))}</code></span><span><b>Shared baseline</b><code>${escapeHtml((reverse.shared_baseline_digest || 'pending').slice(0,12))}</code></span><span><b>Return target</b><code>${escapeHtml((reverse.shared_target_digest || 'pending').slice(0,12))}</code></span></div>${reverse.error ? `<em>${escapeHtml(reverse.error)}</em>` : ''}</section>` : ''}
+    ${route.mode === 'isolated-routing' ? route.shared_source_purged
+      ? '<div class="tenant-source-retained finalized"><b>Shared duplicates finalized; isolated routing remains authoritative.</b><span>The verified local return snapshot is retained. Use “Return safely to shared routing” to restore the exact merged target without losing isolated-generation writes.</span></div>'
+      : reverse?.status === 'verified'
+        ? '<div class="tenant-source-retained verified"><b>A safe return path is verified; shared duplicates are still retained.</b><span>You may return to shared routing now, or explicitly finalize only this tenant’s shared duplicates while keeping the verified return snapshot.</span></div>'
+        : '<div class="tenant-source-retained"><b>Routing isolation is active; the shared source is retained.</b><span>Build a verified return path before finalizing duplicates. Direct rollback is available only while this generation has accepted zero writes.</span></div>'
+      : ''}
   </article>`;
 }
 
@@ -1139,6 +1162,53 @@ async function rollbackTenantMigration(migrationId) {
     await api(`/api/tenant-isolation/migrations/${encodeURIComponent(migrationId)}/rollback`, {method:'POST',body:JSON.stringify(bindingPayload(scope))});
     await loadTenantIsolation();
     toast(`Tenant routing returned to ${target}`);
+  } catch (error) { toast(error.message); }
+}
+
+async function stageTenantReverseMigration() {
+  const scope = selectedTenantIsolationScope(); if (!scope) return;
+  const button = $('#stageTenantReverse');
+  if (button) { button.disabled = true; button.textContent = 'Merging and verifying ten components…'; }
+  try {
+    await api('/api/tenant-isolation/reverse-migrations', {method:'POST',body:JSON.stringify(bindingPayload(scope))});
+    await loadTenantIsolation();
+    toast('Verified return path built · isolated routing unchanged');
+  } catch (error) { toast(error.message); }
+  finally {
+    const current = $('#stageTenantReverse');
+    if (current) { current.disabled = false; current.textContent = 'Build verified return path'; }
+  }
+}
+
+function tenantReversePayload(scope, reverse) {
+  return {
+    ...bindingPayload(scope),
+    expected_source_digest:reverse.source_digest,
+    expected_shared_target_digest:reverse.shared_target_digest
+  };
+}
+
+async function applyTenantReverseMigration(reverseId) {
+  const scope = selectedTenantIsolationScope(); if (!scope) return;
+  const reverse = (state.tenantIsolation?.data_plane?.reverse_migrations || []).find(item => item.id === reverseId);
+  if (!reverse) { toast('Reload Settings and build a current verified return path'); return; }
+  if (!confirm('Revalidate all ten isolated and shared component digests, apply the exact merged snapshot, and return this tenant to shared routing? No external service is used.')) return;
+  try {
+    await api(`/api/tenant-isolation/reverse-migrations/${encodeURIComponent(reverseId)}/apply`, {method:'POST',body:JSON.stringify(tenantReversePayload(scope, reverse))});
+    await loadTenantIsolation();
+    toast('Verified snapshot applied · tenant returned to shared routing');
+  } catch (error) { toast(error.message); }
+}
+
+async function finalizeTenantSharedSource(reverseId) {
+  const scope = selectedTenantIsolationScope(); if (!scope) return;
+  const reverse = (state.tenantIsolation?.data_plane?.reverse_migrations || []).find(item => item.id === reverseId);
+  if (!reverse) { toast('Reload Settings and build a current verified return path'); return; }
+  if (!confirm('Remove only this tenant’s digest-verified duplicate rows and manifested files from shared storage? Isolated routing remains active and the verified local return snapshot is retained.')) return;
+  try {
+    await api(`/api/tenant-isolation/reverse-migrations/${encodeURIComponent(reverseId)}/finalize`, {method:'POST',body:JSON.stringify(tenantReversePayload(scope, reverse))});
+    await loadTenantIsolation();
+    toast('Shared duplicates finalized · verified return path retained');
   } catch (error) { toast(error.message); }
 }
 
@@ -5604,11 +5674,16 @@ document.addEventListener('click', async event => {
   if (event.target.closest('#openSettings,#configureModels,[data-open-settings]')) { $('#settingsModal').hidden = false; loadWorkload(); await loadConnections(); await loadTenantIsolation(); }
   if (event.target.closest('#closeSettings')) $('#settingsModal').hidden = true;
   if (event.target.closest('#stageTenantMigration')) await stageTenantMigration();
+  if (event.target.closest('#stageTenantReverse')) await stageTenantReverseMigration();
   if (event.target.closest('#reconcileTenantFileManifests')) await reconcileTenantFileManifests();
   const cutoverTenant = event.target.closest('[data-cutover-tenant]');
   if (cutoverTenant) await cutoverTenantMigration(cutoverTenant.dataset.cutoverTenant);
   const rollbackTenant = event.target.closest('[data-rollback-tenant]');
   if (rollbackTenant) await rollbackTenantMigration(rollbackTenant.dataset.rollbackTenant);
+  const applyTenantReverse = event.target.closest('[data-apply-tenant-reverse]');
+  if (applyTenantReverse) await applyTenantReverseMigration(applyTenantReverse.dataset.applyTenantReverse);
+  const finalizeTenantSource = event.target.closest('[data-finalize-tenant-source]');
+  if (finalizeTenantSource) await finalizeTenantSharedSource(finalizeTenantSource.dataset.finalizeTenantSource);
   if (event.target.closest('#addArtifact')) openArtifactEditor();
   if (event.target.closest('.close-artifact')) { $('#artifactModal').hidden = true; state.editingArtifactId = null; }
   if (event.target.closest('#uploadArtifact')) $('#fileInput').click();

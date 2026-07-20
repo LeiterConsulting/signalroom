@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import shutil
 import sqlite3
@@ -30,6 +31,12 @@ TENANT_STORE_FILENAMES = {
     "forecast-experiments": "time_series_experiments.db",
     "assurance-responses": "assurance_responses.db",
     "outbound-delivery": "delivery_history.db",
+}
+
+SHARED_STORE_FILENAMES = {
+    **TENANT_STORE_FILENAMES,
+    "assurance-responses": "assurance.db",
+    "outbound-delivery": "delivery.db",
 }
 
 TENANT_DIRECTORY_NAMES = {
@@ -76,6 +83,8 @@ class TenantDataPlaneRegistry:
                     mode TEXT NOT NULL,
                     generation_id TEXT NOT NULL,
                     writes_since_cutover INTEGER NOT NULL DEFAULT 0,
+                    shared_source_purged INTEGER NOT NULL DEFAULT 0,
+                    finalized_at TEXT,
                     updated_at TEXT NOT NULL
                 );
                 CREATE TABLE IF NOT EXISTS tenant_data_migrations (
@@ -119,7 +128,73 @@ class TenantDataPlaneRegistry:
                         tenant_scope_id,connection_alias,connection_fingerprint,
                         storage_generation_id,component
                     );
+                CREATE TABLE IF NOT EXISTS tenant_reverse_migrations (
+                    id TEXT PRIMARY KEY,
+                    forward_migration_id TEXT NOT NULL,
+                    tenant_scope_id TEXT NOT NULL,
+                    connection_alias TEXT NOT NULL,
+                    connection_fingerprint TEXT NOT NULL,
+                    generation_id TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    resume_status TEXT NOT NULL DEFAULT '',
+                    source_digest TEXT NOT NULL,
+                    shared_baseline_digest TEXT NOT NULL,
+                    shared_target_digest TEXT NOT NULL,
+                    pre_finalize_shared_digest TEXT NOT NULL DEFAULT '',
+                    components_json TEXT NOT NULL,
+                    error TEXT NOT NULL,
+                    created_by TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    verified_at TEXT,
+                    finalized_at TEXT,
+                    applied_at TEXT,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_tenant_reverse_scope_created
+                    ON tenant_reverse_migrations(tenant_scope_id,created_at DESC);
                 """
+            )
+            route_columns = {
+                str(row["name"])
+                for row in database.execute("PRAGMA table_info(tenant_data_routes)").fetchall()
+            }
+            if "shared_source_purged" not in route_columns:
+                database.execute(
+                    """ALTER TABLE tenant_data_routes ADD COLUMN
+                    shared_source_purged INTEGER NOT NULL DEFAULT 0"""
+                )
+            if "finalized_at" not in route_columns:
+                database.execute("ALTER TABLE tenant_data_routes ADD COLUMN finalized_at TEXT")
+            reverse_columns = {
+                str(row["name"])
+                for row in database.execute(
+                    "PRAGMA table_info(tenant_reverse_migrations)"
+                ).fetchall()
+            }
+            if "resume_status" not in reverse_columns:
+                database.execute(
+                    """ALTER TABLE tenant_reverse_migrations ADD COLUMN
+                    resume_status TEXT NOT NULL DEFAULT ''"""
+                )
+            now = _now()
+            database.execute(
+                """UPDATE tenant_reverse_migrations SET status='failed',
+                error='SignalRoom restarted before reverse staging completed.',updated_at=?
+                WHERE status='copying'""",
+                (now,),
+            )
+            database.execute(
+                """UPDATE tenant_reverse_migrations SET status=CASE
+                    WHEN resume_status IN ('verified','finalized-ready') THEN resume_status
+                    WHEN EXISTS (
+                        SELECT 1 FROM tenant_data_routes route
+                        WHERE route.tenant_scope_id=tenant_reverse_migrations.tenant_scope_id
+                        AND route.mode='isolated-routing' AND route.shared_source_purged=1
+                    ) THEN 'finalized-ready'
+                    ELSE 'verified' END,
+                error='SignalRoom restarted during reverse apply; verified component progress was retained.',
+                resume_status='',updated_at=? WHERE status='applying'""",
+                (now,),
             )
             columns = {
                 str(row["name"])
@@ -149,6 +224,8 @@ class TenantDataPlaneRegistry:
                 "mode": "shared",
                 "generation_id": "",
                 "writes_since_cutover": 0,
+                "shared_source_purged": 0,
+                "finalized_at": None,
             }
         return dict(row)
 
@@ -159,11 +236,7 @@ class TenantDataPlaneRegistry:
         if route["mode"] != "isolated-routing" or not self.component_isolated(
             component, tenant_scope_id, route=route
         ):
-            shared_filenames = {
-                "assurance-responses": "assurance.db",
-                "outbound-delivery": "delivery.db",
-            }
-            return self.data_root / shared_filenames.get(component, TENANT_STORE_FILENAMES[component])
+            return self.shared_path(component)
         path = (
             self.data_root
             / "tenants"
@@ -175,6 +248,13 @@ class TenantDataPlaneRegistry:
         self.assert_contained(path)
         if not path.is_file():
             raise RuntimeError(f"The active isolated {component} store is missing; routing failed closed.")
+        return path
+
+    def shared_path(self, component: str) -> Path:
+        if component not in SHARED_STORE_FILENAMES:
+            raise ValueError(f"Unsupported tenant store component: {component}")
+        path = (self.data_root / SHARED_STORE_FILENAMES[component]).resolve()
+        self.assert_contained(path)
         return path
 
     def directory_for(self, component: str, tenant_scope_id: str) -> Path:
@@ -563,6 +643,14 @@ class TenantDataPlaneRegistry:
         self.assert_contained(path)
         return path
 
+    def reverse_root(self, tenant_scope_id: str, reverse_id: str) -> Path:
+        _safe_scope(tenant_scope_id)
+        if not re.fullmatch(r"[a-f0-9]{32}", reverse_id):
+            raise ValueError("Reverse migration ID is invalid.")
+        path = (self.data_root / "tenants" / tenant_scope_id / "reverse" / reverse_id).resolve()
+        self.assert_contained(path)
+        return path
+
     def assert_contained(self, path: Path) -> None:
         if path != self.data_root and self.data_root not in path.parents:
             raise ValueError("Tenant data path escapes the SignalRoom data root.")
@@ -709,12 +797,14 @@ class TenantDataPlaneRegistry:
             database.execute(
                 """INSERT INTO tenant_data_routes
                 (tenant_scope_id,connection_alias,connection_fingerprint,mode,generation_id,
-                writes_since_cutover,updated_at) VALUES (?,?,?,'isolated-routing',?,0,?)
+                writes_since_cutover,shared_source_purged,finalized_at,updated_at)
+                VALUES (?,?,?,'isolated-routing',?,0,0,NULL,?)
                 ON CONFLICT(tenant_scope_id) DO UPDATE SET
                 connection_alias=excluded.connection_alias,
                 connection_fingerprint=excluded.connection_fingerprint,
                 mode=excluded.mode,generation_id=excluded.generation_id,
-                writes_since_cutover=0,updated_at=excluded.updated_at""",
+                writes_since_cutover=0,shared_source_purged=0,finalized_at=NULL,
+                updated_at=excluded.updated_at""",
                 (
                     migration["tenant_scope_id"],
                     migration["connection_alias"],
@@ -739,6 +829,11 @@ class TenantDataPlaneRegistry:
         route = self.route(migration["tenant_scope_id"])
         if route["generation_id"] != migration["generation_id"]:
             raise ValueError("The active tenant generation no longer matches this migration.")
+        if int(route.get("shared_source_purged") or 0):
+            raise ValueError(
+                "Direct rollback is blocked because shared duplicates were finalized. "
+                "Apply a verified reverse migration instead."
+            )
         if int(route["writes_since_cutover"]):
             raise ValueError(
                 "Rollback is blocked because the isolated generation has accepted writes. "
@@ -773,6 +868,224 @@ class TenantDataPlaneRegistry:
         assert result is not None
         return result
 
+    def reverse_migrations(self, limit: int = 20) -> list[dict[str, Any]]:
+        with self.connect() as database:
+            rows = database.execute(
+                """SELECT * FROM tenant_reverse_migrations
+                ORDER BY created_at DESC LIMIT ?""",
+                (max(1, min(100, int(limit))),),
+            ).fetchall()
+        return [self._reverse_migration(row) for row in rows]
+
+    def reverse_migration(self, reverse_id: str) -> dict[str, Any] | None:
+        with self.connect() as database:
+            row = database.execute(
+                "SELECT * FROM tenant_reverse_migrations WHERE id=?", (reverse_id,)
+            ).fetchone()
+        return self._reverse_migration(row) if row else None
+
+    def begin_reverse(
+        self,
+        binding: dict[str, str],
+        actor: str,
+        source_digest: str,
+    ) -> dict[str, Any]:
+        tenant = _safe_scope(binding["tenant_scope_id"])
+        route = self.route(tenant)
+        if route.get("mode") != "isolated-routing" or not route.get("generation_id"):
+            raise ValueError("A reverse migration requires an active isolated tenant generation.")
+        expected = (
+            route.get("connection_alias"),
+            route.get("connection_fingerprint"),
+            route.get("tenant_scope_id"),
+        )
+        observed = (binding["alias"], binding["fingerprint"], binding["tenant_scope_id"])
+        if expected != observed:
+            raise ValueError("The active tenant generation belongs to a different Splunk identity.")
+        with self.connect() as database:
+            forward = database.execute(
+                """SELECT id FROM tenant_data_migrations
+                WHERE tenant_scope_id=? AND generation_id=? AND status='cutover'
+                ORDER BY cutover_at DESC LIMIT 1""",
+                (tenant, route["generation_id"]),
+            ).fetchone()
+            if not forward:
+                raise ValueError("The active forward-generation manifest is unavailable.")
+            pending = database.execute(
+                """SELECT id FROM tenant_reverse_migrations WHERE tenant_scope_id=?
+                AND status IN ('copying','applying') ORDER BY created_at DESC LIMIT 1""",
+                (tenant,),
+            ).fetchone()
+            if pending:
+                raise ValueError(f"Reverse migration {pending['id']} is already active for this tenant.")
+            reverse_id = uuid4().hex
+            now = _now()
+            database.execute(
+                """INSERT INTO tenant_reverse_migrations
+                (id,forward_migration_id,tenant_scope_id,connection_alias,
+                connection_fingerprint,generation_id,status,resume_status,source_digest,
+                shared_baseline_digest,shared_target_digest,pre_finalize_shared_digest,
+                components_json,error,created_by,created_at,verified_at,finalized_at,
+                applied_at,updated_at)
+                VALUES (?,?,?,?,?,?,'copying','',?,'','','','[]','',?,?,NULL,NULL,NULL,?)""",
+                (
+                    reverse_id,
+                    str(forward["id"]),
+                    tenant,
+                    binding["alias"],
+                    binding["fingerprint"],
+                    str(route["generation_id"]),
+                    source_digest,
+                    actor,
+                    now,
+                    now,
+                ),
+            )
+        result = self.reverse_migration(reverse_id)
+        assert result is not None
+        return result
+
+    def reverse_verified(
+        self,
+        reverse_id: str,
+        shared_baseline_digest: str,
+        shared_target_digest: str,
+        components: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        reverse = self.reverse_migration(reverse_id)
+        if not reverse or reverse["status"] != "copying":
+            raise ValueError("Reverse migration is no longer in the copy phase.")
+        route = self.route(reverse["tenant_scope_id"])
+        status = "finalized-ready" if int(route.get("shared_source_purged") or 0) else "verified"
+        now = _now()
+        with self.connect() as database:
+            result = database.execute(
+                """UPDATE tenant_reverse_migrations SET status=?,shared_baseline_digest=?,
+                shared_target_digest=?,components_json=?,verified_at=?,updated_at=?
+                WHERE id=? AND status='copying'""",
+                (
+                    status,
+                    shared_baseline_digest,
+                    shared_target_digest,
+                    json.dumps(components, sort_keys=True),
+                    now,
+                    now,
+                    reverse_id,
+                ),
+            )
+            if not result.rowcount:
+                raise ValueError("Reverse migration state changed before verification.")
+            database.execute(
+                """UPDATE tenant_reverse_migrations SET status='superseded',updated_at=?
+                WHERE tenant_scope_id=? AND id<>?
+                AND status IN ('verified','finalized-ready')""",
+                (now, reverse["tenant_scope_id"], reverse_id),
+            )
+        result = self.reverse_migration(reverse_id)
+        assert result is not None
+        return result
+
+    def reverse_failed(self, reverse_id: str, error: str) -> None:
+        with self.connect() as database:
+            database.execute(
+                """UPDATE tenant_reverse_migrations SET status='failed',error=?,updated_at=?
+                WHERE id=? AND status='copying'""",
+                (error[:2000], _now(), reverse_id),
+            )
+
+    def reverse_finalized(
+        self,
+        reverse_id: str,
+        pre_finalize_shared_digest: str,
+        shared_baseline_digest: str,
+        components: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        reverse = self.reverse_migration(reverse_id)
+        if not reverse or reverse["status"] != "verified":
+            raise ValueError("Only a verified reverse path can authorize finalization.")
+        now = _now()
+        with self.connect() as database:
+            database.execute(
+                """UPDATE tenant_reverse_migrations SET status='finalized-ready',
+                pre_finalize_shared_digest=?,
+                shared_baseline_digest=?,components_json=?,finalized_at=?,updated_at=?
+                WHERE id=? AND status='verified'""",
+                (
+                    pre_finalize_shared_digest,
+                    shared_baseline_digest,
+                    json.dumps(components, sort_keys=True),
+                    now,
+                    now,
+                    reverse_id,
+                ),
+            )
+            database.execute(
+                """UPDATE tenant_data_routes SET shared_source_purged=1,finalized_at=?,updated_at=?
+                WHERE tenant_scope_id=? AND mode='isolated-routing' AND generation_id=?""",
+                (now, now, reverse["tenant_scope_id"], reverse["generation_id"]),
+            )
+        result = self.reverse_migration(reverse_id)
+        assert result is not None
+        return result
+
+    def begin_reverse_apply(self, reverse_id: str) -> tuple[dict[str, Any], str]:
+        reverse = self.reverse_migration(reverse_id)
+        if not reverse or reverse["status"] not in {"verified", "finalized-ready"}:
+            raise ValueError("Only a verified reverse migration can be applied.")
+        prior_status = str(reverse["status"])
+        with self.connect() as database:
+            result = database.execute(
+                """UPDATE tenant_reverse_migrations SET status='applying',resume_status=?,
+                error='',updated_at=?
+                WHERE id=? AND status=?""",
+                (prior_status, _now(), reverse_id, prior_status),
+            )
+            if not result.rowcount:
+                raise ValueError("Reverse migration state changed before apply.")
+        applying = self.reverse_migration(reverse_id)
+        assert applying is not None
+        return applying, prior_status
+
+    def reverse_apply_failed(self, reverse_id: str, prior_status: str, error: str) -> None:
+        with self.connect() as database:
+            database.execute(
+                """UPDATE tenant_reverse_migrations SET status=?,resume_status='',error=?,updated_at=?
+                WHERE id=? AND status='applying'""",
+                (prior_status, error[:2000], _now(), reverse_id),
+            )
+
+    def reverse_applied(self, reverse_id: str) -> dict[str, Any]:
+        reverse = self.reverse_migration(reverse_id)
+        if not reverse or reverse["status"] != "applying":
+            raise ValueError("Reverse migration is not in the apply phase.")
+        route = self.route(reverse["tenant_scope_id"])
+        if route.get("mode") != "isolated-routing" or route.get("generation_id") != reverse[
+            "generation_id"
+        ]:
+            raise ValueError("Tenant routing changed during reverse migration.")
+        now = _now()
+        with self.connect() as database:
+            database.execute(
+                """UPDATE tenant_data_routes SET mode='shared',generation_id='',
+                writes_since_cutover=0,shared_source_purged=0,finalized_at=NULL,updated_at=?
+                WHERE tenant_scope_id=?""",
+                (now, reverse["tenant_scope_id"]),
+            )
+            database.execute(
+                """UPDATE tenant_data_migrations SET status='reverse-migrated',updated_at=?
+                WHERE id=? AND status='cutover'""",
+                (now, reverse["forward_migration_id"]),
+            )
+            database.execute(
+                """UPDATE tenant_reverse_migrations SET status='applied',resume_status='',
+                applied_at=?,updated_at=?
+                WHERE id=? AND status='applying'""",
+                (now, now, reverse_id),
+            )
+        result = self.reverse_migration(reverse_id)
+        assert result is not None
+        return result
+
     def note_write(self, tenant_scope_id: str) -> None:
         with self.connect() as database:
             database.execute(
@@ -791,17 +1104,22 @@ class TenantDataPlaneRegistry:
                 ).fetchall()
             ]
         for item in routes:
-            item["source_retained_for_rollback"] = item["mode"] == "isolated-routing"
-            item["physical_source_purge_complete"] = False
+            item["shared_source_purged"] = bool(item.get("shared_source_purged"))
+            item["source_retained_for_rollback"] = (
+                item["mode"] == "isolated-routing" and not item["shared_source_purged"]
+            )
+            item["physical_source_purge_complete"] = item["shared_source_purged"]
         return {
             "routes": routes,
             "migrations": self.migrations(),
+            "reverse_migrations": self.reverse_migrations(),
             "contract": {
                 "components": list(TENANT_DATA_COMPONENTS),
                 "cutover_requires_exact_source_digest": True,
                 "rollback_requires_zero_post_cutover_writes": True,
-                "source_retained_until_future_finalization": True,
-                "physical_source_purge_available": False,
+                "reverse_migration_requires_exact_digests": True,
+                "source_retained_until_explicit_finalization": True,
+                "physical_source_purge_available": True,
             },
         }
 
@@ -811,6 +1129,14 @@ class TenantDataPlaneRegistry:
         value["components"] = json.loads(str(value.pop("components_json")))
         value["migration_executable"] = value["status"] == "verified"
         value["rollback_available"] = value["status"] == "cutover"
+        return value
+
+    @staticmethod
+    def _reverse_migration(row: sqlite3.Row) -> dict[str, Any]:
+        value = dict(row)
+        value["components"] = json.loads(str(value.pop("components_json")))
+        value["apply_available"] = value["status"] in {"verified", "finalized-ready"}
+        value["finalization_available"] = value["status"] == "verified"
         return value
 
 
@@ -886,6 +1212,218 @@ class TenantDataMigrationService:
             self._bound_migration(migration_id, binding, "cutover")
             return self.registry.rollback(migration_id)
 
+    def stage_reverse(self, binding: dict[str, str], actor: str) -> dict[str, Any]:
+        """Build a verified shared-data snapshot without changing the active isolated route."""
+        with self.registry.operation_lock:
+            route = self._bound_isolated_route(binding)
+            self._assert_full_generation(binding["tenant_scope_id"], route)
+            self._assert_no_active_discovery(binding["tenant_scope_id"])
+            source = [
+                self._component_digest(component, binding, root=None)
+                for component in self.COMPONENTS
+            ]
+            source_digest = self._aggregate_digest(source, "digest")
+            reverse = self.registry.begin_reverse(binding, actor, source_digest)
+            root = self.registry.reverse_root(binding["tenant_scope_id"], reverse["id"])
+            try:
+                if root.exists():
+                    raise ValueError("The reverse-migration staging path already exists.")
+                (root / "shared").mkdir(parents=True)
+                results = [
+                    self._stage_reverse_component(component, binding, root)
+                    for component in self.COMPONENTS
+                ]
+                observed_source = self._aggregate_digest(results, "source_digest")
+                if observed_source != source_digest:
+                    raise ValueError("The isolated tenant generation changed during reverse staging.")
+                shared_baseline = self._aggregate_digest(results, "shared_baseline_digest")
+                shared_target = self._aggregate_digest(results, "shared_target_digest")
+                return self.registry.reverse_verified(
+                    reverse["id"], shared_baseline, shared_target, results
+                )
+            except Exception as exc:
+                self.registry.reverse_failed(reverse["id"], str(exc))
+                if root.exists():
+                    shutil.rmtree(root)
+                raise
+
+    def apply_reverse(
+        self,
+        reverse_id: str,
+        binding: dict[str, str],
+        expected_source_digest: str,
+        expected_shared_target_digest: str,
+    ) -> dict[str, Any]:
+        """Restore shared routing from a verified, unchanged reverse snapshot."""
+        with self.registry.operation_lock:
+            reverse = self._bound_reverse(reverse_id, binding, {"verified", "finalized-ready"})
+            self._assert_reverse_confirmation(
+                reverse, expected_source_digest, expected_shared_target_digest
+            )
+            route = self._bound_isolated_route(binding)
+            if route["generation_id"] != reverse["generation_id"]:
+                raise ValueError("The active generation changed after reverse verification.")
+            self._assert_no_active_discovery(binding["tenant_scope_id"])
+            self._assert_reverse_source(reverse, binding)
+            self._assert_shared_components_match(reverse, binding, allow_target=True)
+            applying, prior_status = self.registry.begin_reverse_apply(reverse_id)
+            try:
+                root = self.registry.reverse_root(binding["tenant_scope_id"], reverse_id)
+                for component in applying["components"]:
+                    self._apply_reverse_component(component, binding, root)
+                self._assert_shared_target(applying, binding)
+                return self.registry.reverse_applied(reverse_id)
+            except Exception as exc:
+                self.registry.reverse_apply_failed(reverse_id, prior_status, str(exc))
+                raise
+
+    def finalize_shared_source(
+        self,
+        reverse_id: str,
+        binding: dict[str, str],
+        expected_source_digest: str,
+        expected_shared_target_digest: str,
+    ) -> dict[str, Any]:
+        """Remove stale shared duplicates only after proving an exact reverse path."""
+        with self.registry.operation_lock:
+            reverse = self._bound_reverse(reverse_id, binding, {"verified"})
+            self._assert_reverse_confirmation(
+                reverse, expected_source_digest, expected_shared_target_digest
+            )
+            route = self._bound_isolated_route(binding)
+            if route["generation_id"] != reverse["generation_id"]:
+                raise ValueError("The active generation changed after reverse verification.")
+            if int(route.get("shared_source_purged") or 0):
+                raise ValueError("Shared duplicates are already finalized for this tenant.")
+            self._assert_no_active_discovery(binding["tenant_scope_id"])
+            self._assert_reverse_source(reverse, binding)
+            self._assert_shared_components_match(reverse, binding, allow_purged=True)
+            updated: list[dict[str, Any]] = []
+            for component in reverse["components"]:
+                self._purge_shared_component(component, binding)
+                value = dict(component)
+                value["pre_finalize_shared_digest"] = value["shared_baseline_digest"]
+                value["shared_baseline_digest"] = value["shared_purged_digest"]
+                updated.append(value)
+            purged_digest = self._aggregate_digest(updated, "shared_baseline_digest")
+            self._assert_shared_component_values(updated, binding, "shared_baseline_digest")
+            return self.registry.reverse_finalized(
+                reverse_id,
+                reverse["shared_baseline_digest"],
+                purged_digest,
+                updated,
+            )
+
+    def _bound_isolated_route(self, binding: dict[str, str]) -> dict[str, Any]:
+        route = self.registry.route(binding["tenant_scope_id"])
+        expected = (
+            route.get("connection_alias"),
+            route.get("connection_fingerprint"),
+            route.get("tenant_scope_id"),
+        )
+        observed = (binding["alias"], binding["fingerprint"], binding["tenant_scope_id"])
+        if route.get("mode") != "isolated-routing" or expected != observed:
+            raise ValueError("No matching isolated tenant generation is active.")
+        return route
+
+    def _assert_full_generation(
+        self, tenant_scope_id: str, route: dict[str, Any]
+    ) -> None:
+        missing = [
+            component
+            for component in self.COMPONENTS
+            if not self.registry.component_isolated(component, tenant_scope_id, route=route)
+        ]
+        if missing:
+            raise ValueError(
+                "Reverse migration requires a complete ten-component generation; missing: "
+                + ", ".join(missing)
+            )
+
+    def _bound_reverse(
+        self,
+        reverse_id: str,
+        binding: dict[str, str],
+        statuses: set[str],
+    ) -> dict[str, Any]:
+        reverse = self.registry.reverse_migration(reverse_id)
+        if not reverse or reverse["status"] not in statuses:
+            raise ValueError("Reverse migration is not in an eligible verified state.")
+        expected = (
+            reverse["connection_alias"],
+            reverse["connection_fingerprint"],
+            reverse["tenant_scope_id"],
+        )
+        observed = (binding["alias"], binding["fingerprint"], binding["tenant_scope_id"])
+        if expected != observed:
+            raise ValueError("Reverse migration is bound to a different immutable Splunk scope.")
+        return reverse
+
+    @staticmethod
+    def _assert_reverse_confirmation(
+        reverse: dict[str, Any],
+        expected_source_digest: str,
+        expected_shared_target_digest: str,
+    ) -> None:
+        if (
+            reverse["source_digest"] != expected_source_digest
+            or reverse["shared_target_digest"] != expected_shared_target_digest
+        ):
+            raise ValueError("Reverse migration digest confirmation does not match the verified plan.")
+
+    def _assert_reverse_source(
+        self, reverse: dict[str, Any], binding: dict[str, str]
+    ) -> None:
+        current = [
+            self._component_digest(component, binding, root=None)
+            for component in self.COMPONENTS
+        ]
+        if self._aggregate_digest(current, "digest") != reverse["source_digest"]:
+            raise ValueError(
+                "The isolated tenant generation changed after reverse staging. Build a fresh path."
+            )
+
+    def _assert_shared_components_match(
+        self,
+        reverse: dict[str, Any],
+        binding: dict[str, str],
+        *,
+        allow_target: bool = False,
+        allow_purged: bool = False,
+    ) -> None:
+        for component in reverse["components"]:
+            current = self._shared_component_digest(component, binding)
+            admitted = {str(component["shared_baseline_digest"])}
+            if allow_target:
+                admitted.add(str(component["shared_target_digest"]))
+            if allow_purged:
+                admitted.add(str(component["shared_purged_digest"]))
+            if current not in admitted:
+                raise ValueError(
+                    f"Shared {component['id']} changed after reverse staging. Build a fresh path."
+                )
+
+    def _assert_shared_target(
+        self, reverse: dict[str, Any], binding: dict[str, str]
+    ) -> None:
+        self._assert_shared_component_values(reverse["components"], binding, "shared_target_digest")
+        current = [
+            {"id": item["id"], "digest": self._shared_component_digest(item, binding)}
+            for item in reverse["components"]
+        ]
+        if self._aggregate_digest(current, "digest") != reverse["shared_target_digest"]:
+            raise ValueError("The restored shared target does not match its verified digest.")
+
+    def _assert_shared_component_values(
+        self,
+        components: list[dict[str, Any]],
+        binding: dict[str, str],
+        key: str,
+    ) -> None:
+        for component in components:
+            if self._shared_component_digest(component, binding) != component[key]:
+                raise ValueError(f"Shared {component['id']} does not match {key}.")
+
     def _bound_migration(self, migration_id: str, binding: dict[str, str], status: str) -> dict[str, Any]:
         migration = self.registry.migration(migration_id)
         if not migration or migration["status"] != status:
@@ -948,6 +1486,380 @@ class TenantDataMigrationService:
                 ).fetchone()
             if row:
                 raise ValueError(f"{label} {row[0]} must finish or be cancelled before migration.")
+
+    def _stage_reverse_component(
+        self,
+        component: str,
+        binding: dict[str, str],
+        root: Path,
+    ) -> dict[str, Any]:
+        if component in TENANT_DIRECTORY_NAMES:
+            return self._stage_reverse_directory(component, binding, root)
+        return self._stage_reverse_database(component, binding, root)
+
+    def _stage_reverse_database(
+        self,
+        component: str,
+        binding: dict[str, str],
+        root: Path,
+    ) -> dict[str, Any]:
+        tenant = binding["tenant_scope_id"]
+        source = self.registry.path_for(component, tenant)
+        shared = self.registry.shared_path(component)
+        target = root / "shared" / SHARED_STORE_FILENAMES[component]
+        if not source.is_file() or not shared.is_file():
+            raise ValueError(f"Reverse migration requires both isolated and shared {component} stores.")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with closing(sqlite3.connect(shared)) as source_db, closing(
+            sqlite3.connect(target)
+        ) as target_db:
+            source_db.backup(target_db)
+        baseline_digest = self._database_logical_digest(target)
+        queries = self._queries(component, tenant)
+        with closing(sqlite3.connect(source)) as source_db, closing(
+            sqlite3.connect(target)
+        ) as target_db:
+            source_db.row_factory = sqlite3.Row
+            target_db.execute("BEGIN IMMEDIATE")
+            self._delete_tenant_rows(target_db, queries)
+            target_db.commit()
+        purged_digest = self._database_logical_digest(target)
+        counts: dict[str, int] = {}
+        with closing(sqlite3.connect(source)) as source_db, closing(
+            sqlite3.connect(target)
+        ) as target_db:
+            source_db.row_factory = sqlite3.Row
+            source_db.execute("BEGIN")
+            target_db.execute("BEGIN IMMEDIATE")
+            sink = hashlib.sha256()
+            for table, sql, params in queries:
+                counts[table] = self._copy_rows(
+                    source_db, target_db, table, sql, params, sink
+                )
+            target_db.commit()
+        source_digest = self._digest_path(source, queries)
+        target_tenant_digest = self._digest_path(target, queries)
+        if source_digest != target_tenant_digest:
+            raise ValueError(f"Reverse {component} tenant digest verification failed.")
+        return {
+            "id": component,
+            "kind": "sqlite",
+            "source_records": sum(counts.values()),
+            "tables": counts,
+            "source_digest": source_digest,
+            "shared_baseline_digest": baseline_digest,
+            "shared_purged_digest": purged_digest,
+            "shared_target_digest": self._database_logical_digest(target),
+            "target_tenant_digest": target_tenant_digest,
+            "verified": True,
+        }
+
+    def _stage_reverse_directory(
+        self,
+        component: str,
+        binding: dict[str, str],
+        root: Path,
+    ) -> dict[str, Any]:
+        tenant = binding["tenant_scope_id"]
+        route = self.registry.route(tenant)
+        generation = self.registry.directory_generation(component, tenant, route=route)
+        if generation != route.get("generation_id"):
+            raise ValueError(f"The active generation does not isolate {component}.")
+        source_root = self.registry.directory_for(component, tenant)
+        shared_root = (self.registry.data_root / TENANT_DIRECTORY_NAMES[component]).resolve()
+        target_root = root / "shared" / TENANT_DIRECTORY_NAMES[component]
+        target_root.mkdir(parents=True, exist_ok=True)
+        manifests = self.registry.manifested_files(
+            component, binding, storage_generation_id=generation
+        )
+        identity: list[dict[str, str]] = []
+        files: list[dict[str, str]] = []
+        for manifest in manifests:
+            relative = Path(str(manifest["relative_path"]))
+            source = (source_root / relative).resolve()
+            target = (target_root / relative).resolve()
+            shared_candidate = (shared_root / relative).resolve()
+            if (
+                source_root not in source.parents
+                or target_root not in target.parents
+                or shared_root not in shared_candidate.parents
+            ):
+                raise ValueError(f"Unsafe reverse {component} path: {relative.as_posix()}")
+            digest = self.registry._file_sha256(source) if source.is_file() else ""
+            if digest != str(manifest["content_sha256"]):
+                raise ValueError(f"The isolated {component} file changed: {relative.as_posix()}")
+            self._assert_shared_file_admissible(component, relative.as_posix(), binding)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, target)
+            if self.registry._file_sha256(target) != digest:
+                raise ValueError(f"The staged reverse {component} file changed during copy.")
+            identity.append({"path": relative.as_posix(), "sha256": digest})
+            files.append(
+                {
+                    "path": relative.as_posix(),
+                    "sha256": digest,
+                    "source_id": str(manifest.get("source_id") or ""),
+                }
+            )
+        source_digest = self._digest_file_identity(identity)
+        return {
+            "id": component,
+            "kind": "filesystem",
+            "source_records": len(files),
+            "files": files,
+            "source_digest": source_digest,
+            "shared_baseline_digest": self._shared_directory_digest(component, binding),
+            "shared_purged_digest": self._digest_file_identity([]),
+            "shared_target_digest": source_digest,
+            "target_tenant_digest": source_digest,
+            "verified": True,
+        }
+
+    def _assert_shared_file_admissible(
+        self,
+        component: str,
+        relative_path: str,
+        binding: dict[str, str],
+    ) -> None:
+        shared_root = (self.registry.data_root / TENANT_DIRECTORY_NAMES[component]).resolve()
+        candidate = (shared_root / relative_path).resolve()
+        with self.registry.connect() as database:
+            row = database.execute(
+                """SELECT tenant_scope_id,connection_alias,connection_fingerprint
+                FROM tenant_file_manifests WHERE component=?
+                AND storage_generation_id='' AND relative_path=?""",
+                (component, relative_path),
+            ).fetchone()
+        expected = (
+            binding["tenant_scope_id"], binding["alias"], binding["fingerprint"]
+        )
+        if row and tuple(row) != expected:
+            raise ValueError(f"Shared {component} path belongs to another tenant.")
+        if candidate.is_file() and not row:
+            raise ValueError(
+                f"Shared {component} path is unmanifested and cannot be overwritten: {relative_path}"
+            )
+
+    def _apply_reverse_component(
+        self,
+        component: dict[str, Any],
+        binding: dict[str, str],
+        root: Path,
+    ) -> None:
+        current = self._shared_component_digest(component, binding)
+        if current == component["shared_target_digest"]:
+            return
+        if current != component["shared_baseline_digest"]:
+            raise ValueError(f"Shared {component['id']} changed before reverse apply.")
+        if component["kind"] == "filesystem":
+            self._apply_reverse_directory(component, binding, root)
+        else:
+            target = root / "shared" / SHARED_STORE_FILENAMES[component["id"]]
+            shared = self.registry.shared_path(component["id"])
+            if self._database_logical_digest(target) != component["shared_target_digest"]:
+                raise ValueError(f"The staged reverse {component['id']} database changed.")
+            # SQLite's backup API replaces the destination as one database
+            # transaction and remains portable when Windows processes retain a
+            # handle to the shared database file. A filesystem rename cannot
+            # provide that guarantee on Windows.
+            with closing(sqlite3.connect(target)) as source_db, closing(
+                sqlite3.connect(shared)
+            ) as shared_db:
+                source_db.backup(shared_db)
+        if self._shared_component_digest(component, binding) != component["shared_target_digest"]:
+            raise ValueError(f"Shared {component['id']} failed post-apply verification.")
+
+    def _apply_reverse_directory(
+        self,
+        component: dict[str, Any],
+        binding: dict[str, str],
+        root: Path,
+    ) -> None:
+        component_id = str(component["id"])
+        shared_root = (self.registry.data_root / TENANT_DIRECTORY_NAMES[component_id]).resolve()
+        staged_root = root / "shared" / TENANT_DIRECTORY_NAMES[component_id]
+        target_paths = {str(item["path"]) for item in component.get("files", [])}
+        existing = self.registry.manifested_files(
+            component_id, binding, storage_generation_id=""
+        )
+        for manifest in existing:
+            relative = str(manifest["relative_path"])
+            if relative in target_paths:
+                continue
+            candidate = (shared_root / relative).resolve()
+            if shared_root not in candidate.parents:
+                raise ValueError(f"Unsafe shared {component_id} manifest path.")
+            if not candidate.is_file() or self.registry._file_sha256(candidate) != manifest[
+                "content_sha256"
+            ]:
+                raise ValueError(f"Shared {component_id} changed before reverse apply.")
+            candidate.unlink()
+            self._delete_file_manifest(component_id, "", relative, binding)
+        for item in component.get("files", []):
+            relative = str(item["path"])
+            self._assert_shared_file_admissible(component_id, relative, binding)
+            staged = (staged_root / relative).resolve()
+            target = (shared_root / relative).resolve()
+            if staged_root not in staged.parents or shared_root not in target.parents:
+                raise ValueError(f"Unsafe staged {component_id} reverse path.")
+            if not staged.is_file() or self.registry._file_sha256(staged) != item["sha256"]:
+                raise ValueError(f"The staged reverse {component_id} file changed.")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            temporary = target.with_name(f".{target.name}.{uuid4().hex}.reverse.tmp")
+            try:
+                shutil.copy2(staged, temporary)
+                os.replace(temporary, target)
+            finally:
+                if temporary.exists():
+                    temporary.unlink()
+            self.registry.register_file(
+                component_id,
+                target,
+                binding,
+                source_id=str(item.get("source_id") or ""),
+                storage_generation_id="",
+                count_write=False,
+            )
+
+    def _purge_shared_component(
+        self,
+        component: dict[str, Any],
+        binding: dict[str, str],
+    ) -> None:
+        current = self._shared_component_digest(component, binding)
+        if current == component["shared_purged_digest"]:
+            return
+        if current != component["shared_baseline_digest"]:
+            raise ValueError(f"Shared {component['id']} changed before finalization.")
+        if component["kind"] == "filesystem":
+            self._purge_shared_directory(str(component["id"]), binding)
+        else:
+            path = self.registry.shared_path(str(component["id"]))
+            with closing(sqlite3.connect(path)) as database:
+                database.execute("BEGIN IMMEDIATE")
+                self._delete_tenant_rows(
+                    database,
+                    self._queries(str(component["id"]), binding["tenant_scope_id"]),
+                )
+                database.commit()
+        if self._shared_component_digest(component, binding) != component[
+            "shared_purged_digest"
+        ]:
+            raise ValueError(f"Shared {component['id']} failed finalization verification.")
+
+    def _purge_shared_directory(
+        self, component: str, binding: dict[str, str]
+    ) -> None:
+        root = (self.registry.data_root / TENANT_DIRECTORY_NAMES[component]).resolve()
+        manifests = self.registry.manifested_files(
+            component, binding, storage_generation_id=""
+        )
+        for manifest in manifests:
+            relative = str(manifest["relative_path"])
+            candidate = (root / relative).resolve()
+            if root not in candidate.parents:
+                raise ValueError(f"Unsafe shared {component} manifest path.")
+            if not candidate.is_file() or self.registry._file_sha256(candidate) != manifest[
+                "content_sha256"
+            ]:
+                raise ValueError(f"Shared {component} changed before finalization.")
+            candidate.unlink()
+            self._delete_file_manifest(component, "", relative, binding)
+
+    def _delete_file_manifest(
+        self,
+        component: str,
+        generation: str,
+        relative: str,
+        binding: dict[str, str],
+    ) -> None:
+        with self.registry.connect() as database:
+            result = database.execute(
+                """DELETE FROM tenant_file_manifests WHERE component=?
+                AND storage_generation_id=? AND relative_path=? AND tenant_scope_id=?
+                AND connection_alias=? AND connection_fingerprint=?""",
+                (
+                    component,
+                    generation,
+                    relative,
+                    binding["tenant_scope_id"],
+                    binding["alias"],
+                    binding["fingerprint"],
+                ),
+            )
+            if not result.rowcount:
+                raise ValueError(f"Shared {component} ownership manifest changed.")
+
+    def _shared_component_digest(
+        self,
+        component: dict[str, Any],
+        binding: dict[str, str],
+    ) -> str:
+        component_id = str(component["id"])
+        if component.get("kind") == "filesystem" or component_id in TENANT_DIRECTORY_NAMES:
+            return self._shared_directory_digest(component_id, binding)
+        return self._database_logical_digest(self.registry.shared_path(component_id))
+
+    def _shared_directory_digest(
+        self,
+        component: str,
+        binding: dict[str, str],
+    ) -> str:
+        return self._directory_digest(
+            component,
+            binding,
+            self.registry.data_root,
+            "",
+        )
+
+    @classmethod
+    def _database_logical_digest(cls, path: Path) -> str:
+        if not path.is_file():
+            raise ValueError(f"Shared database is missing: {path.name}")
+        hasher = hashlib.sha256()
+        with closing(sqlite3.connect(f"file:{path.as_posix()}?mode=ro", uri=True)) as database:
+            database.row_factory = sqlite3.Row
+            database.execute("BEGIN")
+            tables = database.execute(
+                """SELECT name,COALESCE(sql,'') sql FROM sqlite_master
+                WHERE type='table' AND (name NOT LIKE 'sqlite_%' OR name='sqlite_sequence')
+                ORDER BY name"""
+            ).fetchall()
+            for table in tables:
+                name = str(table["name"])
+                quoted = name.replace('"', '""')
+                hasher.update(f"table:{name}\nschema:{table['sql']}\n".encode())
+                try:
+                    cursor = database.execute(f'SELECT * FROM "{quoted}" ORDER BY rowid')
+                    rows = cursor.fetchall()
+                except sqlite3.OperationalError:
+                    cursor = database.execute(f'SELECT * FROM "{quoted}"')
+                    rows = sorted(
+                        cursor.fetchall(),
+                        key=lambda row: json.dumps(tuple(row), default=str),
+                    )
+                columns = [str(item[0]) for item in cursor.description or []]
+                hasher.update(json.dumps(columns, separators=(",", ":")).encode())
+                hasher.update(b"\n")
+                for row in rows:
+                    hasher.update(
+                        json.dumps(tuple(row), separators=(",", ":"), default=str).encode()
+                    )
+                    hasher.update(b"\n")
+        return hasher.hexdigest()
+
+    @staticmethod
+    def _delete_tenant_rows(
+        database: sqlite3.Connection,
+        queries: list[tuple[str, str, tuple[Any, ...]]],
+    ) -> None:
+        for table, sql, params in reversed(queries):
+            where_at = sql.find(" WHERE ")
+            order_at = sql.rfind(" ORDER BY ")
+            if where_at < 0 or order_at < where_at:
+                raise ValueError(f"Tenant delete contract is invalid for {table}.")
+            predicate = sql[where_at:order_at]
+            database.execute(f'DELETE FROM "{table}"{predicate}', params)
 
     def _copy_component(
         self, component: str, binding: dict[str, str], root: Path

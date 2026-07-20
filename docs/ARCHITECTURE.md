@@ -429,11 +429,11 @@ there is deliberately no remote recovery route.
 
 ## Next production increments
 
-1. Add verified reverse migration and shared-source purge/finalization for routed generations
-2. Add OIDC group-to-alias assignment policy and encrypted credential backup/restore controls
-3. Add time-aligned durable multi-estate review packets without cross-tenant fact copying
-4. Add read-only deployment reconciliation for the audit operations pack when the Splunk MCP contract exposes the
+1. Add OIDC group-to-alias assignment policy and encrypted credential backup/restore controls
+2. Add time-aligned durable multi-estate review packets without cross-tenant fact copying
+3. Add read-only deployment reconciliation for the audit operations pack when the Splunk MCP contract exposes the
    required index and knowledge-object configuration fields
+4. Add retention and administrator cleanup policy for superseded tenant generations and reverse snapshots
 5. Complete release-candidate upgrade, installer, recovery, multi-instance, and security acceptance testing
 
 ### Physical isolation begins with a non-mutating plan
@@ -465,8 +465,22 @@ process-wide store-operation lock, refuses active tenant work, streams rows/file
 and hashes the same canonical identities on both sides. Verification does not change routing. Cutover repeats the
 source and target digests before atomically recording the generation route. Routed facades resolve the tenant on
 every operation and fail closed when an active generation is missing. The route records a durable write epoch;
-rollback to the retained shared source is legal only while that epoch remains zero. The shared duplicate is not yet
-purged, so this is routing isolation and a safe migration checkpoint—not final physical separation.
+rollback to the retained shared source is legal only while that epoch remains zero.
+
+`TenantDataMigrationService.stage_reverse` provides the write-preserving return path. Under the same operation
+lock, it revalidates the active full generation, snapshots every shared SQLite store, replaces only the selected
+tenant's rows with the isolated source, stages manifested files, and calculates per-component plus aggregate
+source, baseline, purged-state, and target digests. Routing remains isolated. Apply revalidates both sides and
+restores shared databases through SQLite's transactional backup API, avoiding unsafe database-file replacement
+on Windows. Files use manifest ownership, collision checks, temporary copies, and atomic rename. The route changes
+to shared only after all ten target digests pass.
+
+Shared-source finalization is a separate destructive gate. It accepts only a verified reverse record and exact
+operator-confirmed source/target digests, deletes only this tenant's rows and manifested files, verifies the
+precomputed purged digest for every component, and leaves isolated routing active. The reverse snapshot remains
+available and finalization/apply are resumable component by component. Drift in unrelated shared data fails
+closed instead of being overwritten. This is physical tenant data separation for routed components, not separate
+process, credential, audit, or policy authorities.
 
 ### Durable work is bound to an immutable connection revision
 

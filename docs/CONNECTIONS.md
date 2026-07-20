@@ -64,9 +64,15 @@ to the verified generation. A missing active generation fails closed instead of 
 
 The shared tenant rows remain sealed as a rollback source. Zero-write rollback can restore shared routing;
 the first isolated-generation mutation increments a durable write epoch and blocks direct rollback because it
-would hide newer data. A future reverse migration is required to preserve those writes. SignalRoom deliberately
-calls this state **isolated routing with source retained**, not complete physical isolation. Verified reverse
-migration and shared-source finalization must be completed before hard isolation can be claimed.
+would hide newer data. Administrators can then build a local verified return snapshot bound to the same alias,
+immutable revision, tenant scope, and generation. It preserves isolated writes by merging them into a clone of
+the current shared stores and records exact source, shared baseline, purged-state, and return-target digests.
+
+Returning to shared routing or finalizing shared duplicates revalidates those digests immediately before any
+mutation. An unrelated tenant's shared write therefore blocks the operation rather than being overwritten.
+Finalization removes only the selected tenant's proven rows and manifested files, keeps isolated routing active,
+and retains the verified snapshot for recovery. SignalRoom distinguishes **isolated routing with source
+retained** from **shared duplicates finalized**; control-plane policy, credentials, and audit remain shared.
 
 Administrators can add live Splunk aliases such as `production-us`, `production-eu`, or `security-lab`
 in Settings. Each alias has its own encrypted MCP token, tenant scope, endpoint/TLS identity, diagnostic

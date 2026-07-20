@@ -619,3 +619,161 @@ def test_legacy_reconciliation_adopts_only_exact_embedded_ownership(tmp_path) ->
     assert result["contract"]["files_moved_or_deleted"] is False
     assert registry.reconcile_legacy_files(EAST)["adopted_total"] == 0
     assert registry.inspect_files("discovery-files", EAST)["unbound_records"] == 1
+
+
+def test_verified_reverse_migration_preserves_isolated_writes_and_other_tenants(
+    tmp_path,
+) -> None:
+    east_artifact, west_artifact, *_ = seed_shared_stores(tmp_path)
+    registry, service = data_plane(tmp_path)
+    migration = service.stage(EAST, readiness_plan(), "security-admin")
+    service.cutover(migration["id"], EAST)
+    evidence = RoutedEvidenceStore(registry)
+    isolated = evidence.add(artifact(EAST, "East after cutover"))
+    discovery_root = registry.directory_for("discovery-files", EAST["tenant_scope_id"])
+    discovery_file = discovery_root / "east-after-cutover.json"
+    discovery_file.write_text("isolated discovery payload", encoding="utf-8")
+    registry.register_file("discovery-files", discovery_file, EAST, source_id="east-run")
+
+    reverse = service.stage_reverse(EAST, "security-admin")
+
+    assert reverse["status"] == "verified"
+    assert reverse["source_digest"]
+    assert reverse["shared_baseline_digest"] != reverse["shared_target_digest"]
+    assert registry.route(EAST["tenant_scope_id"])["mode"] == "isolated-routing"
+
+    applied = service.apply_reverse(
+        reverse["id"],
+        EAST,
+        reverse["source_digest"],
+        reverse["shared_target_digest"],
+    )
+
+    assert applied["status"] == "applied"
+    assert registry.route(EAST["tenant_scope_id"])["mode"] == "shared"
+    shared = EvidenceStore(tmp_path / "evidence.db")
+    assert shared.get(east_artifact.id, EAST["tenant_scope_id"])
+    assert shared.get(isolated.id, EAST["tenant_scope_id"])
+    assert shared.get(west_artifact.id, WEST["tenant_scope_id"])
+    assert (tmp_path / "artifacts" / discovery_file.name).read_text(encoding="utf-8") == (
+        "isolated discovery payload"
+    )
+    assert registry.manifested_files("discovery-files", EAST, storage_generation_id="")
+
+
+def test_shared_source_finalization_is_reversible_through_verified_snapshot(
+    tmp_path,
+) -> None:
+    east_artifact, west_artifact, *_ = seed_shared_stores(tmp_path)
+    registry, service = data_plane(tmp_path)
+    migration = service.stage(EAST, readiness_plan(), "security-admin")
+    service.cutover(migration["id"], EAST)
+    isolated = RoutedEvidenceStore(registry).add(artifact(EAST, "Finalized east evidence"))
+    reverse = service.stage_reverse(EAST, "security-admin")
+
+    finalized = service.finalize_shared_source(
+        reverse["id"],
+        EAST,
+        reverse["source_digest"],
+        reverse["shared_target_digest"],
+    )
+
+    route = registry.route(EAST["tenant_scope_id"])
+    shared = EvidenceStore(tmp_path / "evidence.db")
+    assert finalized["status"] == "finalized-ready"
+    assert finalized["pre_finalize_shared_digest"]
+    assert route["mode"] == "isolated-routing"
+    assert route["shared_source_purged"] == 1
+    assert shared.get(east_artifact.id, EAST["tenant_scope_id"]) is None
+    assert shared.get(isolated.id, EAST["tenant_scope_id"]) is None
+    assert shared.get(west_artifact.id, WEST["tenant_scope_id"])
+    assert RoutedEvidenceStore(registry).get(isolated.id, EAST["tenant_scope_id"])
+    with pytest.raises(ValueError, match="verified reverse migration"):
+        service.rollback(migration["id"], EAST)
+
+    service.apply_reverse(
+        reverse["id"],
+        EAST,
+        reverse["source_digest"],
+        reverse["shared_target_digest"],
+    )
+
+    assert registry.route(EAST["tenant_scope_id"])["mode"] == "shared"
+    assert EvidenceStore(tmp_path / "evidence.db").get(isolated.id, EAST["tenant_scope_id"])
+    assert EvidenceStore(tmp_path / "evidence.db").get(west_artifact.id, WEST["tenant_scope_id"])
+
+
+def test_reverse_apply_blocks_unrelated_shared_changes_and_wrong_confirmation(
+    tmp_path,
+) -> None:
+    seed_shared_stores(tmp_path)
+    registry, service = data_plane(tmp_path)
+    migration = service.stage(EAST, readiness_plan(), "security-admin")
+    service.cutover(migration["id"], EAST)
+    reverse = service.stage_reverse(EAST, "security-admin")
+
+    with pytest.raises(ValueError, match="digest confirmation"):
+        service.apply_reverse(
+            reverse["id"], EAST, "0" * 64, reverse["shared_target_digest"]
+        )
+
+    EvidenceStore(tmp_path / "evidence.db").add(artifact(WEST, "West changed later"))
+    with pytest.raises(ValueError, match="Shared evidence changed"):
+        service.apply_reverse(
+            reverse["id"],
+            EAST,
+            reverse["source_digest"],
+            reverse["shared_target_digest"],
+        )
+    assert registry.route(EAST["tenant_scope_id"])["mode"] == "isolated-routing"
+
+
+def test_failed_reverse_refresh_retains_last_verified_path(tmp_path, monkeypatch) -> None:
+    seed_shared_stores(tmp_path)
+    registry, service = data_plane(tmp_path)
+    migration = service.stage(EAST, readiness_plan(), "security-admin")
+    service.cutover(migration["id"], EAST)
+    verified = service.stage_reverse(EAST, "security-admin")
+
+    monkeypatch.setattr(
+        service,
+        "_stage_reverse_component",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(ValueError("copy failed")),
+    )
+    with pytest.raises(ValueError, match="copy failed"):
+        service.stage_reverse(EAST, "security-admin")
+
+    assert registry.reverse_migration(verified["id"])["status"] == "verified"
+
+
+def test_interrupted_reverse_apply_recovers_as_resumable(tmp_path) -> None:
+    seed_shared_stores(tmp_path)
+    registry, service = data_plane(tmp_path)
+    migration = service.stage(EAST, readiness_plan(), "security-admin")
+    service.cutover(migration["id"], EAST)
+    isolated = RoutedEvidenceStore(registry).add(artifact(EAST, "Write before interruption"))
+    reverse = service.stage_reverse(EAST, "security-admin")
+    applying, _ = registry.begin_reverse_apply(reverse["id"])
+    service._apply_reverse_component(
+        applying["components"][0],
+        EAST,
+        registry.reverse_root(EAST["tenant_scope_id"], reverse["id"]),
+    )
+    assert EvidenceStore(tmp_path / "evidence.db").get(
+        isolated.id, EAST["tenant_scope_id"]
+    )
+
+    recovered = TenantDataPlaneRegistry(tmp_path / "tenant_isolation.db", tmp_path)
+
+    value = recovered.reverse_migration(reverse["id"])
+    assert value["status"] == "verified"
+    assert "restarted during reverse apply" in value["error"]
+    assert value["apply_available"] is True
+    result = TenantDataMigrationService(recovered).apply_reverse(
+        reverse["id"],
+        EAST,
+        reverse["source_digest"],
+        reverse["shared_target_digest"],
+    )
+    assert result["status"] == "applied"
+    assert recovered.route(EAST["tenant_scope_id"])["mode"] == "shared"

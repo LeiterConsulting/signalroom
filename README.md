@@ -170,10 +170,18 @@ After reviewing a current plan, an administrator can stage eight tenant-owned wo
 manifested discovery and case-export files into a generation beneath the tenant root. This step locally reads
 and copies payload rows/files, verifies canonical source/target digests, and leaves routing unchanged. Cutover
 rechecks both the current source and staged generation before activating the isolated route. Shared copies
-remain sealed as a rollback source;
-rollback is allowed only before the isolated generation accepts a write. SignalRoom therefore labels this
-state **isolated routing · source retained**, not complete physical isolation. Shared-source purge and a
-verified reverse-migration path remain future finalization gates.
+remain sealed as a rollback source, and direct rollback is allowed only before the isolated generation accepts
+a write.
+
+After cutover, **Build verified return path** creates a local, ten-component reverse snapshot: it clones the
+current shared stores, removes only the selected tenant's old rows/files, merges the isolated generation, and
+records exact isolated-source, shared-baseline, purged-state, and shared-target digests. It changes no runtime
+route. The administrator may apply that snapshot to return safely to shared routing, or explicitly finalize
+the tenant's shared duplicates while isolated routing remains active. Finalization is admitted only from a
+verified snapshot and retains that snapshot as the recovery path. Any isolated or unrelated shared-state drift
+blocks apply/finalize and requires fresh verification. SignalRoom reports **isolated routing · source retained**
+before finalization and **shared duplicates finalized** afterward; neither state implies process or control-plane
+isolation.
 
 The client discovers available tools and resolves common aliases such as `splunk_run_query` / `run_splunk_query`, `splunk_get_indexes` / `get_indexes`, and related SAIA SPL helpers.
 

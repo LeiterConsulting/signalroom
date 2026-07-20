@@ -181,7 +181,7 @@ def test_durable_analytics_expose_explicit_splunk_targets_and_provenance() -> No
     assert ".forecast-schedule-binding" in STYLES_CSS
 
 
-def test_tenant_isolation_is_readiness_only_and_keyboard_accessible() -> None:
+def test_tenant_isolation_and_verified_return_path_are_keyboard_accessible() -> None:
     assert 'id="tenantIsolationTarget"' in INDEX_HTML
     assert 'id="buildTenantIsolationPlan"' in INDEX_HTML
     assert "verifies manifested files by streaming SHA-256" in INDEX_HTML
@@ -189,7 +189,7 @@ def test_tenant_isolation_is_readiness_only_and_keyboard_accessible() -> None:
     assert "function renderTenantIsolationPlan(plan)" in APP_JS
     assert "async function buildTenantIsolationPlan()" in APP_JS
     assert "READINESS ONLY · NO DATA MOVED" in APP_JS
-    assert "before final physical isolation" in APP_JS
+    assert "Build verified return path" in APP_JS
     assert ".tenant-isolation-controls select:focus-visible" in STYLES_CSS
     assert ".tenant-isolation-controls button:focus-visible" in STYLES_CSS
     assert 'id="tenantDataPlaneSummary"' in INDEX_HTML
@@ -197,9 +197,13 @@ def test_tenant_isolation_is_readiness_only_and_keyboard_accessible() -> None:
     assert "Reconcile exact legacy ownership" in APP_JS
     assert "ambiguous files will remain blocked" in APP_JS
     assert "Activate verified route" in APP_JS
-    assert "Rollback active generation" in APP_JS
-    assert "physical cleanup is not final" in APP_JS
+    assert "Rollback zero-write generation" in APP_JS
+    assert "Return safely to shared routing" in APP_JS
+    assert "Finalize shared duplicates" in APP_JS
+    assert "shared duplicates are still retained" in APP_JS
     assert "data-cutover-tenant" in APP_JS
+    assert "data-apply-tenant-reverse" in APP_JS
+    assert "data-finalize-tenant-source" in APP_JS
     assert ".tenant-data-plane button:focus-visible" in STYLES_CSS
 
 

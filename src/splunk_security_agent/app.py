@@ -127,6 +127,7 @@ from .schemas import (
     TenantDataMigrationActionRequest,
     TenantDataMigrationRequest,
     TenantIsolationPlanRequest,
+    TenantReverseMigrationActionRequest,
     TimeSeriesAlertCandidateCreate,
     TimeSeriesBaselineAcceptRequest,
     TimeSeriesForecastExecutionRequest,
@@ -1391,6 +1392,129 @@ async def rollback_tenant_data_migration(
             "migration_id": result["id"],
             "generation_id": result["generation_id"],
             "post_cutover_writes": 0,
+        },
+        actor=actor,
+    )
+    return result
+
+
+@app.post("/api/tenant-isolation/reverse-migrations", status_code=201)
+async def stage_tenant_reverse_migration(
+    value: TenantDataMigrationActionRequest,
+    request: Request,
+) -> dict[str, Any]:
+    actor = _admin_actor(request)
+    scope = _request_scope(
+        value.connection_alias,
+        value.connection_fingerprint,
+        value.tenant_scope_id,
+    )
+    try:
+        result = services.tenant_data_plane.stage_reverse(scope, actor)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    services.audit.record(
+        "tenant.reverse-migration.verified",
+        "stage-and-verify",
+        target_type="tenant-scope",
+        target_id=scope["tenant_scope_id"],
+        summary=(
+            "Built a local reverse-migration snapshot, merged the isolated tenant into the "
+            "current shared databases and file roots, and verified exact digests. Routing did "
+            "not change."
+        ),
+        metadata={
+            "reverse_migration_id": result["id"],
+            "generation_id": result["generation_id"],
+            "source_digest": result["source_digest"],
+            "shared_baseline_digest": result["shared_baseline_digest"],
+            "shared_target_digest": result["shared_target_digest"],
+            "routing_changed": False,
+        },
+        actor=actor,
+    )
+    return result
+
+
+@app.post("/api/tenant-isolation/reverse-migrations/{reverse_id}/apply")
+async def apply_tenant_reverse_migration(
+    reverse_id: str,
+    value: TenantReverseMigrationActionRequest,
+    request: Request,
+) -> dict[str, Any]:
+    actor = _admin_actor(request)
+    scope = _request_scope(
+        value.connection_alias,
+        value.connection_fingerprint,
+        value.tenant_scope_id,
+    )
+    try:
+        result = services.tenant_data_plane.apply_reverse(
+            reverse_id,
+            scope,
+            value.expected_source_digest,
+            value.expected_shared_target_digest,
+        )
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    services.audit.record(
+        "tenant.reverse-migration.applied",
+        "reverse-cutover",
+        target_type="tenant-scope",
+        target_id=scope["tenant_scope_id"],
+        summary=(
+            "Applied a digest-verified reverse snapshot and returned the tenant to shared "
+            "routing without discarding isolated-generation writes."
+        ),
+        metadata={
+            "reverse_migration_id": result["id"],
+            "generation_id": result["generation_id"],
+            "source_digest": result["source_digest"],
+            "shared_target_digest": result["shared_target_digest"],
+            "routing_mode": "shared",
+        },
+        actor=actor,
+    )
+    return result
+
+
+@app.post("/api/tenant-isolation/reverse-migrations/{reverse_id}/finalize")
+async def finalize_tenant_shared_source(
+    reverse_id: str,
+    value: TenantReverseMigrationActionRequest,
+    request: Request,
+) -> dict[str, Any]:
+    actor = _admin_actor(request)
+    scope = _request_scope(
+        value.connection_alias,
+        value.connection_fingerprint,
+        value.tenant_scope_id,
+    )
+    try:
+        result = services.tenant_data_plane.finalize_shared_source(
+            reverse_id,
+            scope,
+            value.expected_source_digest,
+            value.expected_shared_target_digest,
+        )
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    services.audit.record(
+        "tenant.shared-source.finalized",
+        "finalize",
+        target_type="tenant-scope",
+        target_id=scope["tenant_scope_id"],
+        summary=(
+            "Removed only the isolated tenant's digest-verified shared duplicates after proving "
+            "a reverse path. The active isolated generation remained authoritative."
+        ),
+        metadata={
+            "reverse_migration_id": result["id"],
+            "generation_id": result["generation_id"],
+            "source_digest": result["source_digest"],
+            "pre_finalize_shared_digest": result["pre_finalize_shared_digest"],
+            "post_finalize_shared_digest": result["shared_baseline_digest"],
+            "isolated_route_retained": True,
         },
         actor=actor,
     )
