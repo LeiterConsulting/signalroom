@@ -67,12 +67,17 @@ class DiscoveryJobService:
         self._active_task = None
         self._active_job_id = ""
 
-    def enqueue(self, depth: str, requested_by: str) -> DiscoveryJobRecord:
+    def enqueue(
+        self,
+        depth: str,
+        requested_by: str,
+        binding: dict[str, Any] | None = None,
+    ) -> DiscoveryJobRecord:
         if depth not in DISCOVERY_CALL_ESTIMATES:
             raise ValueError(f"Unsupported discovery depth: {depth}")
         if self.store.active_job() is not None:
             raise ValueError("A manual discovery job is already queued or running")
-        binding = (
+        binding = binding or (
             self.connection_binding()
             if self.connection_binding is not None
             else {
@@ -99,12 +104,19 @@ class DiscoveryJobService:
         self._wake.set()
         return job
 
-    def overview(self, limit: int = 20) -> dict[str, Any]:
-        active = self.store.active_job()
+    def overview(
+        self, limit: int = 20, tenant_scope_id: str | None = None
+    ) -> dict[str, Any]:
+        active = self.store.active_job(tenant_scope_id)
         return {
             "active_job": active.model_dump(mode="json") if active else None,
             "active_events": self.store.events(active.id) if active else [],
-            "jobs": [item.model_dump(mode="json") for item in self.store.list_jobs(limit=limit)],
+            "jobs": [
+                item.model_dump(mode="json")
+                for item in self.store.list_jobs(
+                    limit=limit, tenant_scope_id=tenant_scope_id
+                )
+            ],
             "required_calls": DISCOVERY_CALL_ESTIMATES,
             "worker": {
                 "online": bool(self._worker and not self._worker.done()),
@@ -220,6 +232,14 @@ class DiscoveryJobService:
                     return
 
             pipeline = self.pipeline_factory(client)
+            if hasattr(pipeline, "set_scope"):
+                pipeline.set_scope(
+                    {
+                        "alias": running.connection_alias,
+                        "fingerprint": running.connection_fingerprint,
+                        "tenant_scope_id": running.tenant_scope_id,
+                    }
+                )
             async with client.scope(f"discovery-job:{job_id}", progress):
                 if self.run_lock is not None:
                     if self.run_lock.locked():

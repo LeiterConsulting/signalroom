@@ -94,3 +94,45 @@ def test_overlapping_chunks_and_search_excerpts_do_not_begin_mid_word(tmp_path):
     result = store.search("telemetry validation")[0]
     assert not result.excerpt.startswith("ership")
     assert len(result.excerpt) <= 605
+
+
+def test_artifact_retrieval_and_embeddings_are_tenant_scoped(tmp_path):
+    store = EvidenceStore(tmp_path / "evidence.db")
+    primary = store.add(
+        ArtifactCreate(
+            title="Shared runbook name",
+            content="unique identity telemetry procedure",
+            tenant_scope_id="tenant-primary",
+            connection_alias="primary",
+            connection_fingerprint="a" * 64,
+        )
+    )
+    secondary = store.add(
+        ArtifactCreate(
+            title="Shared runbook name",
+            content="unique identity telemetry procedure",
+            tenant_scope_id="tenant-secondary",
+            connection_alias="secondary",
+            connection_fingerprint="b" * 64,
+        )
+    )
+    store.save_embeddings(
+        "securebert",
+        [(f"{primary.id}:0", [1.0, 0.0]), (f"{secondary.id}:0", [0.0, 1.0])],
+    )
+
+    assert primary.id != secondary.id
+    assert [item.id for item in store.list(tenant_scope_id="tenant-primary")] == [primary.id]
+    assert store.get(secondary.id, "tenant-primary") is None
+    assert {item.tenant_scope_id for item in store.search(
+        "identity telemetry", tenant_scope_id="tenant-primary"
+    )} == {"tenant-primary"}
+    assert store.embedding_status("securebert", "tenant-primary") == {
+        "total_chunks": 1,
+        "indexed_chunks": 1,
+        "pending_chunks": 0,
+    }
+    semantic = store.semantic_search(
+        [0.0, 1.0], "securebert", tenant_scope_id="tenant-primary"
+    )
+    assert {item.id for item in semantic} <= {f"{primary.id}:0"}

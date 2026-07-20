@@ -142,9 +142,11 @@ def test_investigation_columns_scroll_independently() -> None:
     assert "document.body.classList.toggle('chat-active', name === 'chat')" in APP_JS
     assert "body.chat-active{overflow:hidden}" in STYLES_CSS
     assert (
-        "body.chat-active .workspace{height:100vh;height:100dvh;"
+        "body.chat-active .workspace{display:grid;grid-template-rows:auto minmax(0,1fr);"
+        "height:100vh;height:100dvh;"
         "min-height:0;overflow:hidden}"
     ) in STYLES_CSS
+    assert "body.chat-active #chatView{height:auto;min-height:0;overflow:hidden}" in STYLES_CSS
     assert "body.chat-active .conversation-panel{min-height:0;overflow:hidden}" in STYLES_CSS
     assert (
         "body.chat-active .messages{min-height:0;overflow-x:hidden;overflow-y:auto;"
@@ -155,6 +157,15 @@ def test_investigation_columns_scroll_independently() -> None:
         "overflow-y:auto;overscroll-behavior:contain;scrollbar-gutter:stable}"
     ) in STYLES_CSS
     assert ".rail{position:fixed;" in STYLES_CSS
+
+
+def test_splunk_scope_selector_is_global_and_readable() -> None:
+    assert 'id="scopeSelect"' in INDEX_HTML
+    assert 'aria-label="Active Splunk instance and tenant scope"' in INDEX_HTML
+    assert "function scopePayload()" in APP_JS
+    assert "function scopedUrl(path, params = {})" in APP_JS
+    assert ".scope-selector select{" in STYLES_CSS
+    assert "@media(max-width:1100px){.chat-layout{grid-template-columns:1fr}" in STYLES_CSS
 
 
 def test_remote_audit_export_is_explicit_and_accessible() -> None:

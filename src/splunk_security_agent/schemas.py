@@ -264,6 +264,9 @@ class ChatRequest(BaseModel):
     huggingface_specialist: Literal["embedding", "ner"] | None = None
     execute_searches: bool = True
     mode: InvestigationMode = "auto"
+    connection_alias: str = Field(default="primary", min_length=1, max_length=120)
+    connection_fingerprint: str = Field(default="", max_length=64)
+    tenant_scope_id: str = Field(default="workspace-primary", min_length=1, max_length=160)
 
 
 class EvidenceRef(BaseModel):
@@ -273,6 +276,9 @@ class EvidenceRef(BaseModel):
     excerpt: str
     score: float = 0
     kind: str = "context"
+    connection_alias: str = "primary"
+    connection_fingerprint: str = ""
+    tenant_scope_id: str = "workspace-primary"
 
 
 class LedgerAction(BaseModel):
@@ -358,6 +364,9 @@ class ChatResponse(BaseModel):
     model_recommendations: list[ModelRecommendation] = Field(default_factory=list)
     enrichment: ResultEnrichment = Field(default_factory=ResultEnrichment)
     generated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    connection_alias: str = "primary"
+    connection_fingerprint: str = ""
+    tenant_scope_id: str = "workspace-primary"
 
 
 FeedbackRating = Literal["useful", "incorrect", "missing-evidence", "false-positive", "corrected"]
@@ -458,6 +467,9 @@ class ArtifactCreate(BaseModel):
     kind: str = "reference"
     tags: list[str] = Field(default_factory=list)
     source: str = Field(default="operator", max_length=240)
+    connection_alias: str = Field(default="primary", min_length=1, max_length=120)
+    connection_fingerprint: str = Field(default="", max_length=64)
+    tenant_scope_id: str = Field(default="workspace-primary", min_length=1, max_length=160)
 
 
 class ArtifactUpdate(BaseModel):
@@ -478,10 +490,16 @@ class ArtifactRecord(BaseModel):
     created_at: str
     updated_at: str
     metadata: dict[str, Any] = Field(default_factory=dict)
+    connection_alias: str = "primary"
+    connection_fingerprint: str = ""
+    tenant_scope_id: str = "workspace-primary"
 
 
 class DiscoveryRequest(BaseModel):
     depth: Literal["quick", "standard", "deep"] = "standard"
+    connection_alias: str = Field(default="primary", min_length=1, max_length=120)
+    connection_fingerprint: str = Field(default="", max_length=64)
+    tenant_scope_id: str = Field(default="workspace-primary", min_length=1, max_length=160)
 
 
 DiscoveryJobStatus = Literal[
@@ -873,6 +891,9 @@ class CaseCreate(BaseModel):
     severity: CaseSeverity = "medium"
     owner: str = Field(default="Unassigned", max_length=160)
     tags: list[str] = Field(default_factory=list)
+    connection_alias: str = Field(default="primary", min_length=1, max_length=120)
+    connection_fingerprint: str = Field(default="", max_length=64)
+    tenant_scope_id: str = Field(default="workspace-primary", min_length=1, max_length=160)
 
 
 class CaseUpdate(BaseModel):
@@ -924,6 +945,9 @@ class CaseRecord(BaseModel):
     updated_at: str
     item_count: int = 0
     items: list[CaseItemRecord] = Field(default_factory=list)
+    connection_alias: str = "primary"
+    connection_fingerprint: str = ""
+    tenant_scope_id: str = "workspace-primary"
 
 
 class CaseExportRequest(BaseModel):

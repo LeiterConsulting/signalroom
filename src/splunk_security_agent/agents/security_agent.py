@@ -96,9 +96,11 @@ class SecurityAgent:
         self.evidence = evidence
         self.splunk = splunk_client
         self.router = ModelRouter(config)
-        self.memory: dict[str, list[dict[str, str]]] = {}
+        self.memory: dict[tuple[str, str, str], list[dict[str, str]]] = {}
         self._entity_cache: dict[str, tuple[float, list[dict[str, Any]]]] = {}
-        self._retrieval_cache: dict[tuple[str, bool], tuple[float, list[EvidenceRef], str]] = {}
+        self._retrieval_cache: dict[
+            tuple[str, bool, str, str], tuple[float, list[EvidenceRef], str]
+        ] = {}
 
     def invalidate_context_cache(self) -> None:
         self._retrieval_cache.clear()
@@ -107,7 +109,12 @@ class SecurityAgent:
         self, request: ChatRequest, progress: ProgressCallback | None = None
     ) -> ChatResponse:
         conversation_id = request.conversation_id or str(uuid4())
-        history = self.memory.setdefault(conversation_id, [])[-8:]
+        memory_key = (
+            request.tenant_scope_id,
+            request.connection_fingerprint,
+            conversation_id,
+        )
+        history = self.memory.setdefault(memory_key, [])[-8:]
         mode = self.router.classify_mode(request.message, request.mode)
         profile_id, route = self.router.route_chat(request.message, request.model_profile, mode)
         live_query_intent = self._compile_live_query(request.message)
@@ -156,7 +163,12 @@ class SecurityAgent:
             progress=16,
         )
         retrieval_work = (
-            self._retrieve_evidence(request.message, specialist_retrieval_allowed)
+            self._retrieve_evidence(
+                request.message,
+                specialist_retrieval_allowed,
+                request.tenant_scope_id,
+                request.connection_fingerprint,
+            )
             if self._should_retrieve(request.message, request.include_context)
             and not live_query_intent
             else self._empty_retrieval()
@@ -402,7 +414,7 @@ class SecurityAgent:
         history.extend(
             [{"role": "user", "content": request.message}, {"role": "assistant", "content": answer}]
         )
-        self.memory[conversation_id] = history[-10:]
+        self.memory[memory_key] = history[-10:]
         response = ChatResponse(
             conversation_id=conversation_id,
             message=answer,
@@ -422,8 +434,12 @@ class SecurityAgent:
                 tool_provenance,
                 mode,
                 response_profile,
+                request.tenant_scope_id,
             ),
             enrichment=enrichment,
+            connection_alias=request.connection_alias,
+            connection_fingerprint=request.connection_fingerprint,
+            tenant_scope_id=request.tenant_scope_id,
         )
         await report_progress(
             progress,
@@ -445,13 +461,17 @@ class SecurityAgent:
         return response
 
     async def _retrieve_evidence(
-        self, query: str, allow_specialist: bool = False
+        self,
+        query: str,
+        allow_specialist: bool = False,
+        tenant_scope_id: str = "workspace-primary",
+        connection_fingerprint: str = "",
     ) -> tuple[list[EvidenceRef], str]:
-        cache_key = (query, allow_specialist)
+        cache_key = (query, allow_specialist, tenant_scope_id, connection_fingerprint)
         cached = self._retrieval_cache.get(cache_key)
         if cached and time.monotonic() - cached[0] < 60:
             return cached[1], f"{cached[2]} (cached)"
-        lexical = self.evidence.search(query, limit=24)
+        lexical = self.evidence.search(query, limit=24, tenant_scope_id=tenant_scope_id)
         settings = self.config.load()
         cloud_runtime = settings.specialist_runtime == "cloud"
         if not allow_specialist or (
@@ -463,7 +483,9 @@ class SecurityAgent:
         try:
             provider = self.router.provider(settings.embedding_model)
             specialist_label = "Local SecureBERT" if not cloud_runtime else "Hosted SecureBERT"
-            pending = self.evidence.pending_embeddings(settings.embedding_model, limit=48)
+            pending = self.evidence.pending_embeddings(
+                settings.embedding_model, limit=48, tenant_scope_id=tenant_scope_id
+            )
             inputs = [query, *(content for _, content in pending)]
             try:
                 query_encoder = getattr(provider, "query_embedding", None)
@@ -478,7 +500,9 @@ class SecurityAgent:
                     raw_vectors = await provider.embeddings(inputs)
             except ModelProviderError:
                 candidate_map = {item.id: item for item in lexical}
-                for item in self.evidence.semantic_candidates(limit=64):
+                for item in self.evidence.semantic_candidates(
+                    limit=64, tenant_scope_id=tenant_scope_id
+                ):
                     candidate_map.setdefault(item.id, item)
                 candidates = list(candidate_map.values())[:64]
                 scores = await provider.similarities(query, [candidate.excerpt for candidate in candidates])
@@ -516,7 +540,12 @@ class SecurityAgent:
                         if vector
                     ],
                 )
-            semantic = self.evidence.semantic_search(vectors[0], settings.embedding_model, limit=6)
+            semantic = self.evidence.semantic_search(
+                vectors[0],
+                settings.embedding_model,
+                limit=6,
+                tenant_scope_id=tenant_scope_id,
+            )
             merged: dict[str, EvidenceRef] = {item.id: item for item in lexical}
             for item in semantic:
                 if item.id not in merged or item.score > merged[item.id].score:
@@ -654,6 +683,8 @@ class SecurityAgent:
             context_matches, retrieval_mode = await self._retrieve_evidence(
                 correlation_query,
                 allow_semantic_retrieval,
+                request.tenant_scope_id,
+                request.connection_fingerprint,
             )
             context_matches = self._merge_evidence(
                 [], context_matches, limit=4, max_per_artifact=1
@@ -1615,6 +1646,7 @@ class SecurityAgent:
         provenance: dict[str, Any] | None,
         mode: str,
         executed_profile: str = "",
+        tenant_scope_id: str = "workspace-primary",
     ) -> list[ModelRecommendation]:
         """Recommend specialist follow-ups only when a search produced usable evidence."""
         provenance = provenance or {}
@@ -1748,7 +1780,7 @@ class SecurityAgent:
             )
 
         retrieval_profile = profiles.get(settings.embedding_model)
-        has_local_context = bool(self.evidence.list(limit=1))
+        has_local_context = bool(self.evidence.list(limit=1, tenant_scope_id=tenant_scope_id))
         retrieval_would_help = has_local_context and (
             result_count >= 5 or len(result_text) >= 1400 or mode in {"discovery", "detection", "hunt"}
         )

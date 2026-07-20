@@ -85,6 +85,7 @@ class DiscoveryPipeline:
         output_dir: Path | str = "data/artifacts",
         config: ConfigStore | None = None,
         model_inventory: Any | None = None,
+        connection_binding: dict[str, Any] | None = None,
     ):
         self.client = client
         self.evidence = evidence
@@ -93,13 +94,40 @@ class DiscoveryPipeline:
         self.config = config
         self.router = ModelRouter(config) if config else None
         self.model_inventory = model_inventory
+        self.set_scope(
+            connection_binding
+            or {
+                "alias": "primary",
+                "fingerprint": "",
+                "tenant_scope_id": "workspace-primary",
+            }
+        )
+
+    def set_scope(self, binding: dict[str, Any]) -> None:
+        self.connection_alias = str(binding.get("alias") or "primary")
+        self.connection_fingerprint = str(binding.get("fingerprint") or "")
+        self.tenant_scope_id = str(binding.get("tenant_scope_id") or "workspace-primary")
+
+    def _latest_path(self) -> Path:
+        safe_scope = re.sub(r"[^a-zA-Z0-9_.-]+", "-", self.tenant_scope_id).strip("-")
+        revision = self.connection_fingerprint[:12] or "legacy"
+        return self.output_dir / f"security_blueprint_latest_{safe_scope}_{revision}.json"
+
+    def _latest_blueprint(self) -> dict[str, Any] | None:
+        scoped = self._read_blueprint(self._latest_path())
+        if scoped:
+            return scoped
+        legacy = self.output_dir / "security_blueprint_latest.json"
+        if legacy.exists() and not list(self.output_dir.glob("security_blueprint_latest_*_*.json")):
+            return self._read_blueprint(legacy)
+        return None
 
     KNOWLEDGE_ROW_LIMIT = 1000
     KNOWLEDGE_PAGE_SIZE = 100
 
     def latest_summary(self) -> dict[str, Any] | None:
         """Return the latest renderable result without the large raw inventory catalogs."""
-        blueprint = self._read_blueprint(self.output_dir / "security_blueprint_latest.json")
+        blueprint = self._latest_blueprint()
         if not blueprint:
             return None
         posture = blueprint.get("security_posture", {})
@@ -132,6 +160,7 @@ class DiscoveryPipeline:
             "fingerprints",
             "artifacts",
             "knowledge_artifacts",
+            "provenance",
         )
         return {
             **{key: blueprint.get(key) for key in keys},
@@ -339,11 +368,14 @@ class DiscoveryPipeline:
             "provenance": {
                 "source": "Splunk MCP tools",
                 "mode": "read-only",
+                "connection_alias": self.connection_alias,
+                "connection_fingerprint": self.connection_fingerprint,
+                "tenant_scope_id": self.tenant_scope_id,
                 "collection_seconds": round((datetime.now(UTC) - started_at).total_seconds(), 2),
             },
         }
-        latest_path = self.output_dir / "security_blueprint_latest.json"
-        previous = self._read_blueprint(latest_path)
+        latest_path = self._latest_path()
+        previous = self._latest_blueprint()
         blueprint["changes"] = self._compare(previous, blueprint)
         blueprint["fingerprints"] = self._discovery_fingerprints(blueprint)
         model_started = datetime.now(UTC)
@@ -363,8 +395,10 @@ class DiscoveryPipeline:
             (datetime.now(UTC) - started_at).total_seconds(), 2
         )
         stamp = started_at.strftime("%Y%m%d_%H%M%S")
-        json_path = self.output_dir / f"security_blueprint_{stamp}.json"
-        brief_path = self.output_dir / f"security_brief_{stamp}.md"
+        scope_suffix = re.sub(r"[^a-zA-Z0-9_.-]+", "-", self.tenant_scope_id).strip("-")
+        revision = self.connection_fingerprint[:12] or "legacy"
+        json_path = self.output_dir / f"security_blueprint_{scope_suffix}_{revision}_{stamp}.json"
+        brief_path = self.output_dir / f"security_brief_{scope_suffix}_{revision}_{stamp}.md"
         knowledge_artifacts = self._index_knowledge(blueprint)
         await report_progress(
             progress,
@@ -387,6 +421,9 @@ class DiscoveryPipeline:
                 kind="discovery",
                 source="Splunk MCP discovery",
                 tags=["splunk", "discovery", depth],
+                connection_alias=self.connection_alias,
+                connection_fingerprint=self.connection_fingerprint,
+                tenant_scope_id=self.tenant_scope_id,
             ),
             metadata={"run_id": run_id, "blueprint": json_path.name},
         )
@@ -899,7 +936,7 @@ class DiscoveryPipeline:
                 "kind": item.kind,
                 "updated_at": item.updated_at,
             }
-            for item in self.evidence.list(limit=1000)
+            for item in self.evidence.list(limit=1000, tenant_scope_id=self.tenant_scope_id)
             if not item.kind.startswith("discovery")
         ]
         return self._fingerprint(artifacts)
@@ -1473,7 +1510,9 @@ class DiscoveryPipeline:
             }
         try:
             provider = self.router.provider(profile_id)
-            pending = self.evidence.pending_embeddings(profile_id, limit=64)
+            pending = self.evidence.pending_embeddings(
+                profile_id, limit=64, tenant_scope_id=self.tenant_scope_id
+            )
             query_encoder = getattr(provider, "query_embedding", None)
             document_encoder = getattr(provider, "document_embeddings", None)
             if callable(query_encoder) and callable(document_encoder):
@@ -1497,7 +1536,12 @@ class DiscoveryPipeline:
                         if vector
                     ],
                 )
-            candidates = self.evidence.semantic_search(query_vector, profile_id, limit=16)
+            candidates = self.evidence.semantic_search(
+                query_vector,
+                profile_id,
+                limit=16,
+                tenant_scope_id=self.tenant_scope_id,
+            )
             settings = self.config.load()
             reranker_id = settings.reranker_model
             reranked = False
@@ -2226,9 +2270,9 @@ class DiscoveryPipeline:
     def _index_knowledge(self, blueprint: dict[str, Any]) -> list[str]:
         if blueprint["depth"] == "quick":
             return []
-        for artifact in self.evidence.list(limit=500):
+        for artifact in self.evidence.list(limit=500, tenant_scope_id=self.tenant_scope_id):
             if artifact.kind == "discovery-knowledge":
-                self.evidence.delete(artifact.id)
+                self.evidence.delete(artifact.id, tenant_scope_id=self.tenant_scope_id)
         posture = blueprint["security_posture"]
         telemetry = posture["telemetry"]
         detection = posture["detections"]
@@ -2240,6 +2284,9 @@ class DiscoveryPipeline:
                 source="Splunk discovery knowledge",
                 tags=["splunk", "discovery", "telemetry", "latest"],
                 content=self._telemetry_document(blueprint, telemetry),
+                connection_alias=self.connection_alias,
+                connection_fingerprint=self.connection_fingerprint,
+                tenant_scope_id=self.tenant_scope_id,
             ),
             ArtifactCreate(
                 title="Latest Splunk detection and data-model catalog",
@@ -2247,6 +2294,9 @@ class DiscoveryPipeline:
                 source="Splunk discovery knowledge",
                 tags=["splunk", "discovery", "detections", "cim", "latest"],
                 content=self._detection_document(detection, posture["data_models"]),
+                connection_alias=self.connection_alias,
+                connection_fingerprint=self.connection_fingerprint,
+                tenant_scope_id=self.tenant_scope_id,
             ),
             ArtifactCreate(
                 title="Latest Splunk security posture assessment",
@@ -2254,6 +2304,9 @@ class DiscoveryPipeline:
                 source="Splunk discovery knowledge",
                 tags=["splunk", "discovery", "posture", "latest"],
                 content=self._posture_document(blueprint),
+                connection_alias=self.connection_alias,
+                connection_fingerprint=self.connection_fingerprint,
+                tenant_scope_id=self.tenant_scope_id,
             ),
         ]
         splunk_models = blueprint.get("splunk_models", {})
@@ -2265,6 +2318,9 @@ class DiscoveryPipeline:
                     source="Splunk MLTK discovery knowledge",
                     tags=["splunk", "discovery", "mltk", "models", "latest"],
                     content=self._mltk_document(splunk_models),
+                    connection_alias=self.connection_alias,
+                    connection_fingerprint=self.connection_fingerprint,
+                    tenant_scope_id=self.tenant_scope_id,
                 )
             )
         return [

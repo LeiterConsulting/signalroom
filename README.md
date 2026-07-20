@@ -9,6 +9,7 @@ This is a focused reimplementation inspired by [LeiterConsulting/splunk-discover
 - A polished local web workspace with setup, investigation chat, discovery, durable cases, context, and model views
 - Splunk MCP tool discovery and alias resolution for common server naming differences
 - Immutable Splunk connection revisions and tenant-scoped durable workflow bindings that fail closed before a call when Primary moves
+- An explicit Splunk-scope selector with tenant-gated artifacts, hybrid RAG, discovery state, investigation memory, cases, exports, and SignalRoom MCP tools
 - Layered Splunk MCP diagnostics across configuration, DNS, TCP, TLS identity, authentication, and depth-specific tool contracts
 - Parallel read-only quick, standard, and deep discovery with change detection, JSON blueprints, and briefs
 - First-class security discovery across telemetry freshness, detection health, data-model readiness, and reusable RAG knowledge
@@ -694,8 +695,10 @@ extend the durable golden and tournament authorities. Verified audit events can 
 Splunk index under an explicit HEC delivery policy. Optional single-issuer OIDC now adds PKCE, provider MFA
 evidence, exact tenant/group admission, immutable-subject binding, and host-only local-account recovery.
 Deployment-specific audit operations now add a destination-bound, disabled-by-default Splunk content pack and a
-local export-lag contract. The next production increment is multi-instance tenancy, per-connection authorization,
-and identity lifecycle provisioning/deprovisioning.
+local export-lag contract. Tenant-scoped evidence, cases, discovery history, and explicit instance selection now
+form the shared application boundary. The next production increment is executable additional Splunk aliases:
+per-alias credentials and health, per-connection authorization, alias-aware clients, and identity lifecycle
+provisioning/deprovisioning.
 
 ### Operator-authored evaluation suites
 
@@ -741,6 +744,8 @@ scheduler estimate. Splunk roles, workload pools, quotas, and search limits rema
 Context is the managed evidence available to retrieval. Artifacts can be filtered, searched, inspected in
 full, deep-linked by opaque ID, reused in an investigation, or converted into a validation plan. Runbooks and
 threat intelligence remain unverified context until current Splunk evidence supports them.
+The active Splunk scope gates artifact listing, mutation, lexical and semantic retrieval, embedding state, and
+SignalRoom MCP access. Each card exposes its alias, tenant, and immutable connection revision.
 
 ### Investigation cases
 
@@ -749,6 +754,7 @@ status (`open`, `investigating`, `contained`, `monitoring`, or `closed`), execut
 can add notes, observations, hypotheses, actions, decisions, context, and evidence to a chronological timeline.
 Evidence-led actions on the ledger, Discovery findings and hypotheses, and Context artifacts can all add an
 attributed item directly to an existing case or create a new one. Case links use opaque IDs and survive reloads.
+Case listing, mutation, export, and cockpit evidence resolution are limited to the selected tenant scope.
 
 The **Export handoff** action creates both a readable Markdown brief and a structured JSON record under the
 local data directory. These packages preserve ownership, case state, source, confidence, validation status,

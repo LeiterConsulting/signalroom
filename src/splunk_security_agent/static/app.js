@@ -1,6 +1,6 @@
 const state = {
   settings: null, artifacts: [], modelReadiness: null, conversationId: null, busy: false,
-  connections: null,
+  connections: null, activeScope: null,
   ledger: [], lastDiscovery: null, promptPath: [], contextKind: 'all', cases: [],
   activeCase: null, caseCockpit: null, pendingCaseItem: null, detailActions: [], contextPage: 1, contextPageSize: 9,
   contextItems: [], editingArtifactId: null, editingCaseItemId: null, demoTourStep: -1,
@@ -617,7 +617,7 @@ function openArtifactDetail(id, updateHash = true) {
     eyebrow:`${item.kind} · managed context`, title:item.title,
     summary:`<p>This item is stored so SignalRoom can retrieve it during relevant investigations. Review its source and freshness before treating it as authoritative.</p>`,
     content:`<h3>Content</h3><div class="artifact-full-content">${renderMarkdown(item.content)}</div>`,
-    provenance:`<h3>Provenance</h3><dl><div><dt>Source</dt><dd>${escapeHtml(item.source)}</dd></div><div><dt>Updated</dt><dd>${new Date(item.updated_at).toLocaleString()}</dd></div><div><dt>Tags</dt><dd>${escapeHtml(item.tags.join(', ') || 'none')}</dd></div></dl>`,
+    provenance:`<h3>Provenance</h3><dl><div><dt>Source</dt><dd>${escapeHtml(item.source)}</dd></div><div><dt>Splunk alias</dt><dd>${escapeHtml(item.connection_alias)}</dd></div><div><dt>Tenant scope</dt><dd><code>${escapeHtml(item.tenant_scope_id)}</code></dd></div><div><dt>Connection revision</dt><dd><code>${escapeHtml(item.connection_fingerprint)}</code></dd></div><div><dt>Updated</dt><dd>${new Date(item.updated_at).toLocaleString()}</dd></div><div><dt>Tags</dt><dd>${escapeHtml(item.tags.join(', ') || 'none')}</dd></div></dl>`,
     actions, permalink
   });
   if (updateHash) history.replaceState(null, '', permalink);
@@ -749,10 +749,62 @@ async function loadSettings() {
 async function loadConnections() {
   try {
     state.connections = await api('/api/connections');
+    const scopes = state.connections.execution_scopes || [];
+    const prior = state.activeScope ? scopeKey(state.activeScope) : '';
+    state.activeScope = scopes.find(item => scopeKey(item) === prior) || scopes[0] || state.connections.primary || null;
     renderConnections();
+    renderScopeSelector();
   } catch (_) {
     state.connections = null;
   }
+}
+
+function scopeKey(value = {}) {
+  return `${value.alias || 'primary'}|${value.fingerprint || ''}|${value.tenant_scope_id || 'workspace-primary'}`;
+}
+
+function activeScope() {
+  const value = state.activeScope || state.connections?.primary || {};
+  return {
+    connection_alias:value.alias || 'primary',
+    connection_fingerprint:value.fingerprint || '',
+    tenant_scope_id:value.tenant_scope_id || 'workspace-primary'
+  };
+}
+
+function scopePayload() { return activeScope(); }
+
+function scopedUrl(path, params = {}) {
+  const target = new URL(path, location.origin);
+  Object.entries({...params, ...scopePayload()}).forEach(([key,value]) => target.searchParams.set(key, value));
+  return `${target.pathname}${target.search}`;
+}
+
+function scopeLabel(value = {}) {
+  const label = value.alias === 'primary' ? 'Primary' : (value.display_name || value.alias || 'Splunk');
+  return `${label} · ${value.tenant_scope_id || 'workspace-primary'}`;
+}
+
+function renderScopeSelector() {
+  const select = $('#scopeSelect'); if (!select) return;
+  const scopes = state.connections?.execution_scopes || (state.connections?.primary ? [state.connections.primary] : []);
+  if (!scopes.length) return;
+  select.innerHTML = scopes.map(item => `<option value="${escapeHtml(scopeKey(item))}">${escapeHtml(scopeLabel(item))}</option>`).join('');
+  select.value = scopeKey(state.activeScope || scopes[0]);
+  select.title = scopes.length < 2
+    ? 'Primary is the only executable Splunk identity. Additional instances will appear after they are configured.'
+    : 'Choose the Splunk instance and tenant evidence boundary for this workspace.';
+}
+
+async function switchScope(key) {
+  const scopes = state.connections?.execution_scopes || [];
+  const next = scopes.find(item => scopeKey(item) === key);
+  if (!next || scopeKey(next) === scopeKey(state.activeScope || {})) return;
+  state.activeScope = next;
+  state.activeCase = null; state.caseCockpit = null; state.lastDiscovery = null;
+  resetConversation();
+  await Promise.all([loadArtifacts(), loadCases(), loadLatestDiscovery(), loadDiscoveryJobs()]);
+  toast(`Active Splunk scope · ${scopeLabel(next)}`);
 }
 
 function shortFingerprint(value = '') {
@@ -796,7 +848,7 @@ function renderConnections() {
   const catalog = value.additional_mcp_connections || {};
   $('#futureMcpIntro').innerHTML = `<b>Why add another MCP?</b><p>${escapeHtml(catalog.mission || '')}</p><span>Architecture preview · connection setup will arrive in a future release</span>`;
   $('#futureMcpGrid').innerHTML = (catalog.suggestions || []).map(item => `<article><header><span>${escapeHtml(item.priority || 'later')}</span><b>${escapeHtml(item.label)}</b></header><p>${escapeHtml(item.purpose)}</p><dl><dt>Expected value</dt><dd>${escapeHtml(item.expected_value)}</dd><dt>Authority boundary</dt><dd>${escapeHtml(item.authority)}</dd></dl></article>`).join('');
-  $('#futureMcpAdmission').innerHTML = `<b>Admission contract before any connector is enabled</b><ul>${(catalog.admission_requirements || []).map(item => `<li>${escapeHtml(item)}</li>`).join('')}</ul><small>Tenant scope is currently execution and evidence metadata. Full multi-tenant database isolation is not represented as complete.</small>`;
+  $('#futureMcpAdmission').innerHTML = `<b>Admission contract before any connector is enabled</b><ul>${(catalog.admission_requirements || []).map(item => `<li>${escapeHtml(item)}</li>`).join('')}</ul><small>Tenant scope now gates evidence, cases, discovery history, and investigation retrieval. Separate per-tenant database files remain a future hard-isolation option.</small>`;
 }
 
 async function rebindConnectionWorkflow(button) {
@@ -1886,7 +1938,7 @@ async function activateModel(profileId, button) {
 }
 
 async function loadArtifacts() {
-  state.artifacts = await api('/api/artifacts');
+  state.artifacts = await api(scopedUrl('/api/artifacts'));
   $('#artifactCount').textContent = state.artifacts.length;
   state.contextPage = 1;
   renderArtifacts(filterArtifacts(state.artifacts));
@@ -1913,6 +1965,7 @@ function renderArtifacts(items) {
       <header><span class="kind">${escapeHtml(item.kind)}</span><span class="artifact-admin-actions"><button data-edit-artifact="${item.id}">Edit</button><button class="delete-artifact" data-delete="${item.id}">Delete</button></span></header>
       <h3><button class="artifact-title" data-open-artifact="${item.id}">${escapeHtml(item.title)}</button></h3><p>${escapeHtml(item.content.slice(0, 190))}</p>
       <div class="tags">${item.tags.slice(0,5).map(tag => `<span>${escapeHtml(tag)}</span>`).join('')}</div>
+      <div class="scope-provenance"><span>${escapeHtml(item.connection_alias)}</span><code>${escapeHtml(item.tenant_scope_id)}</code><code>${escapeHtml(shortFingerprint(item.connection_fingerprint))}</code></div>
       <footer><span>${escapeHtml(item.source)}</span><span>${new Date(item.updated_at).toLocaleDateString()}</span></footer>
       <div class="card-actions"><button data-open-artifact="${item.id}">Inspect</button><button data-artifact-investigate="${item.id}">Investigate</button><button data-artifact-case="${item.id}">Add to case</button></div>
     </article>`).join('') : '<div class="empty-inline">No artifacts match this search.</div>';
@@ -1934,13 +1987,13 @@ function openArtifactEditor(item = null) {
 async function removeArtifact(id) {
   const item = state.artifacts.find(artifact => artifact.id === id);
   if (!item || !confirm(`Delete “${item.title}” from local context and RAG? This cannot be undone.`)) return;
-  await api(`/api/artifacts/${encodeURIComponent(id)}`, { method:'DELETE' });
+  await api(scopedUrl(`/api/artifacts/${encodeURIComponent(id)}`), { method:'DELETE' });
   if (!$('#detailModal').hidden) closeDetail();
   await loadArtifacts(); toast('Artifact deleted');
 }
 
 async function loadCases() {
-  state.cases = await api('/api/cases');
+  state.cases = await api(scopedUrl('/api/cases'));
   $('#caseCount').textContent = state.cases.length;
   $('#caseListCount').textContent = `${state.cases.length} total`;
   renderCaseList();
@@ -1953,15 +2006,15 @@ function renderCaseList() {
   $('#caseList').innerHTML = state.cases.length ? state.cases.map(item => `
     <button class="case-list-item ${state.activeCase?.id === item.id ? 'active' : ''}" data-open-case="${escapeHtml(item.id)}">
       <span><b>${escapeHtml(item.title)}</b><em class="case-severity ${escapeHtml(item.severity)}">${escapeHtml(item.severity)}</em></span>
-      <small>${escapeHtml(item.owner)} · ${escapeHtml(item.status)}</small>
+      <small>${escapeHtml(item.owner)} · ${escapeHtml(item.status)} · ${escapeHtml(item.tenant_scope_id)}</small>
       <footer><span>${item.item_count} timeline item${item.item_count === 1 ? '' : 's'}</span><time>${new Date(item.updated_at).toLocaleDateString()}</time></footer>
     </button>`).join('') : '<div class="case-list-empty"><b>No cases yet</b><p>Create a case, then preserve evidence from Investigate, Discovery, or Context.</p></div>';
 }
 
 async function openCase(id, updateHash = true) {
   [state.activeCase, state.caseCockpit] = await Promise.all([
-    api(`/api/cases/${encodeURIComponent(id)}`),
-    api(`/api/cases/${encodeURIComponent(id)}/cockpit`)
+    api(scopedUrl(`/api/cases/${encodeURIComponent(id)}`)),
+    api(scopedUrl(`/api/cases/${encodeURIComponent(id)}/cockpit`))
   ]);
   renderCaseList(); renderCaseDetail();
   if (updateHash) history.replaceState(null, '', `${location.pathname}#cases/${encodeURIComponent(id)}`);
@@ -2006,7 +2059,7 @@ function renderCaseDetail() {
   }).join('') : '<div class="case-timeline-empty"><b>The timeline is ready.</b><p>Add an analyst note, or preserve evidence directly from Investigate, Discovery, or Context.</p></div>';
   $('#caseDetail').innerHTML = `
     <div class="case-detail-header">
-      <div><p class="eyebrow">CASE ${escapeHtml(item.id.slice(0, 8).toUpperCase())}</p><h2>${escapeHtml(item.title)}</h2><p>Created ${new Date(item.created_at).toLocaleString()} · Updated ${new Date(item.updated_at).toLocaleString()}</p></div>
+      <div><p class="eyebrow">CASE ${escapeHtml(item.id.slice(0, 8).toUpperCase())}</p><h2>${escapeHtml(item.title)}</h2><p>Created ${new Date(item.created_at).toLocaleString()} · Updated ${new Date(item.updated_at).toLocaleString()}</p><div class="scope-provenance"><span>${escapeHtml(item.connection_alias)}</span><code>${escapeHtml(item.tenant_scope_id)}</code><code>${escapeHtml(shortFingerprint(item.connection_fingerprint))}</code></div></div>
       <div class="button-row"><button class="button danger" data-delete-case>Delete case</button><button class="button ghost" data-export-case>Export handoff</button><button class="button primary" data-add-case-item>Add timeline item</button></div>
     </div>
     <div class="case-lifecycle" aria-label="Case lifecycle">
@@ -2050,7 +2103,7 @@ async function openCasePicker(item) {
 }
 
 async function addItemToCase(caseId, item) {
-  await api(`/api/cases/${encodeURIComponent(caseId)}/items`, { method:'POST', body:JSON.stringify(item) });
+  await api(scopedUrl(`/api/cases/${encodeURIComponent(caseId)}/items`), { method:'POST', body:JSON.stringify(item) });
   state.pendingCaseItem = null;
   await loadCases(); await openCase(caseId, false);
   toast('Added to the case timeline');
@@ -2058,7 +2111,7 @@ async function addItemToCase(caseId, item) {
 
 async function exportActiveCase() {
   if (!state.activeCase) return;
-  const result = await api(`/api/cases/${encodeURIComponent(state.activeCase.id)}/export`, { method:'POST', body:JSON.stringify({ formats:['markdown','json'] }) });
+  const result = await api(scopedUrl(`/api/cases/${encodeURIComponent(state.activeCase.id)}/export`), { method:'POST', body:JSON.stringify({ formats:['markdown','json'] }) });
   const holder = $('#caseExports'); holder.hidden = false;
   holder.innerHTML = `<b>Handoff package ready</b><span>Files contain the case metadata and chronological timeline.</span>${result.files.map(file => `<a class="button ghost" href="${escapeHtml(file.url)}" download>${escapeHtml(file.format === 'md' ? 'Markdown brief' : 'JSON record')}</a>`).join('')}`;
   toast('Handoff package created');
@@ -2693,7 +2746,7 @@ function renderDiscoveryJobOverview(value) {
     const timestamp = new Date(job.completed_at || job.updated_at || job.created_at).toLocaleString();
     return `<article class="discovery-job-row ${escapeHtml(job.status)}">
       <div class="discovery-job-state"><span>${escapeHtml(discoveryStatusLabel(job.status))}</span><b>${escapeHtml(job.depth)}</b></div>
-      <div><b>${escapeHtml(job.label)}</b><p>${escapeHtml(job.detail || 'Waiting for activity.')}</p><small>${escapeHtml(timestamp)} · ${escapeHtml(callContract)}${escapeHtml(recovery)} · ${escapeHtml(job.requested_by)}</small></div>
+      <div><b>${escapeHtml(job.label)}</b><p>${escapeHtml(job.detail || 'Waiting for activity.')}</p><small>${escapeHtml(timestamp)} · ${escapeHtml(callContract)}${escapeHtml(recovery)} · ${escapeHtml(job.requested_by)} · ${escapeHtml(job.tenant_scope_id)}</small></div>
       <button class="button ghost small" type="button" data-inspect-discovery-job="${escapeHtml(job.id)}">${hasResult ? 'Open result' : (terminal ? 'Inspect run' : 'View live')}</button>
     </article>`;
   }).join('') : '<div class="empty-inline compact-empty">No durable manual discovery jobs have run yet.</div>';
@@ -2711,7 +2764,7 @@ async function loadDiscoveryJobs() {
   state.discoveryPollBusy = true;
   let active = null;
   try {
-    const value = await api('/api/discovery/jobs?limit=12');
+    const value = await api(scopedUrl('/api/discovery/jobs', {limit:12}));
     active = value.active_job;
     renderDiscoveryJobOverview(value);
     if (active) state.discoveryWatchingJobId = active.id;
@@ -2720,7 +2773,7 @@ async function loadDiscoveryJobs() {
       const completed = (value.jobs || []).find(item => item.id === completedId);
       state.discoveryWatchingJobId = null;
       if (completed?.result_run_id) {
-        const result = await api(`/api/discovery/jobs/${encodeURIComponent(completedId)}/result`);
+        const result = await api(scopedUrl(`/api/discovery/jobs/${encodeURIComponent(completedId)}/result`));
         renderDiscoveryResult(result);
         await loadArtifacts();
         toast(completed.status === 'partial' || completed.status === 'budget-blocked'
@@ -2738,7 +2791,7 @@ async function loadDiscoveryJobs() {
 
 async function inspectDiscoveryJob(jobId) {
   try {
-    const detail = await api(`/api/discovery/jobs/${encodeURIComponent(jobId)}`);
+    const detail = await api(scopedUrl(`/api/discovery/jobs/${encodeURIComponent(jobId)}`));
     beginDiscoveryProgress();
     (detail.events || []).forEach(updateDiscoveryProgress);
     const job = detail.job;
@@ -2746,7 +2799,7 @@ async function inspectDiscoveryJob(jobId) {
     $('#discoveryJobContract').textContent = `${job.depth} · ${job.calls_used}/${job.call_budget} Splunk calls · ${job.id.slice(0, 8)}${job.recovery_count ? ` · recovered ${job.recovery_count}×` : ''}`;
     $('#cancelDiscoveryJob').hidden = !['queued','running'].includes(job.status);
     if (detail.result_available) {
-      const result = await api(`/api/discovery/jobs/${encodeURIComponent(jobId)}/result`);
+      const result = await api(scopedUrl(`/api/discovery/jobs/${encodeURIComponent(jobId)}/result`));
       renderDiscoveryResult(result);
     } else {
       $('#discoveryStatus').textContent = `${discoveryStatusLabel(job.status)} · ${job.depth}`;
@@ -2760,7 +2813,7 @@ function renderEvidence(evidence = [], trace = [], ledger = []) {
   const toolObservations = ledger.filter(item => item.classification !== 'context' && item.status === 'observed');
   const inPlayCount = evidence.length + toolObservations.length;
   $('#evidenceCount').textContent = inPlayCount; $('#mobileEvidenceCount').textContent = ledger.length || inPlayCount; $('#evidenceEmpty').hidden = inPlayCount > 0;
-  const contextCards = evidence.map((item, index) => `<article class="evidence-card"><header><span class="ref">E${index+1}</span><b>${escapeHtml(item.title)}</b></header><p class="expandable-copy">${escapeHtml(item.excerpt)}</p>${item.excerpt.length > 260 ? '<div class="evidence-card-actions"><button data-toggle-copy>Show more</button></div>' : ''}<footer><span>${escapeHtml(item.source)}<b>score ${Number(item.score).toFixed(2)}</b></span><button data-open-artifact="${escapeHtml(item.id.split(':')[0])}">Inspect source</button></footer></article>`).join('');
+  const contextCards = evidence.map((item, index) => `<article class="evidence-card"><header><span class="ref">E${index+1}</span><b>${escapeHtml(item.title)}</b></header><div class="scope-provenance"><span>${escapeHtml(item.connection_alias)}</span><code>${escapeHtml(item.tenant_scope_id)}</code><code>${escapeHtml(shortFingerprint(item.connection_fingerprint))}</code></div><p class="expandable-copy">${escapeHtml(item.excerpt)}</p>${item.excerpt.length > 260 ? '<div class="evidence-card-actions"><button data-toggle-copy>Show more</button></div>' : ''}<footer><span>${escapeHtml(item.source)}<b>score ${Number(item.score).toFixed(2)}</b></span><button data-open-artifact="${escapeHtml(item.id.split(':')[0])}">Inspect source</button></footer></article>`).join('');
   const toolCards = toolObservations.map((item, index) => `<article class="evidence-card tool-evidence-card"><header><span class="ref">T${index+1}</span><b>Live Splunk observation</b></header><p class="expandable-copy">${escapeHtml(item.statement)}</p>${item.statement.length > 260 ? '<div class="evidence-card-actions"><button data-toggle-copy>Show more</button></div>' : ''}<footer><span>${escapeHtml(item.source)}<b>${escapeHtml(item.confidence)} confidence</b></span><button data-open-ledger="${escapeHtml(item.id)}">Inspect evidence</button></footer></article>`).join('');
   $('#evidenceList').innerHTML = contextCards + toolCards;
   $('#traceWrap').hidden = !trace.length;
@@ -2780,7 +2833,8 @@ async function sendChat(message, options = {}) {
       include_context: $('#includeContext').checked,
       huggingface_approved: Boolean(options.approveHf) || (!$('#hfQueryApproval').hidden && $('#approveHf').checked),
       huggingface_specialist: options.hfSpecialist || null,
-      execute_searches: true
+      execute_searches: true,
+      ...scopePayload()
     }, event => updateOperation($('#agentWork')?.querySelector('.agent-work'), event));
     state.conversationId = result.conversation_id; finishAgentWork();
     appendMessage('assistant', result.message, { model: result.model, profile: result.model_profile, route: result.route, taskType:result.mode, targetId:`${result.conversation_id}:${result.generated_at}`, activated:result.model_activation?.activated, suggestions: result.suggested_actions, modelRecommendations:result.model_recommendations, enrichment:result.enrichment });
@@ -2794,7 +2848,7 @@ async function runDiscovery() {
   const button = $('#runDiscovery'); button.disabled = true; button.textContent = 'Queuing…';
   $('#discoveryStatus').textContent = 'Queuing durable job'; beginDiscoveryProgress();
   try {
-    const job = await api('/api/discovery/jobs', { method:'POST', body:JSON.stringify({ depth:$('#discoveryDepth').value }) });
+    const job = await api('/api/discovery/jobs', { method:'POST', body:JSON.stringify({ depth:$('#discoveryDepth').value, ...scopePayload() }) });
     state.discoveryWatchingJobId = job.id;
     toast('Discovery queued; you can safely refresh this page');
     await loadDiscoveryJobs();
@@ -2808,7 +2862,7 @@ async function cancelDiscoveryJob() {
   const job = state.activeDiscoveryJob; if (!job) return;
   try {
     $('#cancelDiscoveryJob').disabled = true; $('#cancelDiscoveryJob').textContent = 'Stopping…';
-    await api(`/api/discovery/jobs/${encodeURIComponent(job.id)}/cancel`, { method:'POST', body:'{}' });
+    await api(scopedUrl(`/api/discovery/jobs/${encodeURIComponent(job.id)}/cancel`), { method:'POST', body:'{}' });
     toast('Discovery cancellation requested');
     await loadDiscoveryJobs();
   } catch (error) { toast(error.message); }
@@ -3585,14 +3639,15 @@ function renderDiscoveryResult(result) {
   const failedCalls = result.collection_status?.failed_calls || 0;
   const modelRoles = result.model_analysis?.models_used || 0;
   const reusedRoles = result.model_analysis?.roles_reused || 0;
-  $('#discoveryStatus').textContent = `${result.findings.length} findings · ${inventoryChanges} changes${modelRoles ? ` · ${modelRoles} local roles` : ''}${reusedRoles ? ` · ${reusedRoles} reused` : ''}${failedCalls ? ` · ${failedCalls} gaps` : ''}`;
+  const provenance = result.provenance || {};
+  $('#discoveryStatus').textContent = `${result.findings.length} findings · ${inventoryChanges} changes${modelRoles ? ` · ${modelRoles} local roles` : ''}${reusedRoles ? ` · ${reusedRoles} reused` : ''}${failedCalls ? ` · ${failedCalls} gaps` : ''} · ${provenance.tenant_scope_id || activeScope().tenant_scope_id}`;
   if (['quick','standard','deep'].includes(result.depth)) $('#discoveryDepth').value = result.depth;
   renderValidationCandidates(result);
   renderDiscoveryFollowup(result);
 }
 
 async function loadLatestDiscovery() {
-  const result = await api('/api/discovery/latest');
+  const result = await api(scopedUrl('/api/discovery/latest'));
   if (result?.run_id) renderDiscoveryResult(result);
 }
 
@@ -5019,13 +5074,13 @@ document.addEventListener('click', async event => {
   const pickedCase = event.target.closest('[data-pick-case]');
   if (pickedCase && state.pendingCaseItem) { $('#casePickerModal').hidden = true; await addItemToCase(pickedCase.dataset.pickCase, state.pendingCaseItem); setView('cases'); }
   if (event.target.closest('[data-save-case]') && state.activeCase) {
-    state.activeCase = await api(`/api/cases/${encodeURIComponent(state.activeCase.id)}`, { method:'PATCH', body:JSON.stringify({ title:$('#caseTitleInput').value.trim(), owner:$('#caseOwner').value.trim() || 'Unassigned', status:$('#caseStatus').value, severity:$('#caseSeverity').value, summary:$('#caseSummary').value.trim(), tags:$('#caseTags').value.split(',').map(value => value.trim()).filter(Boolean) }) });
+    state.activeCase = await api(scopedUrl(`/api/cases/${encodeURIComponent(state.activeCase.id)}`), { method:'PATCH', body:JSON.stringify({ title:$('#caseTitleInput').value.trim(), owner:$('#caseOwner').value.trim() || 'Unassigned', status:$('#caseStatus').value, severity:$('#caseSeverity').value, summary:$('#caseSummary').value.trim(), tags:$('#caseTags').value.split(',').map(value => value.trim()).filter(Boolean) }) });
     await loadCases(); toast('Case details saved');
   }
   if (event.target.closest('[data-delete-case]') && state.activeCase) {
     const item = state.activeCase;
     if (confirm(`Delete case “${item.title}” and all ${item.item_count} timeline items? This cannot be undone.`)) {
-      await api(`/api/cases/${encodeURIComponent(item.id)}`, { method:'DELETE' });
+      await api(scopedUrl(`/api/cases/${encodeURIComponent(item.id)}`), { method:'DELETE' });
       state.activeCase = null; await loadCases();
       $('#caseDetail').innerHTML = '<div class="case-empty"><div class="empty-glyph">▰</div><h3>Select or create a case</h3><p>Cases connect SignalRoom evidence to ownership, decisions, and a reviewable handoff timeline.</p></div>';
       history.replaceState(null, '', `${location.pathname}#cases`); toast('Case deleted');
@@ -5039,7 +5094,7 @@ document.addEventListener('click', async event => {
   }
   const deleteCaseItem = event.target.closest('[data-delete-case-item]');
   if (deleteCaseItem && state.activeCase && confirm('Remove this item from the case timeline?')) {
-    await api(`/api/cases/${encodeURIComponent(state.activeCase.id)}/items/${encodeURIComponent(deleteCaseItem.dataset.deleteCaseItem)}`, { method:'DELETE' });
+    await api(scopedUrl(`/api/cases/${encodeURIComponent(state.activeCase.id)}/items/${encodeURIComponent(deleteCaseItem.dataset.deleteCaseItem)}`), { method:'DELETE' });
     await loadCases(); toast('Timeline item removed');
   }
 });
@@ -5055,6 +5110,7 @@ $('#testOidcProvider').addEventListener('click', testOidcProvider);
 $('#chatInput').addEventListener('input', resizeComposer);
 $('#chatInput').addEventListener('keydown', event => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); $('#chatForm').requestSubmit(); } });
 $('#newConversation').addEventListener('click', resetConversation);
+$('#scopeSelect').addEventListener('change', event => switchScope(event.target.value).catch(error => toast(error.message)));
 $('#startDemoTour').addEventListener('click', startDemoTour);
 $('#demoTourClose').addEventListener('click', finishDemoTour);
 $('#demoTourBack').addEventListener('click', () => showDemoTourStep(state.demoTourStep - 1));
@@ -5139,14 +5195,14 @@ $('#contextSearch').addEventListener('input', async event => {
   const query = event.target.value.trim();
   state.contextPage = 1;
   if (!query) return renderArtifacts(filterArtifacts(state.artifacts));
-  const results = await api(`/api/context/search?q=${encodeURIComponent(query)}&limit=30`);
+  const results = await api(scopedUrl('/api/context/search', {q:query, limit:30}));
   const ids = new Set(results.map(item => item.id.split(':')[0])); renderArtifacts(filterArtifacts(state.artifacts.filter(item => ids.has(item.id))));
 });
 $('#artifactForm').addEventListener('submit', async event => {
   event.preventDefault();
-  const payload = { title:$('#newArtifactTitle').value.trim(), content:$('#newArtifactContent').value.trim(), kind:$('#newArtifactKind').value, tags:$('#newArtifactTags').value.split(',').map(x=>x.trim()).filter(Boolean), source:'operator' };
+  const payload = { title:$('#newArtifactTitle').value.trim(), content:$('#newArtifactContent').value.trim(), kind:$('#newArtifactKind').value, tags:$('#newArtifactTags').value.split(',').map(x=>x.trim()).filter(Boolean), source:'operator', ...scopePayload() };
   const editing = state.editingArtifactId;
-  await api(editing ? `/api/artifacts/${encodeURIComponent(editing)}` : '/api/artifacts', { method:editing ? 'PATCH' : 'POST', body:JSON.stringify(payload) });
+  await api(editing ? scopedUrl(`/api/artifacts/${encodeURIComponent(editing)}`) : '/api/artifacts', { method:editing ? 'PATCH' : 'POST', body:JSON.stringify(payload) });
   state.editingArtifactId = null; event.target.reset(); $('#artifactModal').hidden = true; await loadArtifacts(); toast(editing ? 'Artifact updated and re-indexed' : 'Artifact indexed');
 });
 $('#validationForm').addEventListener('submit', async event => {
@@ -5171,7 +5227,7 @@ let queryIntelligenceTimer;
 $('#caseForm').addEventListener('submit', async event => {
   event.preventDefault();
   const pending = state.pendingCaseItem;
-  const created = await api('/api/cases', { method:'POST', body:JSON.stringify({ title:$('#newCaseTitle').value.trim(), owner:$('#newCaseOwner').value.trim() || 'Unassigned', severity:$('#newCaseSeverity').value, summary:$('#newCaseSummary').value.trim(), tags:$('#newCaseTags').value.split(',').map(value => value.trim()).filter(Boolean) }) });
+  const created = await api('/api/cases', { method:'POST', body:JSON.stringify({ title:$('#newCaseTitle').value.trim(), owner:$('#newCaseOwner').value.trim() || 'Unassigned', severity:$('#newCaseSeverity').value, summary:$('#newCaseSummary').value.trim(), tags:$('#newCaseTags').value.split(',').map(value => value.trim()).filter(Boolean), ...scopePayload() }) });
   $('#caseModal').hidden = true; event.target.reset(); state.activeCase = created;
   if (pending) await addItemToCase(created.id, pending); else { await loadCases(); await openCase(created.id, false); toast('Case created'); }
   setView('cases'); history.replaceState(null, '', `${location.pathname}#cases/${encodeURIComponent(created.id)}`);
@@ -5183,13 +5239,13 @@ $('#caseItemForm').addEventListener('submit', async event => {
   const editing = state.editingCaseItemId;
   $('#caseItemModal').hidden = true; event.target.reset();
   if (editing) {
-    await api(`/api/cases/${encodeURIComponent(state.activeCase.id)}/items/${encodeURIComponent(editing)}`, { method:'PATCH', body:JSON.stringify(value) });
+    await api(scopedUrl(`/api/cases/${encodeURIComponent(state.activeCase.id)}/items/${encodeURIComponent(editing)}`), { method:'PATCH', body:JSON.stringify(value) });
     state.editingCaseItemId = null; state.pendingCaseItem = null; await loadCases(); toast('Timeline item updated');
   } else await addItemToCase(state.activeCase.id, value);
 });
 $('#fileInput').addEventListener('change', async event => {
   const file = event.target.files[0]; if (!file) return; const form = new FormData(); form.append('file', file);
-  try { await api('/api/artifacts/upload', { method:'POST', body:form }); await loadArtifacts(); toast('File indexed'); } catch(error) { toast(error.message); }
+  try { await api(scopedUrl('/api/artifacts/upload'), { method:'POST', body:form }); await loadArtifacts(); toast('File indexed'); } catch(error) { toast(error.message); }
   event.target.value = '';
 });
 

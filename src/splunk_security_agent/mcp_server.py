@@ -5,6 +5,15 @@ from typing import Any
 
 from .schemas import ArtifactCreate, ChatRequest, DiscoveryRequest
 
+SCOPE_PROPERTIES = {
+    "connection_alias": {"type": "string", "default": "primary"},
+    "connection_fingerprint": {
+        "type": "string",
+        "description": "Immutable revision of the selected Splunk connection.",
+    },
+    "tenant_scope_id": {"type": "string", "default": "workspace-primary"},
+}
+
 MCP_TOOLS = [
     {
         "name": "security_chat",
@@ -32,6 +41,7 @@ MCP_TOOLS = [
                     "enum": ["embedding", "ner"],
                     "description": "Scope the approved or local specialist pass to one capability.",
                 },
+                **SCOPE_PROPERTIES,
             },
             "required": ["message"],
         },
@@ -44,7 +54,10 @@ MCP_TOOLS = [
         ),
         "inputSchema": {
             "type": "object",
-            "properties": {"depth": {"type": "string", "enum": ["quick", "standard", "deep"]}},
+            "properties": {
+                "depth": {"type": "string", "enum": ["quick", "standard", "deep"]},
+                **SCOPE_PROPERTIES,
+            },
         },
     },
     {
@@ -52,14 +65,21 @@ MCP_TOOLS = [
         "description": "Search local discovery, runbook, SPL, and threat-intelligence evidence.",
         "inputSchema": {
             "type": "object",
-            "properties": {"query": {"type": "string"}, "limit": {"type": "integer", "default": 6}},
+            "properties": {
+                "query": {"type": "string"},
+                "limit": {"type": "integer", "default": 6},
+                **SCOPE_PROPERTIES,
+            },
             "required": ["query"],
         },
     },
     {
         "name": "list_artifacts",
         "description": "List managed contextual artifacts and discovery evidence.",
-        "inputSchema": {"type": "object", "properties": {"limit": {"type": "integer", "default": 50}}},
+        "inputSchema": {
+            "type": "object",
+            "properties": {"limit": {"type": "integer", "default": 50}, **SCOPE_PROPERTIES},
+        },
     },
     {
         "name": "save_context",
@@ -73,6 +93,7 @@ MCP_TOOLS = [
                 "content": {"type": "string"},
                 "kind": {"type": "string", "default": "reference"},
                 "tags": {"type": "array", "items": {"type": "string"}},
+                **SCOPE_PROPERTIES,
             },
             "required": ["title", "content"],
         },
@@ -86,10 +107,25 @@ class MCPServer:
         get_agent: Callable[[], Any],
         get_discovery: Callable[[], Any],
         evidence: Any,
+        resolve_scope: Callable[[str, str, str], dict[str, Any]] | None = None,
     ):
         self.get_agent = get_agent
         self.get_discovery = get_discovery
         self.evidence = evidence
+        self.resolve_scope = resolve_scope
+
+    def _scope(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        if self.resolve_scope is None:
+            return {
+                "alias": str(arguments.get("connection_alias") or "primary"),
+                "fingerprint": str(arguments.get("connection_fingerprint") or ""),
+                "tenant_scope_id": str(arguments.get("tenant_scope_id") or "workspace-primary"),
+            }
+        return self.resolve_scope(
+            str(arguments.get("connection_alias") or "primary"),
+            str(arguments.get("connection_fingerprint") or ""),
+            str(arguments.get("tenant_scope_id") or "workspace-primary"),
+        )
 
     async def handle(self, payload: dict[str, Any]) -> dict[str, Any] | None:
         request_id = payload.get("id")
@@ -121,22 +157,48 @@ class MCPServer:
             return self._error(request_id, -32000, str(exc))
 
     async def call_tool(self, name: str, arguments: dict[str, Any]) -> Any:
+        scope = self._scope(arguments)
         if name == "security_chat":
-            return (await self.get_agent().chat(ChatRequest.model_validate(arguments))).model_dump(
+            request = ChatRequest.model_validate(arguments).model_copy(
+                update={
+                    "connection_alias": scope["alias"],
+                    "connection_fingerprint": scope["fingerprint"],
+                    "tenant_scope_id": scope["tenant_scope_id"],
+                }
+            )
+            return (await self.get_agent().chat(request)).model_dump(
                 mode="json"
             )
         if name == "discover_splunk":
             request = DiscoveryRequest.model_validate(arguments or {})
-            return await self.get_discovery().run(request.depth)
+            discovery = self.get_discovery()
+            discovery.set_scope(scope)
+            return await discovery.run(request.depth)
         if name == "search_context":
             return [
                 item.model_dump(mode="json")
-                for item in self.evidence.search(arguments["query"], arguments.get("limit", 6))
+                for item in self.evidence.search(
+                    arguments["query"],
+                    arguments.get("limit", 6),
+                    tenant_scope_id=scope["tenant_scope_id"],
+                )
             ]
         if name == "list_artifacts":
-            return [item.model_dump(mode="json") for item in self.evidence.list(arguments.get("limit", 50))]
+            return [
+                item.model_dump(mode="json")
+                for item in self.evidence.list(
+                    arguments.get("limit", 50),
+                    tenant_scope_id=scope["tenant_scope_id"],
+                )
+            ]
         if name == "save_context":
-            record = ArtifactCreate.model_validate(arguments)
+            record = ArtifactCreate.model_validate(arguments).model_copy(
+                update={
+                    "connection_alias": scope["alias"],
+                    "connection_fingerprint": scope["fingerprint"],
+                    "tenant_scope_id": scope["tenant_scope_id"],
+                }
+            )
             return self.evidence.add(record).model_dump(mode="json")
         raise ValueError(f"Unknown tool: {name}")
 

@@ -21,8 +21,8 @@ class CaseCockpitService:
         self.validations = validations
         self.evidence = evidence
 
-    def build(self, case_id: str) -> dict[str, Any] | None:
-        case = self.cases.get(case_id)
+    def build(self, case_id: str, tenant_scope_id: str | None = None) -> dict[str, Any] | None:
+        case = self.cases.get(case_id, tenant_scope_id)
         if case is None:
             return None
         items = case.items
@@ -51,7 +51,12 @@ class CaseCockpitService:
                 if value
             }
         )
-        known_artifacts = {artifact.id for artifact in self.evidence.list(limit=1000)}
+        known_artifacts = {
+            artifact.id
+            for artifact in self.evidence.list(
+                limit=1000, tenant_scope_id=case.tenant_scope_id
+            )
+        }
         available_refs = [ref for ref in evidence_refs if ref in known_artifacts]
         title_states: dict[str, set[str]] = defaultdict(set)
         title_examples: dict[str, str] = {}
@@ -75,6 +80,9 @@ class CaseCockpitService:
         packet = self._context_packet(case, open_items, validations, tensions)
         return {
             "case_id": case.id,
+            "connection_alias": case.connection_alias,
+            "connection_fingerprint": case.connection_fingerprint,
+            "tenant_scope_id": case.tenant_scope_id,
             "generated_from_updated_at": case.updated_at,
             "health": {
                 "observations": len(by_kind["observation"]) + len(by_kind["evidence"]),

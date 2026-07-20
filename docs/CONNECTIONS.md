@@ -17,9 +17,16 @@ The bearer token is deliberately excluded. Rotating a credential for the same en
 contract does not move durable work to another evidence boundary, and SignalRoom never stores a token
 or token digest in the registry.
 
-The default tenant scope is `workspace-primary`. In this release it is durable execution and evidence
-metadata. It is the foundation for instance-aware authorization and retrieval; it is not a claim of
-separate tenant databases or complete multi-tenant isolation.
+The default tenant scope is `workspace-primary`. It is now an enforced query boundary for managed
+artifacts, lexical and semantic RAG retrieval, embedding queues and status, investigation memory,
+discovery history/latest state, cases, case cockpit evidence resolution, and SignalRoom's own MCP
+tools. Every result retains the alias, immutable connection fingerprint, and tenant scope that
+produced it. This is shared-database row filtering, not a claim of separate tenant databases or
+complete multi-tenant isolation.
+
+The application header exposes the active executable scope across Investigate, Discovery, Context,
+and Cases. Only Primary appears today. SignalRoom deliberately does not render fictitious tenants or
+non-executable architecture-preview connectors.
 
 ## Durable workflow behavior
 
@@ -50,10 +57,12 @@ contract. Before execution can span instances, SignalRoom still needs:
 
 - per-alias credential storage and health checks;
 - per-user and OIDC-group connection assignments;
-- tenant-scoped evidence retrieval and case rules;
-- an explicit instance selector in every tool-planning and scheduling surface;
 - cross-instance comparison rules that preserve source attribution; and
 - migration and backup controls for tenant-isolated data.
+
+Tenant-scoped evidence/case rules and the shared instance selector are implemented. Before a second
+alias becomes executable, SignalRoom still needs per-alias credential/health lifecycle, per-user alias
+grants, alias-aware client construction, and scheduling-policy selection.
 
 Until those controls ship, the additional-connection catalog in Settings is an architecture preview,
 not an executable connector manager.

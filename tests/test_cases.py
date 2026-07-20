@@ -178,3 +178,57 @@ def test_case_cockpit_links_evidence_validations_and_next_actions(tmp_path):
     assert cockpit["health"]["available_artifacts"] == 1
     assert cockpit["next_actions"][0]["validation_task_id"] == validation.id
     assert "Use this packet before requesting new SPL" in cockpit["context_packet"]
+
+
+def test_cases_and_cockpit_evidence_are_tenant_scoped(tmp_path):
+    cases = CaseStore(tmp_path / "cases.db", tmp_path / "exports")
+    evidence = EvidenceStore(tmp_path / "evidence.db")
+    validations = ValidationStore(tmp_path / "validations.db")
+    primary = cases.create(
+        CaseCreate(
+            title="Primary incident",
+            connection_alias="primary",
+            connection_fingerprint="a" * 64,
+            tenant_scope_id="tenant-primary",
+        )
+    )
+    secondary = cases.create(
+        CaseCreate(
+            title="Secondary incident",
+            connection_alias="secondary",
+            connection_fingerprint="b" * 64,
+            tenant_scope_id="tenant-secondary",
+        )
+    )
+    foreign_artifact = evidence.add(
+        ArtifactCreate(
+            title="Secondary-only evidence",
+            content="This evidence must not resolve in the primary case cockpit.",
+            connection_alias="secondary",
+            connection_fingerprint="b" * 64,
+            tenant_scope_id="tenant-secondary",
+        )
+    )
+    cases.add_item(
+        primary.id,
+        CaseItemCreate(
+            kind="evidence",
+            title="Foreign reference",
+            content="Synthetic cross-scope reference",
+            metadata={"artifact_id": foreign_artifact.id},
+        ),
+        tenant_scope_id="tenant-primary",
+    )
+
+    assert [item.id for item in cases.list(tenant_scope_id="tenant-primary")] == [primary.id]
+    assert cases.get(secondary.id, "tenant-primary") is None
+    assert cases.update(
+        secondary.id, CaseUpdate(status="closed"), "tenant-primary"
+    ) is None
+    cockpit = CaseCockpitService(cases, validations, evidence).build(
+        primary.id, "tenant-primary"
+    )
+    assert cockpit is not None
+    assert cockpit["tenant_scope_id"] == "tenant-primary"
+    assert cockpit["health"]["linked_artifacts"] == 1
+    assert cockpit["health"]["available_artifacts"] == 0

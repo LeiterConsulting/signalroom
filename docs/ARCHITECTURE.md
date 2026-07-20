@@ -409,9 +409,9 @@ there is deliberately no remote recovery route.
 
 ## Next production increments
 
-1. Tenant-scoped evidence retrieval, case boundaries, and explicit instance selection throughout Investigate
-2. Per-alias credentials, connection health, authorization, and identity lifecycle provisioning/deprovisioning
-3. Multi-instance comparison with source-preserving provenance and data-plane isolation
+1. Per-alias credentials, connection health, authorization, and identity lifecycle provisioning/deprovisioning
+2. Alias-aware Splunk client construction and durable scheduling-policy selection
+3. Multi-instance comparison with source-preserving provenance and optional data-plane isolation
 4. Read-only deployment reconciliation for the audit operations pack when the Splunk MCP contract exposes the
    required index and knowledge-object configuration fields
 
@@ -423,3 +423,16 @@ discovery, continuous assurance, and shadow forecasting copy that identity at cr
 before client creation. Drift fails closed with zero calls to the replacement instance. Explicit
 rebinds use optimistic concurrency and pause scheduling. The full contract and future multi-instance
 requirements are documented in [CONNECTIONS.md](CONNECTIONS.md).
+
+### The selected scope is a retrieval and case boundary
+
+The header selector is populated only from executable connection identities. Its alias, immutable
+fingerprint, and tenant scope are attached to chat, discovery, artifact, Context-search, case, and
+SignalRoom MCP requests. Evidence and case stores migrate legacy blank records once, stamp all new
+records, and apply tenant predicates to reads and mutations. Artifact IDs include the tenant and alias;
+conversation memory and retrieval caches include the tenant and connection revision. Discovery latest
+files and replacement knowledge documents are revision/scope specific. The case cockpit resolves
+artifact references only inside the case tenant.
+
+Primary is the only executable scope today. The schema and UI boundary are multi-instance ready, but
+client credentials and authorization remain intentionally single-alias until the next increment.

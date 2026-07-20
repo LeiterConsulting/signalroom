@@ -304,7 +304,34 @@ class Services:
         self.current_connection_binding()
         return self.connection_registry.validate(alias, fingerprint, tenant_scope_id)
 
+    def resolve_scope(
+        self,
+        alias: str = "primary",
+        fingerprint: str = "",
+        tenant_scope_id: str = "workspace-primary",
+    ) -> dict[str, Any]:
+        """Resolve a request to one executable immutable Splunk identity."""
+        current = self.current_connection_binding()
+        resolved_alias = alias.strip() or str(current["alias"])
+        resolved_tenant = tenant_scope_id.strip() or str(current["tenant_scope_id"])
+        resolved_fingerprint = fingerprint.strip() or (
+            str(current["fingerprint"]) if resolved_alias == current["alias"] else ""
+        )
+        valid, reason = self.connection_registry.validate(
+            resolved_alias, resolved_fingerprint, resolved_tenant
+        )
+        if not valid:
+            raise ValueError(reason)
+        return {
+            "alias": resolved_alias,
+            "fingerprint": resolved_fingerprint,
+            "tenant_scope_id": resolved_tenant,
+            "display_name": current.get("display_name") or resolved_alias,
+        }
+
     def _bind_legacy_workflows(self) -> None:
+        self.evidence.bind_unbound(self._connection_binding)
+        self.cases.bind_unbound(self._connection_binding)
         self.discovery_job_store.bind_unbound(self._connection_binding)
         self.assurance_store.bind_unbound(self._connection_binding)
         self.time_series_schedule_store.bind_unbound(self._connection_binding)
@@ -365,6 +392,7 @@ class Services:
             DATA / "artifacts",
             self.config,
             model_inventory,
+            self.current_connection_binding(),
         )
 
     async def _assurance_complete(self, run_id: str, result: dict[str, Any]) -> None:
@@ -425,6 +453,7 @@ class Services:
             DATA / "artifacts",
             self.config,
             self._splunk_models,
+            self._connection_binding,
         )
         self._validations = ValidationService(
             self.validation_store,
@@ -452,6 +481,19 @@ class Services:
         assert self._discovery is not None
         return self._discovery
 
+    def discovery_for_scope(self, scope: dict[str, Any]) -> DiscoveryPipeline:
+        """Create a request-local pipeline so scope cannot change during another run."""
+        self.refresh()
+        assert self._splunk is not None and self._splunk_models is not None
+        return DiscoveryPipeline(
+            self._splunk,
+            self.evidence,
+            DATA / "artifacts",
+            self.config,
+            self._splunk_models,
+            scope,
+        )
+
     @property
     def splunk_models(self) -> SplunkModelInventoryService:
         self.refresh()
@@ -466,7 +508,51 @@ class Services:
 
 
 services = Services()
-mcp = MCPServer(lambda: services.agent, lambda: services.discovery, services.evidence)
+mcp = MCPServer(
+    lambda: services.agent,
+    lambda: services.discovery_for_scope(services.current_connection_binding()),
+    services.evidence,
+    services.resolve_scope,
+)
+
+
+def _request_scope(
+    connection_alias: str = "primary",
+    connection_fingerprint: str = "",
+    tenant_scope_id: str = "workspace-primary",
+) -> dict[str, Any]:
+    resolver = getattr(services, "resolve_scope", None)
+    if not callable(resolver):
+        return {
+            "alias": connection_alias,
+            "fingerprint": connection_fingerprint,
+            "tenant_scope_id": tenant_scope_id,
+            "_enforced": False,
+        }
+    try:
+        return {
+            **resolver(connection_alias, connection_fingerprint, tenant_scope_id),
+            "_enforced": True,
+        }
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+def _scoped_model(value: Any, scope: dict[str, Any]) -> Any:
+    return value.model_copy(
+        update={
+            "connection_alias": scope["alias"],
+            "connection_fingerprint": scope["fingerprint"],
+            "tenant_scope_id": scope["tenant_scope_id"],
+        }
+    )
+
+
+def _scoped_discovery_job(job_id: str, scope: dict[str, Any]) -> Any:
+    job = services.discovery_job_store.get_job(job_id, scope["tenant_scope_id"])
+    if job is None:
+        raise HTTPException(404, "Manual discovery job not found")
+    return job
 
 
 @asynccontextmanager
@@ -1618,6 +1704,12 @@ async def model_pull_status(job_id: str) -> dict[str, Any]:
 @app.post("/api/chat")
 async def chat(request: ChatRequest) -> dict[str, Any]:
     try:
+        scope = _request_scope(
+            request.connection_alias,
+            request.connection_fingerprint,
+            request.tenant_scope_id,
+        )
+        request = _scoped_model(request, scope)
         async with services.workload.scope("investigate:chat"):
             return (await services.agent.chat(request)).model_dump(mode="json")
     except Exception as exc:
@@ -2037,6 +2129,13 @@ async def scan_splunk_models() -> StreamingResponse:
 
 @app.post("/api/chat/stream")
 async def chat_stream(request: ChatRequest) -> StreamingResponse:
+    scope = _request_scope(
+        request.connection_alias,
+        request.connection_fingerprint,
+        request.tenant_scope_id,
+    )
+    request = _scoped_model(request, scope)
+
     async def run(progress: Any) -> dict[str, Any]:
         async with services.workload.scope("investigate:chat", progress):
             return (await services.agent.chat(request, progress=progress)).model_dump(mode="json")
@@ -2046,22 +2145,40 @@ async def chat_stream(request: ChatRequest) -> StreamingResponse:
 
 @app.post("/api/discovery")
 async def discovery(request: DiscoveryRequest) -> dict[str, Any]:
+    scope = _request_scope(
+        request.connection_alias,
+        request.connection_fingerprint,
+        request.tenant_scope_id,
+    )
     async with services.discovery_lock:
         async with services.workload.scope(f"discovery:{request.depth}"):
-            result = await services.discovery.run(request.depth)
+            result = await services.discovery_for_scope(scope).run(request.depth)
     services.agent.invalidate_context_cache()
     services.model_setup.schedule_context_index()
     return result
 
 
 @app.get("/api/discovery/latest")
-async def latest_discovery() -> dict[str, Any]:
-    return services.discovery.latest_summary() or {}
+async def latest_discovery(
+    connection_alias: str = "primary",
+    connection_fingerprint: str = "",
+    tenant_scope_id: str = "workspace-primary",
+) -> dict[str, Any]:
+    scope = _request_scope(connection_alias, connection_fingerprint, tenant_scope_id)
+    return services.discovery_for_scope(scope).latest_summary() or {}
 
 
 @app.get("/api/discovery/jobs")
-async def discovery_jobs(limit: int = 20) -> dict[str, Any]:
-    return services.discovery_jobs.overview(limit=max(1, min(limit, 100)))
+async def discovery_jobs(
+    limit: int = 20,
+    connection_alias: str = "primary",
+    connection_fingerprint: str = "",
+    tenant_scope_id: str = "workspace-primary",
+) -> dict[str, Any]:
+    scope = _request_scope(connection_alias, connection_fingerprint, tenant_scope_id)
+    return services.discovery_jobs.overview(
+        limit=max(1, min(limit, 100)), tenant_scope_id=scope["tenant_scope_id"]
+    )
 
 
 @app.post("/api/discovery/jobs", status_code=202)
@@ -2069,7 +2186,12 @@ async def create_discovery_job(value: DiscoveryRequest, request: Request) -> dic
     principal = getattr(request.state, "principal", None) or {}
     actor = str(principal.get("username") or "local-operator")
     try:
-        job = services.discovery_jobs.enqueue(value.depth, actor)
+        scope = _request_scope(
+            value.connection_alias,
+            value.connection_fingerprint,
+            value.tenant_scope_id,
+        )
+        job = services.discovery_jobs.enqueue(value.depth, actor, binding=scope)
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from exc
     services.audit.record(
@@ -2091,10 +2213,14 @@ async def create_discovery_job(value: DiscoveryRequest, request: Request) -> dic
 
 
 @app.get("/api/discovery/jobs/{job_id}")
-async def discovery_job(job_id: str) -> dict[str, Any]:
-    job = services.discovery_job_store.get_job(job_id)
-    if job is None:
-        raise HTTPException(404, "Manual discovery job not found")
+async def discovery_job(
+    job_id: str,
+    connection_alias: str = "primary",
+    connection_fingerprint: str = "",
+    tenant_scope_id: str = "workspace-primary",
+) -> dict[str, Any]:
+    scope = _request_scope(connection_alias, connection_fingerprint, tenant_scope_id)
+    job = _scoped_discovery_job(job_id, scope)
     return {
         "job": job.model_dump(mode="json"),
         "events": services.discovery_job_store.events(job_id, limit=100),
@@ -2103,10 +2229,16 @@ async def discovery_job(job_id: str) -> dict[str, Any]:
 
 
 @app.get("/api/discovery/jobs/{job_id}/events")
-async def discovery_job_events(job_id: str, after_id: int = 0, limit: int = 100) -> dict[str, Any]:
-    job = services.discovery_job_store.get_job(job_id)
-    if job is None:
-        raise HTTPException(404, "Manual discovery job not found")
+async def discovery_job_events(
+    job_id: str,
+    after_id: int = 0,
+    limit: int = 100,
+    connection_alias: str = "primary",
+    connection_fingerprint: str = "",
+    tenant_scope_id: str = "workspace-primary",
+) -> dict[str, Any]:
+    scope = _request_scope(connection_alias, connection_fingerprint, tenant_scope_id)
+    job = _scoped_discovery_job(job_id, scope)
     return {
         "job": job.model_dump(mode="json"),
         "events": services.discovery_job_store.events(
@@ -2116,10 +2248,14 @@ async def discovery_job_events(job_id: str, after_id: int = 0, limit: int = 100)
 
 
 @app.get("/api/discovery/jobs/{job_id}/result")
-async def discovery_job_result(job_id: str) -> dict[str, Any]:
-    job = services.discovery_job_store.get_job(job_id)
-    if job is None:
-        raise HTTPException(404, "Manual discovery job not found")
+async def discovery_job_result(
+    job_id: str,
+    connection_alias: str = "primary",
+    connection_fingerprint: str = "",
+    tenant_scope_id: str = "workspace-primary",
+) -> dict[str, Any]:
+    scope = _request_scope(connection_alias, connection_fingerprint, tenant_scope_id)
+    _scoped_discovery_job(job_id, scope)
     result = services.discovery_job_store.result(job_id)
     if result is None:
         raise HTTPException(409, "This discovery job does not have a retained result")
@@ -2127,7 +2263,15 @@ async def discovery_job_result(job_id: str) -> dict[str, Any]:
 
 
 @app.post("/api/discovery/jobs/{job_id}/cancel")
-async def cancel_discovery_job(job_id: str, request: Request) -> dict[str, Any]:
+async def cancel_discovery_job(
+    job_id: str,
+    request: Request,
+    connection_alias: str = "primary",
+    connection_fingerprint: str = "",
+    tenant_scope_id: str = "workspace-primary",
+) -> dict[str, Any]:
+    scope = _request_scope(connection_alias, connection_fingerprint, tenant_scope_id)
+    _scoped_discovery_job(job_id, scope)
     job = await services.discovery_jobs.cancel(job_id)
     if job is None:
         raise HTTPException(404, "Manual discovery job not found")
@@ -2147,6 +2291,12 @@ async def cancel_discovery_job(job_id: str, request: Request) -> dict[str, Any]:
 
 @app.post("/api/discovery/stream")
 async def discovery_stream(request: DiscoveryRequest) -> StreamingResponse:
+    scope = _request_scope(
+        request.connection_alias,
+        request.connection_fingerprint,
+        request.tenant_scope_id,
+    )
+
     async def run(progress: Any) -> dict[str, Any]:
         if services.discovery_lock.locked():
             await progress(
@@ -2162,7 +2312,9 @@ async def discovery_stream(request: DiscoveryRequest) -> StreamingResponse:
             )
         async with services.discovery_lock:
             async with services.workload.scope(f"discovery:{request.depth}", progress):
-                result = await services.discovery.run(request.depth, progress=progress)
+                result = await services.discovery_for_scope(scope).run(
+                    request.depth, progress=progress
+                )
         services.agent.invalidate_context_cache()
         services.model_setup.schedule_context_index()
         return result
@@ -3287,12 +3439,26 @@ async def download_detection_export(filename: str) -> FileResponse:
 
 
 @app.get("/api/cases")
-async def list_cases() -> list[dict[str, Any]]:
-    return [case.model_dump(mode="json") for case in services.cases.list()]
+async def list_cases(
+    connection_alias: str = "primary",
+    connection_fingerprint: str = "",
+    tenant_scope_id: str = "workspace-primary",
+) -> list[dict[str, Any]]:
+    scope = _request_scope(connection_alias, connection_fingerprint, tenant_scope_id)
+    return [
+        case.model_dump(mode="json")
+        for case in services.cases.list(tenant_scope_id=scope["tenant_scope_id"])
+    ]
 
 
 @app.post("/api/cases", status_code=201)
 async def create_case(request: CaseCreate) -> dict[str, Any]:
+    scope = _request_scope(
+        request.connection_alias,
+        request.connection_fingerprint,
+        request.tenant_scope_id,
+    )
+    request = _scoped_model(request, scope)
     case = services.cases.create(request)
     services.audit.record(
         "case.created",
@@ -3300,30 +3466,62 @@ async def create_case(request: CaseCreate) -> dict[str, Any]:
         target_type="case",
         target_id=case.id,
         summary="A durable investigation case was created.",
-        metadata={"severity": case.severity, "owner": case.owner},
+        metadata={
+            "severity": case.severity,
+            "owner": case.owner,
+            "connection_fingerprint": case.connection_fingerprint,
+            "tenant_scope_id": case.tenant_scope_id,
+        },
     )
     return case.model_dump(mode="json")
 
 
 @app.get("/api/cases/{case_id}")
-async def get_case(case_id: str) -> dict[str, Any]:
-    case = services.cases.get(case_id)
+async def get_case(
+    case_id: str,
+    connection_alias: str = "primary",
+    connection_fingerprint: str = "",
+    tenant_scope_id: str = "workspace-primary",
+) -> dict[str, Any]:
+    scope = _request_scope(connection_alias, connection_fingerprint, tenant_scope_id)
+    case = (
+        services.cases.get(case_id, scope["tenant_scope_id"])
+        if scope.get("_enforced", True)
+        else services.cases.get(case_id)
+    )
     if not case:
         raise HTTPException(404, "Case not found")
     return case.model_dump(mode="json")
 
 
 @app.get("/api/cases/{case_id}/cockpit")
-async def get_case_cockpit(case_id: str) -> dict[str, Any]:
-    cockpit = services.case_cockpit.build(case_id)
+async def get_case_cockpit(
+    case_id: str,
+    connection_alias: str = "primary",
+    connection_fingerprint: str = "",
+    tenant_scope_id: str = "workspace-primary",
+) -> dict[str, Any]:
+    scope = _request_scope(connection_alias, connection_fingerprint, tenant_scope_id)
+    cockpit = services.case_cockpit.build(case_id, scope["tenant_scope_id"])
     if cockpit is None:
         raise HTTPException(404, "Case not found")
     return cockpit
 
 
 @app.patch("/api/cases/{case_id}")
-async def update_case(case_id: str, request: CaseUpdate) -> dict[str, Any]:
-    case = services.cases.update(case_id, request)
+async def update_case(
+    case_id: str,
+    request: CaseUpdate,
+    connection_alias: str = "primary",
+    connection_fingerprint: str = "",
+    tenant_scope_id: str = "workspace-primary",
+) -> dict[str, Any]:
+    scope = _request_scope(connection_alias, connection_fingerprint, tenant_scope_id)
+    case = (
+        services.cases.update(case_id, request, scope["tenant_scope_id"])
+        if scope.get("_enforced", True)
+        else services.cases.update(case_id, request)
+    )
     if not case:
         raise HTTPException(404, "Case not found")
     services.audit.record(
@@ -3338,8 +3536,14 @@ async def update_case(case_id: str, request: CaseUpdate) -> dict[str, Any]:
 
 
 @app.delete("/api/cases/{case_id}", status_code=204)
-async def delete_case(case_id: str) -> None:
-    if not services.cases.delete(case_id):
+async def delete_case(
+    case_id: str,
+    connection_alias: str = "primary",
+    connection_fingerprint: str = "",
+    tenant_scope_id: str = "workspace-primary",
+) -> None:
+    scope = _request_scope(connection_alias, connection_fingerprint, tenant_scope_id)
+    if not services.cases.delete(case_id, scope["tenant_scope_id"]):
         raise HTTPException(404, "Case not found")
     services.audit.record(
         "case.deleted",
@@ -3351,8 +3555,15 @@ async def delete_case(case_id: str) -> None:
 
 
 @app.post("/api/cases/{case_id}/items", status_code=201)
-async def add_case_item(case_id: str, request: CaseItemCreate) -> dict[str, Any]:
-    item = services.cases.add_item(case_id, request)
+async def add_case_item(
+    case_id: str,
+    request: CaseItemCreate,
+    connection_alias: str = "primary",
+    connection_fingerprint: str = "",
+    tenant_scope_id: str = "workspace-primary",
+) -> dict[str, Any]:
+    scope = _request_scope(connection_alias, connection_fingerprint, tenant_scope_id)
+    item = services.cases.add_item(case_id, request, scope["tenant_scope_id"])
     if not item:
         raise HTTPException(404, "Case not found")
     services.audit.record(
@@ -3367,8 +3578,18 @@ async def add_case_item(case_id: str, request: CaseItemCreate) -> dict[str, Any]
 
 
 @app.patch("/api/cases/{case_id}/items/{item_id}")
-async def update_case_item(case_id: str, item_id: str, request: CaseItemUpdate) -> dict[str, Any]:
-    item = services.cases.update_item(case_id, item_id, request)
+async def update_case_item(
+    case_id: str,
+    item_id: str,
+    request: CaseItemUpdate,
+    connection_alias: str = "primary",
+    connection_fingerprint: str = "",
+    tenant_scope_id: str = "workspace-primary",
+) -> dict[str, Any]:
+    scope = _request_scope(connection_alias, connection_fingerprint, tenant_scope_id)
+    item = services.cases.update_item(
+        case_id, item_id, request, scope["tenant_scope_id"]
+    )
     if not item:
         raise HTTPException(404, "Case timeline item not found")
     services.audit.record(
@@ -3383,8 +3604,15 @@ async def update_case_item(case_id: str, item_id: str, request: CaseItemUpdate) 
 
 
 @app.delete("/api/cases/{case_id}/items/{item_id}", status_code=204)
-async def delete_case_item(case_id: str, item_id: str) -> None:
-    if not services.cases.delete_item(case_id, item_id):
+async def delete_case_item(
+    case_id: str,
+    item_id: str,
+    connection_alias: str = "primary",
+    connection_fingerprint: str = "",
+    tenant_scope_id: str = "workspace-primary",
+) -> None:
+    scope = _request_scope(connection_alias, connection_fingerprint, tenant_scope_id)
+    if not services.cases.delete_item(case_id, item_id, scope["tenant_scope_id"]):
         raise HTTPException(404, "Case timeline item not found")
     services.audit.record(
         "case.timeline-item.deleted",
@@ -3397,8 +3625,15 @@ async def delete_case_item(case_id: str, item_id: str) -> None:
 
 
 @app.post("/api/cases/{case_id}/export")
-async def export_case(case_id: str, request: CaseExportRequest) -> dict[str, Any]:
-    paths = services.cases.export(case_id, request.formats)
+async def export_case(
+    case_id: str,
+    request: CaseExportRequest,
+    connection_alias: str = "primary",
+    connection_fingerprint: str = "",
+    tenant_scope_id: str = "workspace-primary",
+) -> dict[str, Any]:
+    scope = _request_scope(connection_alias, connection_fingerprint, tenant_scope_id)
+    paths = services.cases.export(case_id, request.formats, scope["tenant_scope_id"])
     if not paths:
         raise HTTPException(404, "Case not found")
     services.audit.record(
@@ -3415,7 +3650,11 @@ async def export_case(case_id: str, request: CaseExportRequest) -> dict[str, Any
             {
                 "filename": path.name,
                 "format": path.suffix.lstrip("."),
-                "url": f"/api/case-exports/{path.name}",
+                "url": (
+                    f"/api/case-exports/{path.name}?connection_alias={scope['alias']}"
+                    f"&connection_fingerprint={scope['fingerprint']}"
+                    f"&tenant_scope_id={scope['tenant_scope_id']}"
+                ),
             }
             for path in paths
         ],
@@ -3423,24 +3662,63 @@ async def export_case(case_id: str, request: CaseExportRequest) -> dict[str, Any
 
 
 @app.get("/api/case-exports/{filename}")
-async def download_case_export(filename: str) -> FileResponse:
+async def download_case_export(
+    filename: str,
+    connection_alias: str = "primary",
+    connection_fingerprint: str = "",
+    tenant_scope_id: str = "workspace-primary",
+) -> FileResponse:
+    scope = _request_scope(connection_alias, connection_fingerprint, tenant_scope_id)
     if Path(filename).name != filename or Path(filename).suffix not in {".md", ".json"}:
         raise HTTPException(404, "Case export not found")
     root = (DATA / "case_exports").resolve()
     path = (root / filename).resolve()
     if path.parent != root or not path.exists():
         raise HTTPException(404, "Case export not found")
+    if path.suffix == ".json":
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise HTTPException(404, "Case export not found") from exc
+        matches_scope = (
+            payload.get("connection_alias") == scope["alias"]
+            and payload.get("connection_fingerprint") == scope["fingerprint"]
+            and payload.get("tenant_scope_id") == scope["tenant_scope_id"]
+        )
+    else:
+        content = path.read_text(encoding="utf-8", errors="replace")
+        matches_scope = (
+            f"- Splunk connection: {scope['alias']}" in content
+            and f"- Tenant scope: `{scope['tenant_scope_id']}`" in content
+            and f"- Connection revision: `{scope['fingerprint']}`" in content
+        )
+    if not matches_scope:
+        raise HTTPException(404, "Case export not found")
     return FileResponse(path, filename=filename)
 
 
 @app.get("/api/artifacts")
-async def list_artifacts() -> list[dict[str, Any]]:
-    return [record.model_dump(mode="json") for record in services.evidence.list()]
+async def list_artifacts(
+    connection_alias: str = "primary",
+    connection_fingerprint: str = "",
+    tenant_scope_id: str = "workspace-primary",
+) -> list[dict[str, Any]]:
+    scope = _request_scope(connection_alias, connection_fingerprint, tenant_scope_id)
+    return [
+        record.model_dump(mode="json")
+        for record in services.evidence.list(tenant_scope_id=scope["tenant_scope_id"])
+    ]
 
 
 @app.get("/api/artifacts/{artifact_id}")
-async def get_artifact(artifact_id: str) -> dict[str, Any]:
-    record = services.evidence.get(artifact_id)
+async def get_artifact(
+    artifact_id: str,
+    connection_alias: str = "primary",
+    connection_fingerprint: str = "",
+    tenant_scope_id: str = "workspace-primary",
+) -> dict[str, Any]:
+    scope = _request_scope(connection_alias, connection_fingerprint, tenant_scope_id)
+    record = services.evidence.get(artifact_id, scope["tenant_scope_id"])
     if not record:
         raise HTTPException(404, "Artifact not found")
     return record.model_dump(mode="json")
@@ -3448,6 +3726,12 @@ async def get_artifact(artifact_id: str) -> dict[str, Any]:
 
 @app.post("/api/artifacts")
 async def create_artifact(record: ArtifactCreate) -> dict[str, Any]:
+    scope = _request_scope(
+        record.connection_alias,
+        record.connection_fingerprint,
+        record.tenant_scope_id,
+    )
+    record = _scoped_model(record, scope)
     created = services.evidence.add(record)
     services.agent.invalidate_context_cache()
     services.model_setup.schedule_context_index()
@@ -3457,14 +3741,26 @@ async def create_artifact(record: ArtifactCreate) -> dict[str, Any]:
         target_type="artifact",
         target_id=created.id,
         summary="A local context artifact was created.",
-        metadata={"kind": created.kind, "source": created.source},
+        metadata={
+            "kind": created.kind,
+            "source": created.source,
+            "connection_fingerprint": created.connection_fingerprint,
+            "tenant_scope_id": created.tenant_scope_id,
+        },
     )
     return created.model_dump(mode="json")
 
 
 @app.patch("/api/artifacts/{artifact_id}")
-async def update_artifact(artifact_id: str, record: ArtifactUpdate) -> dict[str, Any]:
-    updated = services.evidence.update(artifact_id, record)
+async def update_artifact(
+    artifact_id: str,
+    record: ArtifactUpdate,
+    connection_alias: str = "primary",
+    connection_fingerprint: str = "",
+    tenant_scope_id: str = "workspace-primary",
+) -> dict[str, Any]:
+    scope = _request_scope(connection_alias, connection_fingerprint, tenant_scope_id)
+    updated = services.evidence.update(artifact_id, record, scope["tenant_scope_id"])
     if not updated:
         raise HTTPException(404, "Artifact not found")
     services.agent.invalidate_context_cache()
@@ -3481,7 +3777,14 @@ async def update_artifact(artifact_id: str, record: ArtifactUpdate) -> dict[str,
 
 
 @app.post("/api/artifacts/upload")
-async def upload_artifact(file: Annotated[UploadFile, File()], kind: str = "reference") -> dict[str, Any]:
+async def upload_artifact(
+    file: Annotated[UploadFile, File()],
+    kind: str = "reference",
+    connection_alias: str = "primary",
+    connection_fingerprint: str = "",
+    tenant_scope_id: str = "workspace-primary",
+) -> dict[str, Any]:
+    scope = _request_scope(connection_alias, connection_fingerprint, tenant_scope_id)
     allowed = {".txt", ".md", ".json", ".csv", ".log", ".spl"}
     suffix = Path(file.filename or "").suffix.lower()
     if suffix not in allowed:
@@ -3495,6 +3798,9 @@ async def upload_artifact(file: Annotated[UploadFile, File()], kind: str = "refe
         kind=kind,
         tags=[suffix.lstrip(".")],
         source=f"upload:{file.filename}",
+        connection_alias=scope["alias"],
+        connection_fingerprint=scope["fingerprint"],
+        tenant_scope_id=scope["tenant_scope_id"],
     )
     created = services.evidence.add(record)
     services.agent.invalidate_context_cache()
@@ -3511,8 +3817,14 @@ async def upload_artifact(file: Annotated[UploadFile, File()], kind: str = "refe
 
 
 @app.delete("/api/artifacts/{artifact_id}")
-async def delete_artifact(artifact_id: str) -> dict[str, bool]:
-    if not services.evidence.delete(artifact_id):
+async def delete_artifact(
+    artifact_id: str,
+    connection_alias: str = "primary",
+    connection_fingerprint: str = "",
+    tenant_scope_id: str = "workspace-primary",
+) -> dict[str, bool]:
+    scope = _request_scope(connection_alias, connection_fingerprint, tenant_scope_id)
+    if not services.evidence.delete(artifact_id, scope["tenant_scope_id"]):
         raise HTTPException(404, "Artifact not found")
     services.agent.invalidate_context_cache()
     services.audit.record(
@@ -3526,8 +3838,22 @@ async def delete_artifact(artifact_id: str) -> dict[str, bool]:
 
 
 @app.get("/api/context/search")
-async def search_context(q: str, limit: int = 6) -> list[dict[str, Any]]:
-    return [item.model_dump(mode="json") for item in services.evidence.search(q, min(max(limit, 1), 20))]
+async def search_context(
+    q: str,
+    limit: int = 6,
+    connection_alias: str = "primary",
+    connection_fingerprint: str = "",
+    tenant_scope_id: str = "workspace-primary",
+) -> list[dict[str, Any]]:
+    scope = _request_scope(connection_alias, connection_fingerprint, tenant_scope_id)
+    return [
+        item.model_dump(mode="json")
+        for item in services.evidence.search(
+            q,
+            min(max(limit, 1), 20),
+            tenant_scope_id=scope["tenant_scope_id"],
+        )
+    ]
 
 
 @app.post("/mcp")

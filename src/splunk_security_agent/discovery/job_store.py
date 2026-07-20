@@ -149,28 +149,45 @@ class DiscoveryJobStore:
             )
         return int(result.rowcount)
 
-    def get_job(self, job_id: str) -> DiscoveryJobRecord | None:
+    def get_job(
+        self, job_id: str, tenant_scope_id: str | None = None
+    ) -> DiscoveryJobRecord | None:
         with self.connect() as db:
-            row = db.execute("SELECT * FROM discovery_jobs WHERE id=?", (job_id,)).fetchone()
+            if tenant_scope_id is None:
+                row = db.execute("SELECT * FROM discovery_jobs WHERE id=?", (job_id,)).fetchone()
+            else:
+                row = db.execute(
+                    "SELECT * FROM discovery_jobs WHERE id=? AND tenant_scope_id=?",
+                    (job_id, tenant_scope_id),
+                ).fetchone()
         return self._job(row) if row else None
 
-    def list_jobs(self, limit: int = 20) -> list[DiscoveryJobRecord]:
+    def list_jobs(
+        self, limit: int = 20, tenant_scope_id: str | None = None
+    ) -> list[DiscoveryJobRecord]:
         limit = max(1, min(100, int(limit)))
         with self.connect() as db:
-            rows = db.execute(
-                """SELECT * FROM discovery_jobs ORDER BY
+            sql = """SELECT * FROM discovery_jobs"""
+            params: list[Any] = []
+            if tenant_scope_id is not None:
+                sql += " WHERE tenant_scope_id=?"
+                params.append(tenant_scope_id)
+            sql += """ ORDER BY
                 CASE status WHEN 'running' THEN 0 WHEN 'queued' THEN 1 ELSE 2 END,
-                created_at DESC LIMIT ?""",
-                (limit,),
-            ).fetchall()
+                created_at DESC LIMIT ?"""
+            params.append(limit)
+            rows = db.execute(sql, params).fetchall()
         return [self._job(row) for row in rows]
 
-    def active_job(self) -> DiscoveryJobRecord | None:
+    def active_job(self, tenant_scope_id: str | None = None) -> DiscoveryJobRecord | None:
         with self.connect() as db:
-            row = db.execute(
-                """SELECT * FROM discovery_jobs WHERE status IN ('running','queued')
-                ORDER BY CASE status WHEN 'running' THEN 0 ELSE 1 END, created_at LIMIT 1"""
-            ).fetchone()
+            sql = "SELECT * FROM discovery_jobs WHERE status IN ('running','queued')"
+            params: list[Any] = []
+            if tenant_scope_id is not None:
+                sql += " AND tenant_scope_id=?"
+                params.append(tenant_scope_id)
+            sql += " ORDER BY CASE status WHEN 'running' THEN 0 ELSE 1 END, created_at LIMIT 1"
+            row = db.execute(sql, params).fetchone()
         return self._job(row) if row else None
 
     def next_queued(self) -> DiscoveryJobRecord | None:

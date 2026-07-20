@@ -325,9 +325,11 @@ class ConnectionRegistryStore:
                 """SELECT * FROM connection_identities
                 ORDER BY created_at DESC LIMIT 25"""
             ).fetchall()
+        primary = self.current()
         return {
             "tenant_scopes": [dict(row) for row in scopes],
-            "primary": self.current(),
+            "primary": primary,
+            "execution_scopes": [primary] if primary else [],
             "revisions": [self._identity(row) for row in revisions],
             "workflow_bindings": workflow_bindings or {},
             "additional_mcp_connections": {
@@ -354,6 +356,7 @@ class ConnectionRegistryStore:
                 "durable_workflows_fail_closed_on_drift": True,
                 "tenant_scope_is_execution_and_evidence_metadata": True,
                 "multi_tenant_database_isolation": False,
+                "tenant_scoped_query_enforcement": True,
             },
         }
 

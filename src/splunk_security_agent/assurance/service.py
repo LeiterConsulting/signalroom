@@ -317,6 +317,14 @@ class AssuranceService:
                     )
                     return
             pipeline = self.pipeline_factory(client)
+            if hasattr(pipeline, "set_scope"):
+                pipeline.set_scope(
+                    {
+                        "alias": running.connection_alias,
+                        "fingerprint": running.connection_fingerprint,
+                        "tenant_scope_id": running.tenant_scope_id,
+                    }
+                )
             async with client.scope(f"assurance:{run_id}", progress):
                 if self.run_lock is not None:
                     if self.run_lock.locked():
