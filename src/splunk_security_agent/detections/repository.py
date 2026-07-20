@@ -698,7 +698,9 @@ class DetectionRepositoryService:
         if detection is None:
             raise RepositoryHandoffError("Linked detection is unavailable")
         case_id = detection.get("case_id")
-        if not case_id or self.detections.cases.get(case_id) is None:
+        if not case_id or self.detections.cases.get(
+            case_id, detection["tenant_scope_id"]
+        ) is None:
             raise RepositoryHandoffError(
                 "Link the detection to a case before preserving repository feedback"
             )
@@ -710,6 +712,7 @@ class DetectionRepositoryService:
             item = self.detections.cases.add_item(
                 case_id,
                 self._review_case_item(detection, latest),
+                detection["tenant_scope_id"],
             )
             if item is None:
                 raise RepositoryHandoffError(

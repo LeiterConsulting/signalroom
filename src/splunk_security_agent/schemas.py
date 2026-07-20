@@ -798,6 +798,9 @@ class ValidationTaskCreate(BaseModel):
     expires_at: str | None = None
     assurance_package_id: str = Field(default="", max_length=120)
     approval_scope: Literal["single-execution"] = "single-execution"
+    connection_alias: str = Field(default="primary", min_length=1, max_length=120)
+    connection_fingerprint: str = Field(default="", max_length=64)
+    tenant_scope_id: str = Field(default="workspace-primary", min_length=1, max_length=160)
 
 
 class ValidationTaskUpdate(BaseModel):
@@ -817,6 +820,9 @@ class QueryIntelligenceRequest(BaseModel):
     latest_time: str = Field(default="now", min_length=1, max_length=64)
     row_limit: int = Field(default=100, ge=1, le=500)
     exclude_task_id: str = Field(default="", max_length=120)
+    connection_alias: str = Field(default="primary", min_length=1, max_length=120)
+    connection_fingerprint: str = Field(default="", max_length=64)
+    tenant_scope_id: str = Field(default="workspace-primary", min_length=1, max_length=160)
 
 
 DetectionSeverity = Literal["informational", "low", "medium", "high", "critical"]

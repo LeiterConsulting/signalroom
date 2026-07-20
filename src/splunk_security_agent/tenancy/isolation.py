@@ -121,10 +121,11 @@ TENANT_COMPONENTS = (
         "sqlite",
         "validations.db",
         "validation_tasks",
-        readiness="scope-key-required",
+        "tenant_scope_id",
+        readiness="copy-contract-ready",
         detail=(
-            "Validation tasks currently inherit scope from discovery, cases, or assurance in "
-            "application logic but do not retain a direct tenant key."
+            "Validation tasks retain the immutable Splunk alias, revision, and tenant key; "
+            "execution revalidates that identity before any MCP call."
         ),
         sequence=3,
     ),
@@ -134,16 +135,17 @@ TENANT_COMPONENTS = (
         "sqlite",
         "detections.db",
         "detections",
+        "tenant_scope_id",
         dependent_tables=(
             "detection_versions",
             "detection_reviews",
             "detection_exports",
             "detection_gate_runs",
         ),
-        readiness="scope-key-required",
+        readiness="copy-contract-ready",
         detail=(
-            "Detection projects link to validations and cases but do not yet retain their own "
-            "tenant identity."
+            "Detection projects retain the exact tenant identity inherited from their completed "
+            "validation; child history follows the detection relationship."
         ),
         sequence=3,
     ),
@@ -412,11 +414,22 @@ class TenantIsolationPlanner:
                 ).fetchall()
             }
             if not component.scope_column or component.scope_column not in columns:
-                return {
+                result: dict[str, Any] = {
                     "source_exists": True,
                     "schema_observed": True,
                     "total_records": total,
                 }
+                if component.readiness == "copy-contract-ready" and component.scope_column:
+                    result.update(
+                        {
+                            "readiness": "scope-key-required",
+                            "detail": (
+                                f'The observed {component.root_table} schema does not contain '
+                                f'the required {component.scope_column} ownership column.'
+                            ),
+                        }
+                    )
+                return result
             scope_count = int(
                 connection.execute(
                     f'SELECT COUNT(*) count FROM "{component.root_table}" '

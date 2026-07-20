@@ -4259,7 +4259,8 @@ function renderValidations() {
       <header><div><span>${escapeHtml(task.source_finding_ref || 'ANALYST')}</span><h4>${escapeHtml(task.title)}</h4></div><b class="validation-status ${escapeHtml(task.status)}">${escapeHtml(validationStatusLabel(task.status))}</b></header>
       <p>${escapeHtml(task.rationale)}</p>
       <details><summary>Review exact SPL contract</summary><pre><code>${escapeHtml(task.spl)}</code></pre></details>
-      <div class="validation-contract"><span>${escapeHtml(validationContract(task))}</span><span>Fingerprint <code>${escapeHtml(task.query_fingerprint.slice(0, 12))}</code></span><span>${refs || 'No evidence reference'}</span>${assuranceMeta}</div>
+      <div class="scope-provenance"><span>${escapeHtml(task.connection_alias || 'primary')}</span><code>${escapeHtml(task.tenant_scope_id || 'workspace-primary')}</code><code>${escapeHtml(shortFingerprint(task.connection_fingerprint))}</code></div>
+      <div class="validation-contract"><span>${escapeHtml(validationContract(task))}</span><span>Query <code>${escapeHtml(task.query_fingerprint.slice(0, 12))}</code></span><span>${refs || 'No evidence reference'}</span>${assuranceMeta}</div>
       ${preview}<footer>${actions.join('')}</footer>
     </article>`;
   }).join('');
@@ -4267,7 +4268,7 @@ function renderValidations() {
 
 async function loadValidations() {
   try {
-    state.validations = await api('/api/validations');
+    state.validations = await api(scopedUrl('/api/validations'));
     renderValidations();
   } catch (error) { toast(`Validation queue: ${error.message}`); }
 }
@@ -4292,7 +4293,8 @@ function queryIntelligencePayload(task = null) {
     earliest_time: task?.earliest_time ?? $('#validationEarliest').value,
     latest_time: task?.latest_time ?? $('#validationLatest').value,
     row_limit: Number(task?.row_limit ?? $('#validationRowLimit').value),
-    exclude_task_id: task?.id || state.editingValidationId || ''
+    exclude_task_id: task?.id || state.editingValidationId || '',
+    ...scopePayload()
   };
 }
 
@@ -4327,7 +4329,7 @@ async function queueValidation(candidateId) {
   const candidate = (state.lastDiscovery?.validation_candidates || []).find(item => item.id === candidateId);
   if (!candidate) return;
   try {
-    const created = await api('/api/validations', { method:'POST', body:JSON.stringify(candidate) });
+    const created = await api('/api/validations', { method:'POST', body:JSON.stringify({...candidate,...scopePayload()}) });
     state.validations.unshift(created); renderValidations(); openValidationEditor(created);
     toast('Draft queued; review the exact contract before approval');
   } catch (error) { toast(error.message); }
@@ -4341,7 +4343,7 @@ async function approveValidation(taskId) {
   const workload = intelligence.workload ? `\nWorkload: ${intelligence.workload.mode.toUpperCase()} · ${intelligence.workload.decision.replaceAll('-', ' ')} · ${intelligence.workload.estimated_cost_units} relative units` : '';
   if (!confirm(`Approve this exact read-only SPL contract?\n\nRisk: ${intelligence.risk.toUpperCase()} (${intelligence.score}/100)${workload}\n${intelligence.execution_recommendation}${reuse}\n\n${task.spl}\n\nWindow: ${task.earliest_time} to ${task.latest_time}\nMaximum rows: ${task.row_limit}`)) return;
   try {
-    const approved = await api(`/api/validations/${encodeURIComponent(taskId)}/approve`, { method:'POST', body:'{}' });
+    const approved = await api(scopedUrl(`/api/validations/${encodeURIComponent(taskId)}/approve`), { method:'POST', body:'{}' });
     state.validations = state.validations.map(item => item.id === taskId ? approved : item); renderValidations();
     toast('Validation approved; it has not run yet');
   } catch (error) { toast(error.message); }
@@ -4364,7 +4366,7 @@ async function runValidation(taskId) {
   state.validations = state.validations.map(item => item.id === taskId ? { ...item, status:'running' } : item);
   renderValidations(); beginValidationProgress(task);
   try {
-    const result = await streamApi(`/api/validations/${encodeURIComponent(taskId)}/run/stream`, {}, event => updateOperation($('#validationProgress'), event));
+    const result = await streamApi(scopedUrl(`/api/validations/${encodeURIComponent(taskId)}/run/stream`), {}, event => updateOperation($('#validationProgress'), event));
     state.validations = state.validations.map(item => item.id === taskId ? result : item);
     await loadArtifacts(); renderValidations(); openValidationResult(result);
     toast('Validation complete; result preserved as evidence');
@@ -4400,7 +4402,7 @@ function openValidationResult(task) {
 async function deleteValidation(taskId) {
   const task = state.validations.find(item => item.id === taskId); if (!task) return;
   if (!confirm(`Delete validation task “${task.title}”? Preserved evidence artifacts are not deleted.`)) return;
-  try { await api(`/api/validations/${encodeURIComponent(taskId)}`, { method:'DELETE' }); await loadValidations(); toast('Validation task deleted'); }
+  try { await api(scopedUrl(`/api/validations/${encodeURIComponent(taskId)}`), { method:'DELETE' }); await loadValidations(); toast('Validation task deleted'); }
   catch (error) { toast(error.message); }
 }
 
@@ -4453,7 +4455,7 @@ function renderDetectionList() {
     return `<button class="detection-list-item ${state.activeDetection?.id === item.id ? 'active' : ''}" data-open-detection="${escapeHtml(item.id)}">
       <span class="detection-list-status ${escapeHtml(item.status)}">${escapeHtml(detectionStatusLabel(item.status))}</span>
       <b>${escapeHtml(content.title || 'Untitled detection')}</b>
-      <small>${escapeHtml(classification.severity || 'medium')} · v${Number(item.current_version)} · ${escapeHtml(gateLabel)} · ${Number(item.export_count || 0)} export${Number(item.export_count || 0) === 1 ? '' : 's'}</small>
+      <small>${escapeHtml(classification.severity || 'medium')} · v${Number(item.current_version)} · ${escapeHtml(gateLabel)} · ${Number(item.export_count || 0)} export${Number(item.export_count || 0) === 1 ? '' : 's'} · ${escapeHtml(item.tenant_scope_id || 'workspace-primary')}</small>
     </button>`;
   }).join('') : '<div class="empty-inline compact-empty">No detection projects yet.</div>';
 }
@@ -4468,8 +4470,8 @@ function renderDetections() {
 async function loadDetections() {
   try {
     const activeId = state.activeDetection?.id;
-    state.detections = await api('/api/detections');
-    if (activeId) state.activeDetection = await api(`/api/detections/${encodeURIComponent(activeId)}`).catch(() => null);
+    state.detections = await api(scopedUrl('/api/detections'));
+    if (activeId) state.activeDetection = await api(scopedUrl(`/api/detections/${encodeURIComponent(activeId)}`)).catch(() => null);
     renderDetections();
     if (state.activeDetection) renderDetectionDetail();
   } catch (error) { toast(`Detections: ${error.message}`); }
@@ -4508,9 +4510,9 @@ async function openDetection(detectionId, updateHash = true) {
       state.detectionGitExport = null;
       state.repositoryHandoff = null;
     }
-    state.activeDetection = await api(`/api/detections/${encodeURIComponent(detectionId)}`);
+    state.activeDetection = await api(scopedUrl(`/api/detections/${encodeURIComponent(detectionId)}`));
     if (state.settings?.detection_repository?.enabled) {
-      state.repositoryHandoff = await api(`/api/detections/${encodeURIComponent(detectionId)}/repository-handoff`).catch(() => null);
+      state.repositoryHandoff = await api(scopedUrl(`/api/detections/${encodeURIComponent(detectionId)}/repository-handoff`)).catch(() => null);
     }
     renderDetectionList(); renderDetectionDetail();
     if (updateHash) history.replaceState(null, '', `${location.pathname}#detections/${encodeURIComponent(detectionId)}`);
@@ -4520,7 +4522,7 @@ async function openDetection(detectionId, updateHash = true) {
 function detectionHistoryMarkup(detection) {
   const versions = (detection.versions || []).map(item => `<li><b>Version ${Number(item.version)}</b><code>${escapeHtml(item.content_sha256.slice(0, 12))}</code><time>${new Date(item.created_at).toLocaleString()}</time></li>`).join('');
   const reviews = (detection.reviews || []).map(item => `<li class="${escapeHtml(item.decision)}"><b>${escapeHtml(item.decision.replaceAll('-', ' '))}</b><span>${escapeHtml(item.reviewer)} · v${Number(item.version)}</span><p>${escapeHtml(item.note || 'No review note recorded.')}</p><time>${new Date(item.created_at).toLocaleString()}</time></li>`).join('');
-  const exports = (detection.exports || []).map(item => `<li><b>${item.export_kind === 'git-change' ? 'Git change bundle' : 'Review package'} · v${Number(item.version)}</b><a href="/api/detection-exports/${encodeURIComponent(item.filename)}">${escapeHtml(item.filename)}</a><code>${escapeHtml(item.archive_sha256.slice(0, 12))}</code><time>${new Date(item.created_at).toLocaleString()}</time></li>`).join('');
+  const exports = (detection.exports || []).map(item => `<li><b>${item.export_kind === 'git-change' ? 'Git change bundle' : 'Review package'} · v${Number(item.version)}</b><a href="${escapeHtml(scopedUrl(`/api/detection-exports/${encodeURIComponent(item.filename)}`))}">${escapeHtml(item.filename)}</a><code>${escapeHtml(item.archive_sha256.slice(0, 12))}</code><time>${new Date(item.created_at).toLocaleString()}</time></li>`).join('');
   const gates = (detection.gate_runs || []).map(item => `<li class="${escapeHtml(item.status)}"><b>${escapeHtml(item.status)} · ${Number(item.score)}/100</b><span>Version ${Number(item.version)} · ${Number(item.result_count).toLocaleString()} result${Number(item.result_count) === 1 ? '' : 's'}</span><code>${escapeHtml(item.content_sha256.slice(0, 12))}</code>${item.accepted_at ? '<em>Accepted baseline</em>' : ''}<time>${new Date(item.created_at).toLocaleString()}</time></li>`).join('');
   return `<div class="detection-history-grid"><section><h4>Immutable versions</h4><ol>${versions || '<li>No versions recorded.</li>'}</ol></section><section><h4>Promotion gates</h4><ol>${gates || '<li>No promotion gate has run.</li>'}</ol></section><section><h4>Review decisions</h4><ol>${reviews || '<li>No review decision yet.</li>'}</ol></section><section><h4>Local exports</h4><ol>${exports || '<li>No approved package exported.</li>'}</ol></section></div>`;
 }
@@ -4766,7 +4768,7 @@ function renderDetectionDetail() {
   }
   primaryActions.push('<button class="button ghost" data-detection-investigate>Pressure-test with local model</button>');
   panel.innerHTML = `
-    <header class="detection-detail-header"><div><span class="detection-list-status ${escapeHtml(detection.status)}">${escapeHtml(detectionStatusLabel(detection.status))}</span><h3>${escapeHtml(content.title)}</h3><p>Version ${Number(detection.current_version)} · SHA-256 <code>${escapeHtml(detection.current_sha256)}</code></p></div><div>${primaryActions.join('')}</div></header>
+    <header class="detection-detail-header"><div><span class="detection-list-status ${escapeHtml(detection.status)}">${escapeHtml(detectionStatusLabel(detection.status))}</span><h3>${escapeHtml(content.title)}</h3><p>Version ${Number(detection.current_version)} · SHA-256 <code>${escapeHtml(detection.current_sha256)}</code></p><div class="scope-provenance"><span>${escapeHtml(detection.connection_alias || 'primary')}</span><code>${escapeHtml(detection.tenant_scope_id || 'workspace-primary')}</code><code>${escapeHtml(shortFingerprint(detection.connection_fingerprint))}</code></div></div><div>${primaryActions.join('')}</div></header>
     <div class="detection-boundary"><b>Separated authority</b><span>Exports remain local. Optional repository handoff requires an exact preview and explicit approval at each write boundary. SignalRoom cannot deploy, enable, or write this search to Splunk.</span></div>
     <form id="detectionForm"><div class="form-grid">
       <label class="full"><span>Detection title</span><input id="detectionTitle" required maxlength="240" value="${escapeHtml(content.title)}" ${lockAttribute}></label>
@@ -4821,7 +4823,7 @@ async function saveDetectionVersion(event) {
     max_count_delta_percent:Number($('#detectionMaxDelta').value)
   };
   try {
-    state.activeDetection = await api(`/api/detections/${encodeURIComponent(detection.id)}`, {method:'PATCH',body:JSON.stringify(payload)});
+    state.activeDetection = await api(scopedUrl(`/api/detections/${encodeURIComponent(detection.id)}`), {method:'PATCH',body:JSON.stringify(payload)});
     await loadDetections(); toast(`Detection version ${state.activeDetection.current_version} saved; review is required`);
   } catch (error) { toast(error.message); }
 }
@@ -4829,7 +4831,7 @@ async function saveDetectionVersion(event) {
 async function runDetectionGate() {
   const detection = state.activeDetection; if (!detection) return;
   try {
-    const result = await api(`/api/detections/${encodeURIComponent(detection.id)}/gate`, {method:'POST',body:JSON.stringify({expected_content_sha256:detection.current_sha256})});
+    const result = await api(scopedUrl(`/api/detections/${encodeURIComponent(detection.id)}/gate`), {method:'POST',body:JSON.stringify({expected_content_sha256:detection.current_sha256})});
     state.activeDetection = result.detection; await loadDetections();
     toast(result.gate.status === 'pass' ? `Promotion gate passed · ${result.gate.score}/100` : `Promotion gate blocked · ${result.gate.score}/100`);
   } catch (error) { toast(error.message); }
@@ -4838,7 +4840,7 @@ async function runDetectionGate() {
 async function queueDetectionValidationDraft() {
   const detection = state.activeDetection; if (!detection) return;
   try {
-    const result = await api(`/api/detections/${encodeURIComponent(detection.id)}/validation-draft`, {method:'POST',body:JSON.stringify({expected_content_sha256:detection.current_sha256})});
+    const result = await api(scopedUrl(`/api/detections/${encodeURIComponent(detection.id)}/validation-draft`), {method:'POST',body:JSON.stringify({expected_content_sha256:detection.current_sha256})});
     await loadValidations();
     navigateView('discovery');
     $('#validationWorkspace').scrollIntoView({behavior:'smooth',block:'start'});
@@ -4854,7 +4856,7 @@ async function submitDetection() {
   const detection = state.activeDetection; if (!detection) return;
   if (!confirm(`Submit version ${detection.current_version} for exact-content review?\n\nSHA-256: ${detection.current_sha256}`)) return;
   try {
-    state.activeDetection = await api(`/api/detections/${encodeURIComponent(detection.id)}/submit`, {method:'POST',body:'{}'});
+    state.activeDetection = await api(scopedUrl(`/api/detections/${encodeURIComponent(detection.id)}/submit`), {method:'POST',body:'{}'});
     await loadDetections(); toast('Detection submitted for exact-hash review');
   } catch (error) { toast(error.message); }
 }
@@ -4865,7 +4867,7 @@ async function reviewDetection(decision) {
   const note = $('#detectionReviewNote').value.trim();
   if (decision === 'approve' && !confirm(`Approve exact detection version ${detection.current_version} for export?\n\nSHA-256: ${detection.current_sha256}\n\nThis does not deploy or enable the search in Splunk.`)) return;
   try {
-    state.activeDetection = await api(`/api/detections/${encodeURIComponent(detection.id)}/review`, {method:'POST',body:JSON.stringify({decision,expected_content_sha256:detection.current_sha256,reviewer,note})});
+    state.activeDetection = await api(scopedUrl(`/api/detections/${encodeURIComponent(detection.id)}/review`), {method:'POST',body:JSON.stringify({decision,expected_content_sha256:detection.current_sha256,reviewer,note})});
     await Promise.all([loadDetections(), loadArtifacts(), loadCases()]);
     toast(decision === 'approve' ? 'Exact detection version approved and indexed locally' : 'Detection returned for changes');
   } catch (error) { toast(error.message); }
@@ -4874,9 +4876,9 @@ async function reviewDetection(decision) {
 async function exportDetection() {
   const detection = state.activeDetection; if (!detection) return;
   try {
-    const result = await api(`/api/detections/${encodeURIComponent(detection.id)}/export`, {method:'POST',body:JSON.stringify({expected_content_sha256:detection.current_sha256})});
+    const result = await api(scopedUrl(`/api/detections/${encodeURIComponent(detection.id)}/export`), {method:'POST',body:JSON.stringify({expected_content_sha256:detection.current_sha256})});
     state.activeDetection = result.detection; await loadDetections();
-    const link = document.createElement('a'); link.href = result.file.url; link.download = result.file.filename; document.body.appendChild(link); link.click(); link.remove();
+    const link = document.createElement('a'); link.href = scopedUrl(result.file.url); link.download = result.file.filename; document.body.appendChild(link); link.click(); link.remove();
     toast('Approved disabled-by-default package exported');
   } catch (error) { toast(error.message); }
 }
@@ -4884,7 +4886,7 @@ async function exportDetection() {
 async function exportDetectionGitChange() {
   const detection = state.activeDetection; if (!detection) return;
   try {
-    const result = await api(`/api/detections/${encodeURIComponent(detection.id)}/git-export`, {method:'POST',body:JSON.stringify({expected_content_sha256:detection.current_sha256})});
+    const result = await api(scopedUrl(`/api/detections/${encodeURIComponent(detection.id)}/git-export`), {method:'POST',body:JSON.stringify({expected_content_sha256:detection.current_sha256})});
     state.activeDetection = result.detection;
     state.detectionGitExport = {
       ...result.verification,
@@ -4892,7 +4894,7 @@ async function exportDetectionGitChange() {
       content_sha256:detection.current_sha256
     };
     await loadDetections(); renderDetectionDetail();
-    const link = document.createElement('a'); link.href = result.file.url; link.download = result.file.filename; document.body.appendChild(link); link.click(); link.remove();
+    const link = document.createElement('a'); link.href = scopedUrl(result.file.url); link.download = result.file.filename; document.body.appendChild(link); link.click(); link.remove();
     toast('Signed Git change verified locally and exported; pin its key fingerprint in repository policy');
   } catch (error) { toast(error.message); }
 }
@@ -4900,7 +4902,7 @@ async function exportDetectionGitChange() {
 async function previewDetectionRepository() {
   const detection = state.activeDetection; if (!detection) return;
   try {
-    state.repositoryHandoff = await api(`/api/detections/${encodeURIComponent(detection.id)}/repository-preview`, {method:'POST',body:JSON.stringify({expected_content_sha256:detection.current_sha256})});
+    state.repositoryHandoff = await api(scopedUrl(`/api/detections/${encodeURIComponent(detection.id)}/repository-preview`), {method:'POST',body:JSON.stringify({expected_content_sha256:detection.current_sha256})});
     renderDetectionDetail();
     const blocked = state.repositoryHandoff.blocking_reasons?.length;
     toast(blocked ? 'Repository preview found a protected policy conflict' : 'Exact repository preview ready for analyst approval');
@@ -4912,7 +4914,7 @@ async function applyDetectionRepository() {
   const approved = confirm(`Create this exact local Git branch and commit?\n\nRepository: ${value.repository_path}\nBase: ${value.base_ref} · ${value.base_commit}\nBranch: ${value.branch_name}\nPreview SHA-256: ${value.preview_sha256}\n\nThe primary checkout will remain unchanged. Nothing will be pushed and nothing will be deployed to Splunk.`);
   if (!approved) return;
   try {
-    state.repositoryHandoff = await api(`/api/detection-repository/handoffs/${encodeURIComponent(value.id)}/apply`, {method:'POST',body:JSON.stringify({expected_preview_sha256:value.preview_sha256})});
+    state.repositoryHandoff = await api(scopedUrl(`/api/detection-repository/handoffs/${encodeURIComponent(value.id)}/apply`), {method:'POST',body:JSON.stringify({expected_preview_sha256:value.preview_sha256})});
     renderDetectionDetail();
     toast('Approved local branch and commit created; primary checkout unchanged');
   } catch (error) { toast(error.message); }
@@ -4923,7 +4925,7 @@ async function pushDetectionRepository() {
   const approved = confirm(`Push this exact detection commit to the configured remote?\n\nRemote: ${value.remote_name}\nBranch: ${value.branch_name}\nCommit: ${value.commit_sha}\n\nThis changes the remote Git repository. It will not open a pull request or deploy to Splunk.`);
   if (!approved) return;
   try {
-    state.repositoryHandoff = await api(`/api/detection-repository/handoffs/${encodeURIComponent(value.id)}/push`, {method:'POST',body:JSON.stringify({expected_commit_sha:value.commit_sha})});
+    state.repositoryHandoff = await api(scopedUrl(`/api/detection-repository/handoffs/${encodeURIComponent(value.id)}/push`), {method:'POST',body:JSON.stringify({expected_commit_sha:value.commit_sha})});
     renderDetectionDetail();
     toast('Exact detection branch pushed; no pull request opened');
   } catch (error) { toast(error.message); }
@@ -4934,7 +4936,7 @@ async function openDetectionRepositoryPullRequest() {
   const approved = confirm(`Open a DRAFT pull request for this exact pushed commit?\n\nRemote: ${value.remote_name}\nBranch: ${value.branch_name}\nCommit: ${value.commit_sha}\n\nThe pull request remains subject to repository review and CI. SignalRoom receives no Splunk deployment authority.`);
   if (!approved) return;
   try {
-    state.repositoryHandoff = await api(`/api/detection-repository/handoffs/${encodeURIComponent(value.id)}/pull-request`, {method:'POST',body:JSON.stringify({expected_commit_sha:value.commit_sha})});
+    state.repositoryHandoff = await api(scopedUrl(`/api/detection-repository/handoffs/${encodeURIComponent(value.id)}/pull-request`), {method:'POST',body:JSON.stringify({expected_commit_sha:value.commit_sha})});
     renderDetectionDetail();
     toast('Draft pull request opened for the exact pushed commit');
   } catch (error) { toast(error.message); }
@@ -4943,7 +4945,7 @@ async function openDetectionRepositoryPullRequest() {
 async function refreshDetectionRepositoryReview() {
   const value = state.repositoryHandoff; if (!value?.commit_sha || value.status !== 'pull-request-opened') return;
   try {
-    state.repositoryHandoff = await api(`/api/detection-repository/handoffs/${encodeURIComponent(value.id)}/review-refresh`, {method:'POST',body:JSON.stringify({expected_commit_sha:value.commit_sha})});
+    state.repositoryHandoff = await api(scopedUrl(`/api/detection-repository/handoffs/${encodeURIComponent(value.id)}/review-refresh`), {method:'POST',body:JSON.stringify({expected_commit_sha:value.commit_sha})});
     renderDetectionDetail();
     const review = state.repositoryHandoff.review;
     toast(review.identity_status === 'exact' ? `Repository feedback captured · ${review.risk_level} attention` : 'Promotion stopped: pull-request head no longer matches the approved commit');
@@ -4956,7 +4958,7 @@ async function preserveDetectionRepositoryReview() {
   const approved = confirm(`Preserve this exact repository feedback snapshot to the linked case?\n\nSnapshot SHA-256: ${review.snapshot_sha256}\nRisk: ${review.risk_level}\nLifecycle: ${review.lifecycle}\n\nThis creates a durable local timeline item. It does not change GitHub or Splunk.`);
   if (!approved) return;
   try {
-    state.repositoryHandoff = await api(`/api/detection-repository/handoffs/${encodeURIComponent(value.id)}/review-case`, {method:'POST',body:JSON.stringify({expected_snapshot_sha256:review.snapshot_sha256})});
+    state.repositoryHandoff = await api(scopedUrl(`/api/detection-repository/handoffs/${encodeURIComponent(value.id)}/review-case`), {method:'POST',body:JSON.stringify({expected_snapshot_sha256:review.snapshot_sha256})});
     renderDetectionDetail();
     toast('Exact repository feedback preserved to the linked case');
   } catch (error) { toast(error.message); }
@@ -4971,7 +4973,7 @@ async function refreshDetectionDeployment() {
   if (button) { button.disabled = true; button.textContent = 'Reading Splunk…'; }
   if (live) live.textContent = 'Calling the read-only saved-search catalog through Splunk MCP; comparing exact SPL, app, schedule, dispatch bounds, and enabled state…';
   try {
-    const snapshot = await api(`/api/detections/${encodeURIComponent(detection.id)}/deployment-verification/refresh`, {method:'POST',body:JSON.stringify({expected_content_sha256:detection.current_sha256,target_app:targetApp})});
+    const snapshot = await api(scopedUrl(`/api/detections/${encodeURIComponent(detection.id)}/deployment-verification/refresh`), {method:'POST',body:JSON.stringify({expected_content_sha256:detection.current_sha256,target_app:targetApp})});
     detection.deployment_verification = snapshot;
     renderDetectionDetail();
     const messages = {
@@ -4997,7 +4999,7 @@ async function preserveDetectionDeployment() {
   const approved = confirm(`Preserve this exact Splunk deployment observation to the linked case?\n\nSnapshot SHA-256: ${snapshot.snapshot_sha256}\nStatus: ${snapshot.status}\nRisk: ${snapshot.risk_level}\n\nThis creates a local timeline item. It does not change Splunk.`);
   if (!approved) return;
   try {
-    detection.deployment_verification = await api(`/api/detections/${encodeURIComponent(detection.id)}/deployment-verification/case`, {method:'POST',body:JSON.stringify({expected_snapshot_sha256:snapshot.snapshot_sha256})});
+    detection.deployment_verification = await api(scopedUrl(`/api/detections/${encodeURIComponent(detection.id)}/deployment-verification/case`), {method:'POST',body:JSON.stringify({expected_snapshot_sha256:snapshot.snapshot_sha256})});
     renderDetectionDetail();
     toast('Exact deployment observation preserved to the linked case');
   } catch (error) { toast(error.message); }
@@ -5024,7 +5026,7 @@ async function stageDetectionRuntime() {
   const button = document.querySelector('[data-stage-runtime]');
   if (button) { button.disabled = true; button.textContent = 'Binding contract…'; }
   try {
-    const result = await api(`/api/detections/${encodeURIComponent(detection.id)}/deployment-verification/runtime-draft`, {method:'POST',body:JSON.stringify({expected_snapshot_sha256:snapshot.snapshot_sha256})});
+    const result = await api(scopedUrl(`/api/detections/${encodeURIComponent(detection.id)}/deployment-verification/runtime-draft`), {method:'POST',body:JSON.stringify({expected_snapshot_sha256:snapshot.snapshot_sha256})});
     snapshot.runtime_verification = result.runtime;
     renderDetectionDetail();
     await openRuntimeValidation(result.runtime.validation_task_id);
@@ -5043,7 +5045,7 @@ async function assessDetectionRuntime() {
   const button = document.querySelector('[data-assess-runtime]');
   if (button) { button.disabled = true; button.textContent = 'Interpreting evidence…'; }
   try {
-    snapshot.runtime_verification = await api(`/api/detections/${encodeURIComponent(detection.id)}/deployment-verification/runtime-assessment`, {method:'POST',body:JSON.stringify({expected_runtime_check_sha256:runtime.check_sha256})});
+    snapshot.runtime_verification = await api(scopedUrl(`/api/detections/${encodeURIComponent(detection.id)}/deployment-verification/runtime-assessment`), {method:'POST',body:JSON.stringify({expected_runtime_check_sha256:runtime.check_sha256})});
     renderDetectionDetail();
     const assessment = snapshot.runtime_verification.assessment;
     toast(`Runtime evidence: ${assessment.status.replaceAll('-', ' ')} · ${assessment.risk_level} risk`);
@@ -5060,7 +5062,7 @@ async function preserveDetectionRuntime() {
   const approved = confirm(`Preserve this exact runtime assessment to the linked case?\n\nAssessment SHA-256: ${runtime.assessment_sha256}\nStatus: ${runtime.assessment.status}\nRisk: ${runtime.assessment.risk_level}\n\nThis records local evidence only. It does not change Splunk.`);
   if (!approved) return;
   try {
-    detection.deployment_verification.runtime_verification = await api(`/api/detections/${encodeURIComponent(detection.id)}/deployment-verification/runtime-case`, {method:'POST',body:JSON.stringify({expected_assessment_sha256:runtime.assessment_sha256})});
+    detection.deployment_verification.runtime_verification = await api(scopedUrl(`/api/detections/${encodeURIComponent(detection.id)}/deployment-verification/runtime-case`), {method:'POST',body:JSON.stringify({expected_assessment_sha256:runtime.assessment_sha256})});
     renderDetectionDetail();
     toast('Exact runtime assessment preserved to the linked case');
   } catch (error) { toast(error.message); }
@@ -5070,7 +5072,7 @@ async function retireDetection() {
   const detection = state.activeDetection; if (!detection) return;
   if (!confirm(`Retire “${detection.content.title}”? Its versions, reviews, exports, and evidence links will be retained.`)) return;
   try {
-    state.activeDetection = await api(`/api/detections/${encodeURIComponent(detection.id)}/retire`, {method:'POST',body:'{}'});
+    state.activeDetection = await api(scopedUrl(`/api/detections/${encodeURIComponent(detection.id)}/retire`), {method:'POST',body:'{}'});
     await loadDetections(); toast('Detection project retired and retained');
   } catch (error) { toast(error.message); }
 }
@@ -5079,7 +5081,7 @@ async function deleteDetection() {
   const detection = state.activeDetection; if (!detection) return;
   if (!confirm(`Delete unapproved detection draft “${detection.content.title}”? Its source validation and evidence artifact will remain.`)) return;
   try {
-    await api(`/api/detections/${encodeURIComponent(detection.id)}`, {method:'DELETE'});
+    await api(scopedUrl(`/api/detections/${encodeURIComponent(detection.id)}`), {method:'DELETE'});
     state.activeDetection = null; await loadDetections(); renderDetectionDetail();
     history.replaceState(null, '', `${location.pathname}#detections`); toast('Unapproved detection draft deleted');
   } catch (error) { toast(error.message); }
@@ -5801,7 +5803,7 @@ $('#validationForm').addEventListener('submit', async event => {
     latest_time:$('#validationLatest').value.trim(), row_limit:Number($('#validationRowLimit').value)
   };
   try {
-    const updated = await api(`/api/validations/${encodeURIComponent(taskId)}`, { method:'PATCH', body:JSON.stringify(payload) });
+    const updated = await api(scopedUrl(`/api/validations/${encodeURIComponent(taskId)}`), { method:'PATCH', body:JSON.stringify(payload) });
     state.validations = state.validations.map(item => item.id === taskId ? updated : item);
     state.editingValidationId = null; $('#validationModal').hidden = true; renderValidations(); toast('Draft saved and fingerprint refreshed');
   } catch (error) { toast(error.message); }

@@ -429,8 +429,8 @@ there is deliberately no remote recovery route.
 
 ## Next production increments
 
-1. Add durable direct tenant ownership to validation, detection, forecast-experiment, delivery, and assurance-policy
-   roots, then expand generation routing to those stores
+1. Add durable direct tenant ownership to forecast-experiment, delivery, and assurance-response roots, then expand
+   generation routing to those stores plus the now directly scoped validation and detection roots
 2. Add tenant filesystem routing plus verified reverse migration and shared-source purge/finalization
 3. Add OIDC group-to-alias assignment policy and encrypted credential backup/restore controls
 4. Add time-aligned durable multi-estate review packets without cross-tenant fact copying
@@ -446,7 +446,14 @@ fingerprint. The resulting plan identifies direct, inherited, missing, and files
 is recorded in the shared audit authority. It cannot execute migration or change runtime routing. This
 prevents an incomplete toggle from falsely claiming isolation while unscoped durable records still exist.
 
-`TenantDataPlaneRegistry` is the runtime authority for the three copy-ready stores. A generation copy holds the
+Validation tasks now retain an immutable alias, connection revision, and tenant key as root columns. Reuse and
+query-intelligence lookups include the tenant boundary, execution revalidates the saved identity before selecting
+an MCP client, and preserved evidence/case entries inherit the same scope. Detection roots inherit that exact
+binding from their completed validation; versioning, gates, runtime validation drafts, repository handoffs, and
+API mutations first resolve through the detection tenant. Both roots now expose deterministic parent-copy
+contracts, although generation routing for them is not active yet.
+
+`TenantDataPlaneRegistry` is the runtime authority for the three currently routed stores. A generation copy holds the
 process-wide store-operation lock, refuses active manual discovery, streams rows selected through the tenant root,
 and hashes the same canonical table order on both sides. Verification does not change routing. Cutover repeats the
 source and target digests before atomically recording the generation route. Routed store facades resolve the tenant

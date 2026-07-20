@@ -67,10 +67,10 @@ class DetectionService:
             raise ValueError(
                 "A deployment runtime control cannot become a detection project"
             )
-        if self.evidence.get(task.artifact_id) is None:
+        if self.evidence.get(task.artifact_id, task.tenant_scope_id) is None:
             raise ValueError("The validation evidence artifact is no longer available")
         case_id = value.case_id or task.case_id
-        if case_id and self.cases.get(case_id) is None:
+        if case_id and self.cases.get(case_id, task.tenant_scope_id) is None:
             raise ValueError("Linked case not found")
         detection_id = str(uuid4())
         content = {
@@ -99,6 +99,9 @@ class DetectionService:
                 "result_count": task.result_count,
                 "completed_at": task.completed_at,
                 "evidence_refs": sorted(set(task.evidence_refs)),
+                "connection_alias": task.connection_alias,
+                "connection_fingerprint": task.connection_fingerprint,
+                "tenant_scope_id": task.tenant_scope_id,
             },
             "testing": {
                 "expected_result": "nonzero" if task.result_count else "zero",
@@ -114,7 +117,15 @@ class DetectionService:
             },
         }
         self._validate(content)
-        return self.store.create(detection_id, task.id, case_id, content)
+        return self.store.create(
+            detection_id,
+            task.id,
+            case_id,
+            content,
+            connection_alias=task.connection_alias,
+            connection_fingerprint=task.connection_fingerprint,
+            tenant_scope_id=task.tenant_scope_id,
+        )
 
     def update(self, detection_id: str, value: DetectionUpdate) -> dict[str, Any] | None:
         current = self.store.get(detection_id)
@@ -189,7 +200,9 @@ class DetectionService:
         self._validate(content)
         testing = self._default_testing(content)
         fingerprint = self._validation_fingerprint(content)
-        validation = self.validations.find_latest_complete(fingerprint)
+        validation = self.validations.find_latest_complete(
+            fingerprint, tenant_scope_id=current["tenant_scope_id"]
+        )
         baseline = self.store.accepted_gate(detection_id)
         baseline_count = baseline["result_count"] if baseline else None
         result_count = validation.result_count if validation else 0
@@ -245,10 +258,14 @@ class DetectionService:
             row_limit,
         )
         fingerprint = self._validation_fingerprint(content)
-        complete = self.validations.find_latest_complete(fingerprint)
+        complete = self.validations.find_latest_complete(
+            fingerprint, tenant_scope_id=current["tenant_scope_id"]
+        )
         if complete is not None:
             return complete, True
-        reusable = self.validations.find_reusable(fingerprint)
+        reusable = self.validations.find_reusable(
+            fingerprint, tenant_scope_id=current["tenant_scope_id"]
+        )
         if reusable is not None:
             return reusable, True
         task = self.validations.create(
@@ -271,6 +288,9 @@ class DetectionService:
                 source_run_id=f"detection:{detection_id}",
                 source_finding_ref=f"version:{current['current_version']}",
                 case_id=current.get("case_id"),
+                connection_alias=current["connection_alias"],
+                connection_fingerprint=current["connection_fingerprint"],
+                tenant_scope_id=current["tenant_scope_id"],
             )
         )
         return task, False
@@ -494,16 +514,22 @@ class DetectionService:
                     ]
                 ),
                 content=self._readme(detection),
+                connection_alias=detection["connection_alias"],
+                connection_fingerprint=detection["connection_fingerprint"],
+                tenant_scope_id=detection["tenant_scope_id"],
             ),
             metadata={
                 "detection_id": detection["id"],
                 "version": detection["current_version"],
                 "content_sha256": detection["current_sha256"],
                 "source_validation_id": detection["source_validation_id"],
+                "connection_alias": detection["connection_alias"],
+                "connection_fingerprint": detection["connection_fingerprint"],
+                "tenant_scope_id": detection["tenant_scope_id"],
             },
         )
         case_id = detection.get("case_id")
-        if case_id and self.cases.get(case_id):
+        if case_id and self.cases.get(case_id, detection["tenant_scope_id"]):
             self.cases.add_item(
                 case_id,
                 CaseItemCreate(
@@ -526,6 +552,7 @@ class DetectionService:
                         "artifact_id": artifact.id,
                     },
                 ),
+                detection["tenant_scope_id"],
             )
 
     def _exportable_detection(
@@ -781,7 +808,9 @@ jobs:
         artifact_ok = bool(
             validation
             and validation.artifact_id
-            and self.evidence.get(validation.artifact_id)
+            and self.evidence.get(
+                validation.artifact_id, validation.tenant_scope_id
+            )
         )
         add(
             "preserved-evidence",
@@ -911,13 +940,18 @@ jobs:
             raise ValueError(
                 "The exact current detection version requires a passing promotion gate"
             )
-        task = self.validations.get(gate["validation_task_id"])
+        task = self.validations.get(
+            gate["validation_task_id"], current["tenant_scope_id"]
+        )
         if (
             task is None
             or task.status != "complete"
             or task.query_fingerprint != self._validation_fingerprint(current["content"])
             or not task.artifact_id
-            or self.evidence.get(task.artifact_id) is None
+            or task.connection_alias != current["connection_alias"]
+            or task.connection_fingerprint != current["connection_fingerprint"]
+            or self.evidence.get(task.artifact_id, current["tenant_scope_id"])
+            is None
         ):
             raise ValueError(
                 "Promotion-gate evidence is no longer complete and available; run the gate again"

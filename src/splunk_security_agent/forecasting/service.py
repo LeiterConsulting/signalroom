@@ -160,9 +160,17 @@ class TimeSeriesForecastService:
                     "separate_approval_required": True,
                 },
             }
-        if value.case_id and (self.cases is None or self.cases.get(value.case_id) is None):
-            raise ValueError("Linked case not found")
         result = run["result"]
+        source = run.get("source") or result.get("source") or {}
+        if value.case_id and (
+            self.cases is None
+            or self.cases.get(
+                value.case_id,
+                str(source.get("tenant_scope_id") or "workspace-primary"),
+            )
+            is None
+        ):
+            raise ValueError("Linked case not found")
         request = run["request"]
         forecast = result.get("forecast") or {}
         quantiles = forecast.get("quantiles") or {}
@@ -208,6 +216,9 @@ class TimeSeriesForecastService:
                 source_run_id=f"forecast:{run_id}",
                 source_finding_ref=f"alert-{value.direction}",
                 case_id=value.case_id,
+                connection_alias=str(source.get("connection_alias") or "primary"),
+                connection_fingerprint=str(source.get("connection_fingerprint") or ""),
+                tenant_scope_id=str(source.get("tenant_scope_id") or "workspace-primary"),
             )
         )
         try:

@@ -19,7 +19,8 @@ or token digest in the registry.
 
 The default tenant scope is `workspace-primary`. It is now an enforced query boundary for managed
 artifacts, lexical and semantic RAG retrieval, embedding queues and status, investigation memory,
-discovery history/latest state, cases, case cockpit evidence resolution, and SignalRoom's own MCP
+discovery history/latest state, cases, case cockpit evidence resolution, validation tasks, query reuse,
+detection projects and their control-plane actions, and SignalRoom's own MCP
 tools. Every result retains the alias, immutable connection fingerprint, and tenant scope that
 produced it. This is shared-database row filtering, not a claim of separate tenant databases or
 complete multi-tenant isolation.
@@ -76,8 +77,10 @@ evidence, cases, jobs, and immutable provenance.
 
 ## Durable workflow behavior
 
-Discovery jobs, continuous-assurance runs, the assurance policy, shadow-forecast schedules, and their
-queued attempts copy the exact connection fingerprint and tenant scope at creation.
+Discovery jobs, continuous-assurance runs, the assurance policy, shadow-forecast schedules, their queued
+attempts, validation tasks, and detection projects copy the exact connection fingerprint and tenant scope at
+creation. A validation executes through the client for its retained identity—not whichever alias revision is
+currently selected—and detection work inherits that binding from the completed validation that anchors it.
 
 If an administrator changes the endpoint, TLS trust, mode, or scope:
 

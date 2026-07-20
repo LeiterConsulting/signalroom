@@ -97,7 +97,9 @@ class AssuranceResponseService:
             [item["fingerprint"] for item in eligible],
             expires_at,
         )
-        task_ids = self._validation_drafts(package["id"], expires_at, eligible, result)
+        task_ids = self._validation_drafts(
+            package["id"], expires_at, eligible, result, package
+        )
         package = self.store.update_package_validations(package["id"], task_ids) or package
         self.store.add_notification(
             run_id,
@@ -117,6 +119,7 @@ class AssuranceResponseService:
         expires_at: str,
         signals: list[dict[str, Any]],
         result: dict[str, Any],
+        binding: dict[str, Any],
     ) -> list[str]:
         service = self.validation_service()
         candidates = {
@@ -162,7 +165,10 @@ class AssuranceResponseService:
             if fingerprint in seen_fingerprints:
                 continue
             seen_fingerprints.add(fingerprint)
-            reusable = service.store.find_reusable(fingerprint)
+            reusable = service.store.find_reusable(
+                fingerprint,
+                tenant_scope_id=str(binding.get("tenant_scope_id") or "workspace-primary"),
+            )
             if reusable:
                 task_ids.append(reusable.id)
                 continue
@@ -193,6 +199,11 @@ class AssuranceResponseService:
                     expires_at=expires_at,
                     assurance_package_id=package_id,
                     approval_scope="single-execution",
+                    connection_alias=str(binding.get("connection_alias") or "primary"),
+                    connection_fingerprint=str(binding.get("connection_fingerprint") or ""),
+                    tenant_scope_id=str(
+                        binding.get("tenant_scope_id") or "workspace-primary"
+                    ),
                 )
             )
             task_ids.append(task.id)

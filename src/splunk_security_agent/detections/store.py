@@ -44,6 +44,9 @@ class DetectionStore:
                     reviewed_by TEXT NOT NULL,
                     reviewed_at TEXT,
                     review_note TEXT NOT NULL,
+                    connection_alias TEXT NOT NULL DEFAULT 'primary',
+                    connection_fingerprint TEXT NOT NULL DEFAULT '',
+                    tenant_scope_id TEXT NOT NULL DEFAULT 'workspace-primary',
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
@@ -115,6 +118,35 @@ class DetectionStore:
                     """ALTER TABLE detection_exports ADD COLUMN export_kind
                     TEXT NOT NULL DEFAULT 'package'"""
                 )
+            self._ensure_column(
+                db, "detections", "connection_alias", "TEXT NOT NULL DEFAULT 'primary'"
+            )
+            self._ensure_column(
+                db, "detections", "connection_fingerprint", "TEXT NOT NULL DEFAULT ''"
+            )
+            self._ensure_column(
+                db,
+                "detections",
+                "tenant_scope_id",
+                "TEXT NOT NULL DEFAULT 'workspace-primary'",
+            )
+            db.execute(
+                """CREATE INDEX IF NOT EXISTS idx_detections_tenant_updated
+                ON detections(tenant_scope_id, updated_at DESC)"""
+            )
+
+    def bind_unbound(self, binding: dict[str, Any]) -> int:
+        with self._lock, self.connect() as db:
+            result = db.execute(
+                """UPDATE detections SET connection_alias=?,connection_fingerprint=?,
+                tenant_scope_id=? WHERE connection_fingerprint=''""",
+                (
+                    str(binding.get("alias") or "primary"),
+                    str(binding.get("fingerprint") or ""),
+                    str(binding.get("tenant_scope_id") or "workspace-primary"),
+                ),
+            )
+        return int(result.rowcount)
 
     def create(
         self,
@@ -122,6 +154,10 @@ class DetectionStore:
         source_validation_id: str,
         case_id: str | None,
         content: dict[str, Any],
+        *,
+        connection_alias: str = "primary",
+        connection_fingerprint: str = "",
+        tenant_scope_id: str = "workspace-primary",
     ) -> dict[str, Any]:
         now = _now()
         fingerprint = self.fingerprint(content)
@@ -130,8 +166,9 @@ class DetectionStore:
                 db.execute(
                     """INSERT INTO detections
                     (id,source_validation_id,case_id,status,current_version,current_sha256,
-                    approved_sha256,reviewed_by,reviewed_at,review_note,created_at,updated_at)
-                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    approved_sha256,reviewed_by,reviewed_at,review_note,connection_alias,
+                    connection_fingerprint,tenant_scope_id,created_at,updated_at)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (
                         detection_id,
                         source_validation_id,
@@ -143,6 +180,9 @@ class DetectionStore:
                         "",
                         None,
                         "",
+                        connection_alias,
+                        connection_fingerprint,
+                        tenant_scope_id,
                         now,
                         now,
                     ),
@@ -168,10 +208,18 @@ class DetectionStore:
         assert result is not None
         return result
 
-    def list(self, limit: int = 200) -> list[dict[str, Any]]:
+    def list(
+        self, limit: int = 200, tenant_scope_id: str | None = None
+    ) -> list[dict[str, Any]]:
         with self.connect() as db:
+            tenant_clause = "WHERE d.tenant_scope_id=?" if tenant_scope_id is not None else ""
+            arguments: tuple[Any, ...] = (
+                (tenant_scope_id, min(max(limit, 1), 500))
+                if tenant_scope_id is not None
+                else (min(max(limit, 1), 500),)
+            )
             rows = db.execute(
-                """SELECT d.*, v.content,
+                f"""SELECT d.*, v.content,
                 (SELECT COUNT(*) FROM detection_versions x WHERE x.detection_id=d.id)
                     AS version_count,
                 (SELECT COUNT(*) FROM detection_reviews r WHERE r.detection_id=d.id)
@@ -180,8 +228,8 @@ class DetectionStore:
                     AS export_count
                 FROM detections d JOIN detection_versions v
                   ON v.detection_id=d.id AND v.version=d.current_version
-                ORDER BY d.updated_at DESC LIMIT ?""",
-                (min(max(limit, 1), 500),),
+                {tenant_clause} ORDER BY d.updated_at DESC LIMIT ?""",
+                arguments,
             ).fetchall()
         values = [self._summary(row) for row in rows]
         for value in values:
@@ -190,10 +238,18 @@ class DetectionStore:
             )
         return values
 
-    def get(self, detection_id: str) -> dict[str, Any] | None:
+    def get(
+        self, detection_id: str, tenant_scope_id: str | None = None
+    ) -> dict[str, Any] | None:
         with self.connect() as db:
+            tenant_clause = " AND d.tenant_scope_id=?" if tenant_scope_id is not None else ""
+            arguments: tuple[Any, ...] = (
+                (detection_id, tenant_scope_id)
+                if tenant_scope_id is not None
+                else (detection_id,)
+            )
             row = db.execute(
-                """SELECT d.*, v.content,
+                f"""SELECT d.*, v.content,
                 (SELECT COUNT(*) FROM detection_versions x WHERE x.detection_id=d.id)
                     AS version_count,
                 (SELECT COUNT(*) FROM detection_reviews r WHERE r.detection_id=d.id)
@@ -202,8 +258,8 @@ class DetectionStore:
                     AS export_count
                 FROM detections d JOIN detection_versions v
                   ON v.detection_id=d.id AND v.version=d.current_version
-                WHERE d.id=?""",
-                (detection_id,),
+                WHERE d.id=? {tenant_clause}""",
+                arguments,
             ).fetchone()
             if row is None:
                 return None
@@ -428,6 +484,15 @@ class DetectionStore:
             db.execute("UPDATE detections SET updated_at=? WHERE id=?", (now, detection_id))
         return self.get(detection_id)
 
+    def find_by_export(self, filename: str) -> dict[str, Any] | None:
+        with self.connect() as db:
+            row = db.execute(
+                """SELECT detection_id FROM detection_exports
+                WHERE filename=? ORDER BY created_at DESC LIMIT 1""",
+                (filename,),
+            ).fetchone()
+        return self.get(str(row["detection_id"])) if row else None
+
     def record_gate(
         self,
         detection_id: str,
@@ -528,6 +593,9 @@ class DetectionStore:
             "reviewed_by": row["reviewed_by"],
             "reviewed_at": row["reviewed_at"],
             "review_note": row["review_note"],
+            "connection_alias": row["connection_alias"],
+            "connection_fingerprint": row["connection_fingerprint"],
+            "tenant_scope_id": row["tenant_scope_id"],
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
             "version_count": int(row["version_count"]),
@@ -562,3 +630,14 @@ class DetectionStore:
             "created_at": row["created_at"],
             "accepted_at": row["accepted_at"],
         }
+
+    @staticmethod
+    def _ensure_column(
+        db: sqlite3.Connection,
+        table: str,
+        column: str,
+        declaration: str,
+    ) -> None:
+        columns = {str(row["name"]) for row in db.execute(f"PRAGMA table_info({table})")}
+        if column not in columns:
+            db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")

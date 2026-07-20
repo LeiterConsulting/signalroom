@@ -24,7 +24,11 @@ class QueryIntelligenceService:
         fingerprint = self.store.fingerprint(
             query, request.earliest_time, request.latest_time, request.row_limit
         )
-        reusable = self.store.find_latest_complete(fingerprint, request.exclude_task_id)
+        reusable = self.store.find_latest_complete(
+            fingerprint,
+            request.exclude_task_id,
+            tenant_scope_id=request.tenant_scope_id,
+        )
         workload = (
             self.workload.assess_query(
                 query,

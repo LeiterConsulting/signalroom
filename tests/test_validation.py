@@ -140,3 +140,81 @@ def test_assurance_validation_drafts_expire_before_approval(tmp_path):
     assert expired.approval_scope == "single-execution"
     with pytest.raises(ValueError, match="expired"):
         store.approve(created.id)
+
+
+def test_validation_store_filters_reuse_and_records_by_tenant(tmp_path):
+    store = ValidationStore(tmp_path / "validations.db")
+    east = store.create(
+        task_value(
+            connection_alias="east",
+            connection_fingerprint="a" * 64,
+            tenant_scope_id="tenant-east",
+        )
+    )
+    west = store.create(
+        task_value(
+            connection_alias="west",
+            connection_fingerprint="b" * 64,
+            tenant_scope_id="tenant-west",
+        )
+    )
+
+    assert [item.id for item in store.list(tenant_scope_id="tenant-east")] == [east.id]
+    assert store.get(west.id, "tenant-east") is None
+    assert store.find_reusable(
+        east.query_fingerprint, tenant_scope_id="tenant-east"
+    ).id == east.id
+    assert store.find_reusable(
+        east.query_fingerprint, tenant_scope_id="tenant-west"
+    ).id == west.id
+
+
+async def test_validation_execution_uses_its_bound_splunk_scope(tmp_path):
+    class RecordingSplunk:
+        def __init__(self):
+            self.calls = []
+
+        async def call(self, name, arguments):
+            self.calls.append((name, arguments))
+            return {"results": []}
+
+    selected = []
+    scoped = RecordingSplunk()
+
+    def factory(binding):
+        selected.append(binding)
+        return scoped
+
+    service = ValidationService(
+        ValidationStore(tmp_path / "validations.db"),
+        object(),
+        EvidenceStore(tmp_path / "evidence.db"),
+        CaseStore(tmp_path / "cases.db", tmp_path / "exports"),
+        splunk_factory=factory,
+        binding_validator=lambda alias, fingerprint, tenant: (
+            (alias, fingerprint, tenant) == ("east", "a" * 64, "tenant-east"),
+            "stale binding",
+        ),
+    )
+    task = service.create(
+        task_value(
+            connection_alias="east",
+            connection_fingerprint="a" * 64,
+            tenant_scope_id="tenant-east",
+        )
+    )
+    service.approve(task.id)
+
+    completed = await service.execute(task.id)
+
+    assert completed.status == "complete"
+    assert selected == [
+        {
+            "alias": "east",
+            "fingerprint": "a" * 64,
+            "tenant_scope_id": "tenant-east",
+        }
+    ]
+    artifact = service.evidence.get(completed.artifact_id, "tenant-east")
+    assert artifact is not None
+    assert artifact.connection_fingerprint == "a" * 64

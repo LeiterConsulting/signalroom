@@ -384,6 +384,8 @@ class Services:
         self.evidence.bind_unbound(self._connection_binding)
         self.cases.bind_unbound(self._connection_binding)
         self.discovery_job_store.bind_unbound(self._connection_binding)
+        self.validation_store.bind_unbound(self._connection_binding)
+        self.detection_store.bind_unbound(self._connection_binding)
         self.assurance_store.bind_unbound(self._connection_binding)
         self.time_series_schedule_store.bind_unbound(self._connection_binding)
 
@@ -598,6 +600,8 @@ class Services:
             self.evidence,
             self.cases,
             self.workload,
+            self.splunk_for_scope,
+            self.validate_connection_binding,
         )
         self.invalidate_scope_runtime()
         self._fingerprint = fingerprint
@@ -768,6 +772,65 @@ def _scoped_discovery_job(job_id: str, scope: dict[str, Any]) -> Any:
     if job is None:
         raise HTTPException(404, "Manual discovery job not found")
     return job
+
+
+def _scoped_validation(task_id: str, scope: dict[str, Any]) -> Any:
+    try:
+        task = services.validation_store.get(task_id, scope["tenant_scope_id"])
+    except TypeError:  # Lightweight route-test doubles predate tenant-aware stores.
+        task = services.validation_store.get(task_id)
+    has_binding = all(
+        hasattr(task, field)
+        for field in ("connection_alias", "connection_fingerprint", "tenant_scope_id")
+    )
+    if task is None or (
+        has_binding
+        and (
+            task.connection_alias != scope["alias"]
+            or task.connection_fingerprint != scope["fingerprint"]
+            or task.tenant_scope_id != scope["tenant_scope_id"]
+        )
+    ):
+        raise HTTPException(404, "Validation task not found")
+    return task
+
+
+def _scoped_detection(detection_id: str, scope: dict[str, Any]) -> dict[str, Any]:
+    store = getattr(services, "detection_store", None)
+    if store is None and not scope.get("_enforced"):
+        return {"id": detection_id}
+    try:
+        detection = store.get(detection_id, scope["tenant_scope_id"])
+    except TypeError:  # Lightweight route-test doubles predate tenant-aware stores.
+        detection = store.get(detection_id)
+    has_binding = bool(
+        detection
+        and all(
+            field in detection
+            for field in ("connection_alias", "connection_fingerprint", "tenant_scope_id")
+        )
+    )
+    if detection is None or (
+        has_binding
+        and (
+            detection["connection_alias"] != scope["alias"]
+            or detection["connection_fingerprint"] != scope["fingerprint"]
+            or detection["tenant_scope_id"] != scope["tenant_scope_id"]
+        )
+    ):
+        raise HTTPException(404, "Detection not found")
+    return detection
+
+
+def _scoped_detection_handoff(handoff_id: str, scope: dict[str, Any]) -> dict[str, Any]:
+    store = getattr(services, "detection_repository_store", None)
+    if store is None and not scope.get("_enforced"):
+        return {"id": handoff_id}
+    handoff = store.get(handoff_id)
+    if handoff is None:
+        raise HTTPException(404, "Detection repository handoff not found")
+    _scoped_detection(str(handoff["detection_id"]), scope)
+    return handoff
 
 
 @asynccontextmanager
@@ -3374,19 +3437,39 @@ async def download_audit_operations_export(filename: str) -> FileResponse:
 
 
 @app.get("/api/validations")
-async def list_validations() -> list[dict[str, Any]]:
-    return [item.model_dump(mode="json") for item in services.validation_store.list()]
+async def list_validations(
+    connection_alias: str = "primary",
+    connection_fingerprint: str = "",
+    tenant_scope_id: str = "workspace-primary",
+) -> list[dict[str, Any]]:
+    scope = _request_scope(connection_alias, connection_fingerprint, tenant_scope_id)
+    return [
+        item.model_dump(mode="json")
+        for item in services.validation_store.list(tenant_scope_id=scope["tenant_scope_id"])
+        if item.connection_alias == scope["alias"]
+        and item.connection_fingerprint == scope["fingerprint"]
+    ]
 
 
 @app.post("/api/query-intelligence")
 async def query_intelligence(request: QueryIntelligenceRequest) -> dict[str, Any]:
-    return services.query_intelligence.analyze(request)
+    scope = _request_scope(
+        request.connection_alias,
+        request.connection_fingerprint,
+        request.tenant_scope_id,
+    )
+    return services.query_intelligence.analyze(_scoped_model(request, scope))
 
 
 @app.post("/api/validations", status_code=201)
 async def create_validation(request: ValidationTaskCreate) -> dict[str, Any]:
     try:
-        task = services.validations.create(request)
+        scope = _request_scope(
+            request.connection_alias,
+            request.connection_fingerprint,
+            request.tenant_scope_id,
+        )
+        task = services.validations.create(_scoped_model(request, scope))
         services.audit.record(
             "validation.created",
             "create",
@@ -3407,15 +3490,27 @@ async def create_validation(request: ValidationTaskCreate) -> dict[str, Any]:
 
 
 @app.get("/api/validations/{task_id}")
-async def get_validation(task_id: str) -> dict[str, Any]:
-    task = services.validation_store.get(task_id)
-    if task is None:
-        raise HTTPException(404, "Validation task not found")
+async def get_validation(
+    task_id: str,
+    connection_alias: str = "primary",
+    connection_fingerprint: str = "",
+    tenant_scope_id: str = "workspace-primary",
+) -> dict[str, Any]:
+    scope = _request_scope(connection_alias, connection_fingerprint, tenant_scope_id)
+    task = _scoped_validation(task_id, scope)
     return task.model_dump(mode="json")
 
 
 @app.patch("/api/validations/{task_id}")
-async def update_validation(task_id: str, request: ValidationTaskUpdate) -> dict[str, Any]:
+async def update_validation(
+    task_id: str,
+    request: ValidationTaskUpdate,
+    connection_alias: str = "primary",
+    connection_fingerprint: str = "",
+    tenant_scope_id: str = "workspace-primary",
+) -> dict[str, Any]:
+    scope = _request_scope(connection_alias, connection_fingerprint, tenant_scope_id)
+    _scoped_validation(task_id, scope)
     try:
         task = services.validations.update(task_id, request)
     except ValueError as exc:
@@ -3434,7 +3529,14 @@ async def update_validation(task_id: str, request: ValidationTaskUpdate) -> dict
 
 
 @app.post("/api/validations/{task_id}/approve")
-async def approve_validation(task_id: str) -> dict[str, Any]:
+async def approve_validation(
+    task_id: str,
+    connection_alias: str = "primary",
+    connection_fingerprint: str = "",
+    tenant_scope_id: str = "workspace-primary",
+) -> dict[str, Any]:
+    scope = _request_scope(connection_alias, connection_fingerprint, tenant_scope_id)
+    _scoped_validation(task_id, scope)
     try:
         task = services.validations.approve(task_id)
     except ValueError as exc:
@@ -3457,7 +3559,14 @@ async def approve_validation(task_id: str) -> dict[str, Any]:
 
 
 @app.post("/api/validations/{task_id}/run/stream")
-async def run_validation_stream(task_id: str) -> StreamingResponse:
+async def run_validation_stream(
+    task_id: str,
+    connection_alias: str = "primary",
+    connection_fingerprint: str = "",
+    tenant_scope_id: str = "workspace-primary",
+) -> StreamingResponse:
+    scope = _request_scope(connection_alias, connection_fingerprint, tenant_scope_id)
+    _scoped_validation(task_id, scope)
     async def run(progress: Any) -> dict[str, Any]:
         try:
             task = await services.validations.execute(task_id, progress)
@@ -3490,10 +3599,14 @@ async def run_validation_stream(task_id: str) -> StreamingResponse:
 
 
 @app.delete("/api/validations/{task_id}", status_code=204)
-async def delete_validation(task_id: str) -> None:
-    current = services.validation_store.get(task_id)
-    if current is None:
-        raise HTTPException(404, "Validation task not found")
+async def delete_validation(
+    task_id: str,
+    connection_alias: str = "primary",
+    connection_fingerprint: str = "",
+    tenant_scope_id: str = "workspace-primary",
+) -> None:
+    scope = _request_scope(connection_alias, connection_fingerprint, tenant_scope_id)
+    current = _scoped_validation(task_id, scope)
     if current.status == "running":
         raise HTTPException(409, "Running validation tasks cannot be deleted")
     services.validation_store.delete(task_id)
@@ -3508,12 +3621,31 @@ async def delete_validation(task_id: str) -> None:
 
 
 @app.get("/api/detections")
-async def list_detections() -> list[dict[str, Any]]:
-    return services.detection_store.list()
+async def list_detections(
+    connection_alias: str = "primary",
+    connection_fingerprint: str = "",
+    tenant_scope_id: str = "workspace-primary",
+) -> list[dict[str, Any]]:
+    scope = _request_scope(connection_alias, connection_fingerprint, tenant_scope_id)
+    return [
+        item
+        for item in services.detection_store.list(tenant_scope_id=scope["tenant_scope_id"])
+        if item["connection_alias"] == scope["alias"]
+        and item["connection_fingerprint"] == scope["fingerprint"]
+    ]
 
 
 @app.post("/api/detections", status_code=201)
 async def create_detection(request: DetectionCreate) -> dict[str, Any]:
+    task = services.validation_store.get(request.validation_task_id)
+    if task is None:
+        raise HTTPException(404, "Completed validation not found")
+    scope = _request_scope(
+        task.connection_alias,
+        task.connection_fingerprint,
+        task.tenant_scope_id,
+    )
+    _scoped_validation(task.id, scope)
     try:
         detection = services.detections.create(request)
     except KeyError as exc:
@@ -3536,10 +3668,14 @@ async def create_detection(request: DetectionCreate) -> dict[str, Any]:
 
 
 @app.get("/api/detections/{detection_id}")
-async def get_detection(detection_id: str) -> dict[str, Any]:
-    detection = services.detection_store.get(detection_id)
-    if detection is None:
-        raise HTTPException(404, "Detection not found")
+async def get_detection(
+    detection_id: str,
+    connection_alias: str = "primary",
+    connection_fingerprint: str = "",
+    tenant_scope_id: str = "workspace-primary",
+) -> dict[str, Any]:
+    scope = _request_scope(connection_alias, connection_fingerprint, tenant_scope_id)
+    detection = _scoped_detection(detection_id, scope)
     detection["deployment_verification"] = services.detection_deployment.latest(
         detection_id,
         detection["current_sha256"],
@@ -3550,10 +3686,12 @@ async def get_detection(detection_id: str) -> dict[str, Any]:
 @app.get("/api/detections/{detection_id}/deployment-verification")
 async def get_detection_deployment_verification(
     detection_id: str,
+    connection_alias: str = "primary",
+    connection_fingerprint: str = "",
+    tenant_scope_id: str = "workspace-primary",
 ) -> dict[str, Any] | None:
-    detection = services.detection_store.get(detection_id)
-    if detection is None:
-        raise HTTPException(404, "Detection not found")
+    scope = _request_scope(connection_alias, connection_fingerprint, tenant_scope_id)
+    detection = _scoped_detection(detection_id, scope)
     return services.detection_deployment.latest(
         detection_id,
         detection["current_sha256"],
@@ -3564,7 +3702,12 @@ async def get_detection_deployment_verification(
 async def refresh_detection_deployment_verification(
     detection_id: str,
     request: DetectionDeploymentRefreshRequest,
+    connection_alias: str = "primary",
+    connection_fingerprint: str = "",
+    tenant_scope_id: str = "workspace-primary",
 ) -> dict[str, Any]:
+    scope = _request_scope(connection_alias, connection_fingerprint, tenant_scope_id)
+    _scoped_detection(detection_id, scope)
     try:
         snapshot = await services.detection_deployment.refresh(
             detection_id,
@@ -3602,7 +3745,12 @@ async def refresh_detection_deployment_verification(
 async def preserve_detection_deployment_verification(
     detection_id: str,
     request: DetectionDeploymentCaseRequest,
+    connection_alias: str = "primary",
+    connection_fingerprint: str = "",
+    tenant_scope_id: str = "workspace-primary",
 ) -> dict[str, Any]:
+    scope = _request_scope(connection_alias, connection_fingerprint, tenant_scope_id)
+    _scoped_detection(detection_id, scope)
     try:
         snapshot = services.detection_deployment.preserve_to_case(
             detection_id,
@@ -3640,7 +3788,12 @@ async def preserve_detection_deployment_verification(
 async def create_detection_runtime_draft(
     detection_id: str,
     request: DetectionRuntimeDraftRequest,
+    connection_alias: str = "primary",
+    connection_fingerprint: str = "",
+    tenant_scope_id: str = "workspace-primary",
 ) -> dict[str, Any]:
+    scope = _request_scope(connection_alias, connection_fingerprint, tenant_scope_id)
+    _scoped_detection(detection_id, scope)
     try:
         runtime, reused = services.detection_deployment.create_runtime_draft(
             detection_id,
@@ -3680,7 +3833,12 @@ async def create_detection_runtime_draft(
 async def assess_detection_runtime(
     detection_id: str,
     request: DetectionRuntimeAssessmentRequest,
+    connection_alias: str = "primary",
+    connection_fingerprint: str = "",
+    tenant_scope_id: str = "workspace-primary",
 ) -> dict[str, Any]:
+    scope = _request_scope(connection_alias, connection_fingerprint, tenant_scope_id)
+    _scoped_detection(detection_id, scope)
     try:
         runtime = services.detection_deployment.assess_runtime(
             detection_id,
@@ -3719,7 +3877,12 @@ async def assess_detection_runtime(
 async def preserve_detection_runtime(
     detection_id: str,
     request: DetectionRuntimeCaseRequest,
+    connection_alias: str = "primary",
+    connection_fingerprint: str = "",
+    tenant_scope_id: str = "workspace-primary",
 ) -> dict[str, Any]:
+    scope = _request_scope(connection_alias, connection_fingerprint, tenant_scope_id)
+    _scoped_detection(detection_id, scope)
     try:
         runtime = services.detection_deployment.preserve_runtime_to_case(
             detection_id,
@@ -3753,8 +3916,15 @@ async def preserve_detection_runtime(
 
 
 @app.patch("/api/detections/{detection_id}")
-async def update_detection(detection_id: str, request: DetectionUpdate) -> dict[str, Any]:
-    prior = services.detection_store.get(detection_id)
+async def update_detection(
+    detection_id: str,
+    request: DetectionUpdate,
+    connection_alias: str = "primary",
+    connection_fingerprint: str = "",
+    tenant_scope_id: str = "workspace-primary",
+) -> dict[str, Any]:
+    scope = _request_scope(connection_alias, connection_fingerprint, tenant_scope_id)
+    prior = _scoped_detection(detection_id, scope)
     try:
         detection = services.detections.update(detection_id, request)
     except ValueError as exc:
@@ -3779,7 +3949,14 @@ async def update_detection(detection_id: str, request: DetectionUpdate) -> dict[
 
 
 @app.post("/api/detections/{detection_id}/submit")
-async def submit_detection(detection_id: str) -> dict[str, Any]:
+async def submit_detection(
+    detection_id: str,
+    connection_alias: str = "primary",
+    connection_fingerprint: str = "",
+    tenant_scope_id: str = "workspace-primary",
+) -> dict[str, Any]:
+    scope = _request_scope(connection_alias, connection_fingerprint, tenant_scope_id)
+    _scoped_detection(detection_id, scope)
     try:
         detection = services.detections.submit(detection_id)
     except ValueError as exc:
@@ -3801,15 +3978,21 @@ async def submit_detection(detection_id: str) -> dict[str, Any]:
 
 
 @app.post("/api/detections/{detection_id}/gate")
-async def run_detection_gate(detection_id: str, request: DetectionGateRunRequest) -> dict[str, Any]:
+async def run_detection_gate(
+    detection_id: str,
+    request: DetectionGateRunRequest,
+    connection_alias: str = "primary",
+    connection_fingerprint: str = "",
+    tenant_scope_id: str = "workspace-primary",
+) -> dict[str, Any]:
+    scope = _request_scope(connection_alias, connection_fingerprint, tenant_scope_id)
+    detection = _scoped_detection(detection_id, scope)
     try:
         gate = services.detections.run_gate(detection_id, request)
     except KeyError as exc:
         raise HTTPException(404, str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from exc
-    detection = services.detection_store.get(detection_id)
-    assert detection is not None
     services.audit.record(
         "detection.gate.completed",
         "evaluate",
@@ -3835,8 +4018,14 @@ async def run_detection_gate(detection_id: str, request: DetectionGateRunRequest
 
 @app.post("/api/detections/{detection_id}/validation-draft", status_code=201)
 async def create_detection_validation_draft(
-    detection_id: str, request: DetectionValidationDraftRequest
+    detection_id: str,
+    request: DetectionValidationDraftRequest,
+    connection_alias: str = "primary",
+    connection_fingerprint: str = "",
+    tenant_scope_id: str = "workspace-primary",
 ) -> dict[str, Any]:
+    scope = _request_scope(connection_alias, connection_fingerprint, tenant_scope_id)
+    _scoped_detection(detection_id, scope)
     try:
         task, reused = services.detections.create_validation_draft(detection_id, request)
     except KeyError as exc:
@@ -3867,7 +4056,15 @@ async def create_detection_validation_draft(
 
 
 @app.post("/api/detections/{detection_id}/review")
-async def review_detection(detection_id: str, request: DetectionReviewRequest) -> dict[str, Any]:
+async def review_detection(
+    detection_id: str,
+    request: DetectionReviewRequest,
+    connection_alias: str = "primary",
+    connection_fingerprint: str = "",
+    tenant_scope_id: str = "workspace-primary",
+) -> dict[str, Any]:
+    scope = _request_scope(connection_alias, connection_fingerprint, tenant_scope_id)
+    _scoped_detection(detection_id, scope)
     try:
         detection = services.detections.review(detection_id, request)
     except ValueError as exc:
@@ -3903,7 +4100,15 @@ async def review_detection(detection_id: str, request: DetectionReviewRequest) -
 
 
 @app.post("/api/detections/{detection_id}/export")
-async def export_detection(detection_id: str, request: DetectionExportRequest) -> dict[str, Any]:
+async def export_detection(
+    detection_id: str,
+    request: DetectionExportRequest,
+    connection_alias: str = "primary",
+    connection_fingerprint: str = "",
+    tenant_scope_id: str = "workspace-primary",
+) -> dict[str, Any]:
+    scope = _request_scope(connection_alias, connection_fingerprint, tenant_scope_id)
+    _scoped_detection(detection_id, scope)
     try:
         detection, path = services.detections.export(detection_id, request)
     except KeyError as exc:
@@ -3934,8 +4139,14 @@ async def export_detection(detection_id: str, request: DetectionExportRequest) -
 
 @app.post("/api/detections/{detection_id}/git-export")
 async def export_detection_git_change(
-    detection_id: str, request: DetectionGitExportRequest
+    detection_id: str,
+    request: DetectionGitExportRequest,
+    connection_alias: str = "primary",
+    connection_fingerprint: str = "",
+    tenant_scope_id: str = "workspace-primary",
 ) -> dict[str, Any]:
+    scope = _request_scope(connection_alias, connection_fingerprint, tenant_scope_id)
+    _scoped_detection(detection_id, scope)
     try:
         detection, path, verification = services.detections.export_git_change(
             detection_id,
@@ -3982,9 +4193,12 @@ async def export_detection_git_change(
 @app.get("/api/detections/{detection_id}/repository-handoff")
 async def latest_detection_repository_handoff(
     detection_id: str,
+    connection_alias: str = "primary",
+    connection_fingerprint: str = "",
+    tenant_scope_id: str = "workspace-primary",
 ) -> dict[str, Any] | None:
-    if services.detection_store.get(detection_id) is None:
-        raise HTTPException(404, "Detection not found")
+    scope = _request_scope(connection_alias, connection_fingerprint, tenant_scope_id)
+    _scoped_detection(detection_id, scope)
     return services.detection_repository.latest(detection_id)
 
 
@@ -3992,7 +4206,12 @@ async def latest_detection_repository_handoff(
 async def preview_detection_repository_handoff(
     detection_id: str,
     request: DetectionRepositoryPreviewRequest,
+    connection_alias: str = "primary",
+    connection_fingerprint: str = "",
+    tenant_scope_id: str = "workspace-primary",
 ) -> dict[str, Any]:
+    scope = _request_scope(connection_alias, connection_fingerprint, tenant_scope_id)
+    _scoped_detection(detection_id, scope)
     try:
         result = services.detection_repository.preview(
             detection_id,
@@ -4030,7 +4249,12 @@ async def preview_detection_repository_handoff(
 async def apply_detection_repository_handoff(
     handoff_id: str,
     request: DetectionRepositoryApprovalRequest,
+    connection_alias: str = "primary",
+    connection_fingerprint: str = "",
+    tenant_scope_id: str = "workspace-primary",
 ) -> dict[str, Any]:
+    scope = _request_scope(connection_alias, connection_fingerprint, tenant_scope_id)
+    _scoped_detection_handoff(handoff_id, scope)
     try:
         result = services.detection_repository.apply(
             handoff_id,
@@ -4066,7 +4290,12 @@ async def apply_detection_repository_handoff(
 async def push_detection_repository_handoff(
     handoff_id: str,
     request: DetectionRepositoryRemoteRequest,
+    connection_alias: str = "primary",
+    connection_fingerprint: str = "",
+    tenant_scope_id: str = "workspace-primary",
 ) -> dict[str, Any]:
+    scope = _request_scope(connection_alias, connection_fingerprint, tenant_scope_id)
+    _scoped_detection_handoff(handoff_id, scope)
     try:
         result = services.detection_repository.push(
             handoff_id,
@@ -4097,7 +4326,12 @@ async def push_detection_repository_handoff(
 async def open_detection_repository_pull_request(
     handoff_id: str,
     request: DetectionRepositoryRemoteRequest,
+    connection_alias: str = "primary",
+    connection_fingerprint: str = "",
+    tenant_scope_id: str = "workspace-primary",
 ) -> dict[str, Any]:
+    scope = _request_scope(connection_alias, connection_fingerprint, tenant_scope_id)
+    _scoped_detection_handoff(handoff_id, scope)
     try:
         result = services.detection_repository.open_draft_pull_request(
             handoff_id,
@@ -4128,7 +4362,12 @@ async def open_detection_repository_pull_request(
 async def refresh_detection_repository_review(
     handoff_id: str,
     request: DetectionRepositoryReviewRequest,
+    connection_alias: str = "primary",
+    connection_fingerprint: str = "",
+    tenant_scope_id: str = "workspace-primary",
 ) -> dict[str, Any]:
+    scope = _request_scope(connection_alias, connection_fingerprint, tenant_scope_id)
+    _scoped_detection_handoff(handoff_id, scope)
     try:
         result = services.detection_repository.refresh_pull_request(
             handoff_id,
@@ -4166,7 +4405,12 @@ async def refresh_detection_repository_review(
 async def preserve_detection_repository_review(
     handoff_id: str,
     request: DetectionRepositoryCaseRequest,
+    connection_alias: str = "primary",
+    connection_fingerprint: str = "",
+    tenant_scope_id: str = "workspace-primary",
 ) -> dict[str, Any]:
+    scope = _request_scope(connection_alias, connection_fingerprint, tenant_scope_id)
+    _scoped_detection_handoff(handoff_id, scope)
     try:
         result = services.detection_repository.preserve_review_to_case(
             handoff_id,
@@ -4197,7 +4441,14 @@ async def preserve_detection_repository_review(
 
 
 @app.post("/api/detections/{detection_id}/retire")
-async def retire_detection(detection_id: str) -> dict[str, Any]:
+async def retire_detection(
+    detection_id: str,
+    connection_alias: str = "primary",
+    connection_fingerprint: str = "",
+    tenant_scope_id: str = "workspace-primary",
+) -> dict[str, Any]:
+    scope = _request_scope(connection_alias, connection_fingerprint, tenant_scope_id)
+    _scoped_detection(detection_id, scope)
     try:
         detection = services.detections.retire(detection_id)
     except ValueError as exc:
@@ -4219,10 +4470,14 @@ async def retire_detection(detection_id: str) -> dict[str, Any]:
 
 
 @app.delete("/api/detections/{detection_id}", status_code=204)
-async def delete_detection(detection_id: str) -> None:
-    current = services.detection_store.get(detection_id)
-    if current is None:
-        raise HTTPException(404, "Detection not found")
+async def delete_detection(
+    detection_id: str,
+    connection_alias: str = "primary",
+    connection_fingerprint: str = "",
+    tenant_scope_id: str = "workspace-primary",
+) -> None:
+    scope = _request_scope(connection_alias, connection_fingerprint, tenant_scope_id)
+    current = _scoped_detection(detection_id, scope)
     try:
         services.detections.delete(detection_id)
     except ValueError as exc:
@@ -4242,9 +4497,19 @@ async def delete_detection(detection_id: str) -> None:
 
 
 @app.get("/api/detection-exports/{filename}")
-async def download_detection_export(filename: str) -> FileResponse:
+async def download_detection_export(
+    filename: str,
+    connection_alias: str = "primary",
+    connection_fingerprint: str = "",
+    tenant_scope_id: str = "workspace-primary",
+) -> FileResponse:
     if Path(filename).name != filename or Path(filename).suffix != ".zip":
         raise HTTPException(404, "Detection export not found")
+    scope = _request_scope(connection_alias, connection_fingerprint, tenant_scope_id)
+    detection = services.detection_store.find_by_export(filename)
+    if detection is None:
+        raise HTTPException(404, "Detection export not found")
+    _scoped_detection(detection["id"], scope)
     root = (DATA / "detection_exports").resolve()
     path = (root / filename).resolve()
     if path.parent != root or not path.exists():

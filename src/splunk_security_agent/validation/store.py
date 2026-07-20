@@ -43,6 +43,9 @@ class ValidationStore:
                     result_count INTEGER NOT NULL DEFAULT 0, result_preview TEXT NOT NULL,
                     artifact_id TEXT NOT NULL, error TEXT NOT NULL,
                     approved_at TEXT, started_at TEXT, completed_at TEXT,
+                    connection_alias TEXT NOT NULL DEFAULT 'primary',
+                    connection_fingerprint TEXT NOT NULL DEFAULT '',
+                    tenant_scope_id TEXT NOT NULL DEFAULT 'workspace-primary',
                     created_at TEXT NOT NULL, updated_at TEXT NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS idx_validation_status_updated
@@ -65,6 +68,18 @@ class ValidationStore:
                     "ALTER TABLE validation_tasks ADD COLUMN approval_scope "
                     "TEXT NOT NULL DEFAULT 'single-execution'"
                 ),
+                "connection_alias": (
+                    "ALTER TABLE validation_tasks ADD COLUMN connection_alias "
+                    "TEXT NOT NULL DEFAULT 'primary'"
+                ),
+                "connection_fingerprint": (
+                    "ALTER TABLE validation_tasks ADD COLUMN connection_fingerprint "
+                    "TEXT NOT NULL DEFAULT ''"
+                ),
+                "tenant_scope_id": (
+                    "ALTER TABLE validation_tasks ADD COLUMN tenant_scope_id "
+                    "TEXT NOT NULL DEFAULT 'workspace-primary'"
+                ),
             }
             for name, statement in migrations.items():
                 if name not in columns:
@@ -73,6 +88,25 @@ class ValidationStore:
                 """CREATE INDEX IF NOT EXISTS idx_validation_package
                 ON validation_tasks(assurance_package_id, status)"""
             )
+            db.execute(
+                """CREATE INDEX IF NOT EXISTS idx_validation_tenant_updated
+                ON validation_tasks(tenant_scope_id, updated_at DESC)"""
+            )
+
+    def bind_unbound(self, binding: dict[str, Any]) -> int:
+        """Bind legacy rows once; future records must carry their source identity."""
+        with self._lock, self.connect() as db:
+            result = db.execute(
+                """UPDATE validation_tasks SET connection_alias=?,
+                connection_fingerprint=?,tenant_scope_id=?
+                WHERE connection_fingerprint=''""",
+                (
+                    str(binding.get("alias") or "primary"),
+                    str(binding.get("fingerprint") or ""),
+                    str(binding.get("tenant_scope_id") or "workspace-primary"),
+                ),
+            )
+        return int(result.rowcount)
 
     def recover_interrupted(self) -> int:
         now = datetime.now(UTC).isoformat()
@@ -95,8 +129,9 @@ class ValidationStore:
                 (id,title,rationale,spl,earliest_time,latest_time,row_limit,evidence_refs,
                 source_run_id,source_finding_ref,case_id,expires_at,assurance_package_id,
                 approval_scope,status,query_fingerprint,result_count,result_preview,artifact_id,error,
-                approved_at,started_at,completed_at,created_at,updated_at)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                approved_at,started_at,completed_at,connection_alias,connection_fingerprint,
+                tenant_scope_id,created_at,updated_at)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     task_id,
                     value.title.strip(),
@@ -121,6 +156,9 @@ class ValidationStore:
                     None,
                     None,
                     None,
+                    value.connection_alias,
+                    value.connection_fingerprint,
+                    value.tenant_scope_id,
                     now,
                     now,
                 ),
@@ -129,24 +167,39 @@ class ValidationStore:
         assert result is not None
         return result
 
-    def list(self, limit: int = 100) -> list[ValidationTaskRecord]:
+    def list(
+        self, limit: int = 100, tenant_scope_id: str | None = None
+    ) -> list[ValidationTaskRecord]:
         self.expire_due()
         with self.connect() as db:
-            rows = db.execute(
-                """SELECT * FROM validation_tasks
+            query = """SELECT * FROM validation_tasks"""
+            arguments: tuple[Any, ...]
+            if tenant_scope_id is not None:
+                query += " WHERE tenant_scope_id=?"
+                arguments = (tenant_scope_id, limit)
+            else:
+                arguments = (limit,)
+            query += """
                 ORDER BY CASE status WHEN 'running' THEN 0 WHEN 'approved' THEN 1
                 WHEN 'draft' THEN 2 WHEN 'error' THEN 3 WHEN 'expired' THEN 4 ELSE 5 END,
-                updated_at DESC LIMIT ?""",
-                (limit,),
-            ).fetchall()
+                updated_at DESC LIMIT ?"""
+            rows = db.execute(query, arguments).fetchall()
         return [self._record(row) for row in rows]
 
-    def get(self, task_id: str) -> ValidationTaskRecord | None:
+    def get(
+        self, task_id: str, tenant_scope_id: str | None = None
+    ) -> ValidationTaskRecord | None:
         self.expire_due()
         with self.connect() as db:
-            row = db.execute(
-                "SELECT * FROM validation_tasks WHERE id = ?", (task_id,)
-            ).fetchone()
+            if tenant_scope_id is None:
+                row = db.execute(
+                    "SELECT * FROM validation_tasks WHERE id = ?", (task_id,)
+                ).fetchone()
+            else:
+                row = db.execute(
+                    "SELECT * FROM validation_tasks WHERE id=? AND tenant_scope_id=?",
+                    (task_id, tenant_scope_id),
+                ).fetchone()
         return self._record(row) if row else None
 
     def update(self, task_id: str, value: ValidationTaskUpdate) -> ValidationTaskRecord | None:
@@ -278,26 +331,44 @@ class ValidationStore:
             )
         return int(result.rowcount)
 
-    def find_reusable(self, query_fingerprint: str) -> ValidationTaskRecord | None:
+    def find_reusable(
+        self, query_fingerprint: str, tenant_scope_id: str | None = None
+    ) -> ValidationTaskRecord | None:
         """Reuse only live, unexecuted work so recurring assurance cannot spam drafts."""
         self.expire_due()
         with self.connect() as db:
+            tenant_clause = " AND tenant_scope_id=?" if tenant_scope_id is not None else ""
+            arguments: tuple[Any, ...] = (
+                (query_fingerprint, tenant_scope_id)
+                if tenant_scope_id is not None
+                else (query_fingerprint,)
+            )
             row = db.execute(
-                """SELECT * FROM validation_tasks WHERE query_fingerprint=?
+                f"""SELECT * FROM validation_tasks WHERE query_fingerprint=?
                 AND status IN ('draft','approved','running')
-                ORDER BY updated_at DESC LIMIT 1""",
-                (query_fingerprint,),
+                {tenant_clause} ORDER BY updated_at DESC LIMIT 1""",
+                arguments,
             ).fetchone()
         return self._record(row) if row else None
 
     def find_latest_complete(
-        self, query_fingerprint: str, exclude_task_id: str = ""
+        self,
+        query_fingerprint: str,
+        exclude_task_id: str = "",
+        tenant_scope_id: str | None = None,
     ) -> ValidationTaskRecord | None:
         with self.connect() as db:
+            tenant_clause = " AND tenant_scope_id=?" if tenant_scope_id is not None else ""
+            arguments: tuple[Any, ...] = (
+                (query_fingerprint, exclude_task_id, tenant_scope_id)
+                if tenant_scope_id is not None
+                else (query_fingerprint, exclude_task_id)
+            )
             row = db.execute(
-                """SELECT * FROM validation_tasks WHERE query_fingerprint=?
-                AND status='complete' AND id<>? ORDER BY completed_at DESC LIMIT 1""",
-                (query_fingerprint, exclude_task_id),
+                f"""SELECT * FROM validation_tasks WHERE query_fingerprint=?
+                AND status='complete' AND id<>? {tenant_clause}
+                ORDER BY completed_at DESC LIMIT 1""",
+                arguments,
             ).fetchone()
         return self._record(row) if row else None
 
@@ -341,6 +412,9 @@ class ValidationStore:
             approved_at=row["approved_at"],
             started_at=row["started_at"],
             completed_at=row["completed_at"],
+            connection_alias=row["connection_alias"],
+            connection_fingerprint=row["connection_fingerprint"],
+            tenant_scope_id=row["tenant_scope_id"],
             created_at=row["created_at"],
             updated_at=row["updated_at"],
         )

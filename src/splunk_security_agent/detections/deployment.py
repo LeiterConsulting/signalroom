@@ -111,7 +111,7 @@ class DetectionDeploymentService:
         existing = self.store.latest_runtime_check(snapshot["id"])
         if existing is not None:
             task = self.detections.validations.get(
-                existing["validation_task_id"]
+                existing["validation_task_id"], detection["tenant_scope_id"]
             )
             existing_view = self._runtime_view(existing)
             if (
@@ -164,6 +164,9 @@ class DetectionDeploymentService:
                 source_run_id=f"detection-runtime:{detection_id}",
                 source_finding_ref=f"runtime:{snapshot['id'][:32]}",
                 case_id=detection.get("case_id"),
+                connection_alias=detection["connection_alias"],
+                connection_fingerprint=detection["connection_fingerprint"],
+                tenant_scope_id=detection["tenant_scope_id"],
             )
         )
         created_at = datetime.now(UTC).isoformat()
@@ -233,7 +236,7 @@ class DetectionDeploymentService:
         self._validate_runtime_check(check)
         if check["assessment_sha256"]:
             return self._runtime_view(check)
-        _, snapshot = self._current_snapshot(
+        detection, snapshot = self._current_snapshot(
             detection_id,
             check["deployment_snapshot_sha256"],
         )
@@ -241,7 +244,9 @@ class DetectionDeploymentService:
             raise DeploymentVerificationError(
                 "Runtime check is not bound to the expected deployment snapshot"
             )
-        task = self.detections.validations.get(check["validation_task_id"])
+        task = self.detections.validations.get(
+            check["validation_task_id"], detection["tenant_scope_id"]
+        )
         if task is None:
             raise DeploymentVerificationError(
                 "The linked runtime validation task is unavailable"
@@ -315,7 +320,9 @@ class DetectionDeploymentService:
         if check["case_item_id"]:
             return self._runtime_view(check)
         case_id = detection.get("case_id")
-        if not case_id or self.detections.cases.get(case_id) is None:
+        if not case_id or self.detections.cases.get(
+            case_id, detection["tenant_scope_id"]
+        ) is None:
             raise DeploymentVerificationError(
                 "Link the detection to a case before preserving runtime evidence"
             )
@@ -327,6 +334,7 @@ class DetectionDeploymentService:
             item = self.detections.cases.add_item(
                 case_id,
                 self._runtime_case_item(detection, latest),
+                detection["tenant_scope_id"],
             )
             if item is None:
                 raise DeploymentVerificationError("Linked case is unavailable")
@@ -385,7 +393,9 @@ class DetectionDeploymentService:
         if snapshot["case_item_id"]:
             return self._with_runtime(snapshot)
         case_id = detection.get("case_id")
-        if not case_id or self.detections.cases.get(case_id) is None:
+        if not case_id or self.detections.cases.get(
+            case_id, detection["tenant_scope_id"]
+        ) is None:
             raise DeploymentVerificationError(
                 "Link the detection to a case before preserving deployment verification"
             )
@@ -397,6 +407,7 @@ class DetectionDeploymentService:
             item = self.detections.cases.add_item(
                 case_id,
                 self._case_item(detection, latest),
+                detection["tenant_scope_id"],
             )
             if item is None:
                 raise DeploymentVerificationError("Linked case is unavailable")
@@ -824,7 +835,15 @@ class DetectionDeploymentService:
     ) -> dict[str, Any]:
         self._validate_runtime_check(check)
         value = dict(check)
-        task = self.detections.validations.get(check["validation_task_id"])
+        detection = self.detections.store.get(check["detection_id"])
+        tenant_scope_id = (
+            str(detection.get("tenant_scope_id") or "workspace-primary")
+            if detection
+            else None
+        )
+        task = self.detections.validations.get(
+            check["validation_task_id"], tenant_scope_id
+        )
         validation = check["validation"]
         exact_contract = bool(
             task is not None
@@ -833,6 +852,10 @@ class DetectionDeploymentService:
             and task.earliest_time == validation["earliest_time"]
             and task.latest_time == validation["latest_time"]
             and task.row_limit == validation["row_limit"]
+            and detection is not None
+            and task.connection_alias == detection["connection_alias"]
+            and task.connection_fingerprint == detection["connection_fingerprint"]
+            and task.tenant_scope_id == detection["tenant_scope_id"]
         )
         if check["assessment"]:
             assessment_sha256 = self._sha256(

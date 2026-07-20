@@ -21,6 +21,7 @@ This is a focused reimplementation inspired by [LeiterConsulting/splunk-discover
 - Read-only Splunk MLTK model inventory with definition drift and endpoint-scoped dependency checks
 - Opt-in, explicitly targeted continuous assurance with durable schedules, cross-run signal correlation, response packages, and hard Splunk-call budgets
 - A restart-safe validation queue with bounded SPL preview, explicit analyst approval, expiring assurance drafts, live progress, and preserved results
+- Immutable Splunk/tenant ownership across validation execution and detection engineering, including tenant-bounded reuse and fail-closed target revalidation
 - An evidence-first agent with bounded multi-tool plans, investigation modes, and a structured ledger
 - Durable local investigation cases with an evidence-health cockpit, next-best actions, case-scoped context packets, chronological timelines, and handoff exports
 - Deterministic SPL cost and reuse intelligence before approval, including safer staged contracts and exact-result reuse
@@ -490,7 +491,9 @@ reuse known facts before requesting another Splunk search.
 Before a validation SPL contract is approved, SignalRoom explains deterministic execution risk. It flags missing
 index scope, wide or unknown time ranges, high row limits, expensive commands, and prohibited operations; it also
 shows positive bounding controls. An exact fingerprint match to a completed validation is surfaced as reusable
-evidence, and wider contracts receive a narrower staged SPL suggestion. This is guidance rather than a Splunk
+evidence only inside the selected tenant. Each task permanently retains its Splunk alias, immutable connection
+revision, and tenant scope; execution validates that identity again and selects its corresponding MCP client before
+making a call. Wider contracts receive a narrower staged SPL suggestion. This is guidance rather than a Splunk
 cardinality estimate—the actual query still requires explicit, single-use approval.
 
 Each model-backed Investigate response can be rated **Useful**, **Incorrect**, or **Missing evidence**. Ratings
@@ -501,7 +504,9 @@ samples under ten ratings are explicitly labeled directional rather than present
 
 The **Detections** workspace promotes a completed validation—not a hypothesis or an unexecuted SPL draft—into
 a versioned detection project. The source validation fingerprint, preserved artifact, result count, completion
-time, and evidence references remain attached as the trust anchor. Editing creates an immutable new version and
+time, evidence references, and exact Splunk/tenant identity remain attached as the trust anchor. Detection list,
+detail, version, gate, review, export, deployment-observation, and repository-handoff actions enforce that boundary.
+Editing creates an immutable new version and
 clears prior approval.
 
 Before review, a deterministic promotion gate binds the exact content SHA-256 to a completed validation with the

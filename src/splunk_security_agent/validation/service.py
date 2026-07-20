@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
 
@@ -32,12 +33,16 @@ class ValidationService:
         evidence: EvidenceStore,
         cases: CaseStore,
         workload: Any | None = None,
+        splunk_factory: Callable[[dict[str, Any]], Any] | None = None,
+        binding_validator: Callable[[str, str, str], tuple[bool, str]] | None = None,
     ):
         self.store = store
         self.splunk = splunk_client
         self.evidence = evidence
         self.cases = cases
         self.workload = workload
+        self.splunk_factory = splunk_factory
+        self.binding_validator = binding_validator
 
     def create(self, value: ValidationTaskCreate) -> ValidationTaskRecord:
         self.validate_contract(value.spl, value.earliest_time, value.latest_time, value.row_limit)
@@ -113,6 +118,22 @@ class ValidationService:
             "row_limit": running.row_limit,
         }
         try:
+            scope = {
+                "alias": running.connection_alias,
+                "fingerprint": running.connection_fingerprint,
+                "tenant_scope_id": running.tenant_scope_id,
+            }
+            if self.binding_validator is not None:
+                valid, reason = self.binding_validator(
+                    running.connection_alias,
+                    running.connection_fingerprint,
+                    running.tenant_scope_id,
+                )
+                if not valid:
+                    raise ValueError(
+                        "Validation target is no longer executable: " + reason
+                    )
+            splunk = self.splunk_factory(scope) if self.splunk_factory else self.splunk
             await report_progress(
                 progress,
                 "validation:splunk",
@@ -125,9 +146,9 @@ class ValidationService:
                 async with self.workload.scope(
                     f"validation:{running.id}", progress
                 ):
-                    result = await self.splunk.call("run_query", arguments)
+                    result = await splunk.call("run_query", arguments)
             else:
-                result = await self.splunk.call("run_query", arguments)
+                result = await splunk.call("run_query", arguments)
             rows = self._rows(result)
             preview = self._bounded_preview(rows)
             await report_progress(
@@ -145,15 +166,23 @@ class ValidationService:
                     source="Approved Splunk MCP validation",
                     tags=["splunk", "validation", *running.evidence_refs],
                     content=self._artifact_content(running, len(rows), preview),
+                    connection_alias=running.connection_alias,
+                    connection_fingerprint=running.connection_fingerprint,
+                    tenant_scope_id=running.tenant_scope_id,
                 ),
                 metadata={
                     "validation_task_id": running.id,
                     "source_run_id": running.source_run_id,
                     "query_fingerprint": running.query_fingerprint,
                     "executed_at": datetime.now(UTC).isoformat(),
+                    "connection_alias": running.connection_alias,
+                    "connection_fingerprint": running.connection_fingerprint,
+                    "tenant_scope_id": running.tenant_scope_id,
                 },
             )
-            if running.case_id and self.cases.get(running.case_id):
+            if running.case_id and self.cases.get(
+                running.case_id, running.tenant_scope_id
+            ):
                 self.cases.add_item(
                     running.case_id,
                     CaseItemCreate(
@@ -173,6 +202,7 @@ class ValidationService:
                             "evidence_refs": running.evidence_refs,
                         },
                     ),
+                    running.tenant_scope_id,
                 )
             completed = self.store.complete(running.id, len(rows), preview, artifact.id)
             assert completed is not None
@@ -244,6 +274,8 @@ class ValidationService:
                 "",
                 f"- Validation task: `{task.id}`",
                 f"- Source discovery: `{task.source_run_id or 'manual'}`",
+                f"- Splunk identity: `{task.connection_alias}` / `{task.tenant_scope_id}`",
+                f"- Connection revision: `{task.connection_fingerprint}`",
                 f"- Evidence references: {', '.join(task.evidence_refs) or 'none'}",
                 f"- Query fingerprint: `{task.query_fingerprint}`",
                 f"- Window: `{task.earliest_time}` to `{task.latest_time}`",

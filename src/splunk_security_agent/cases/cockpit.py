@@ -26,7 +26,10 @@ class CaseCockpitService:
         if case is None:
             return None
         items = case.items
-        validations = [task for task in self.validations.list(500) if task.case_id == case_id]
+        scoped_validations = self.validations.list(
+            500, tenant_scope_id=case.tenant_scope_id
+        )
+        validations = [task for task in scoped_validations if task.case_id == case_id]
         referenced_validation_ids = {
             str(value)
             for item in items
@@ -34,7 +37,7 @@ class CaseCockpitService:
         }
         validations.extend(
             task
-            for task in self.validations.list(500)
+            for task in scoped_validations
             if task.id in referenced_validation_ids and task not in validations
         )
 

@@ -113,6 +113,8 @@ def test_detection_versions_review_and_export_are_hash_bound(tmp_path):
     assert detection["content"]["search"] == task.spl
     assert detection["content"]["evidence"]["artifact_id"] == task.artifact_id
     assert detection["content"]["deployment"]["splunk_write_permitted"] is False
+    assert detection["tenant_scope_id"] == task.tenant_scope_id
+    assert detection["content"]["evidence"]["tenant_scope_id"] == task.tenant_scope_id
 
     revised = service.update(
         detection["id"],
