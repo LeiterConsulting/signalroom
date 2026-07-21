@@ -31,7 +31,7 @@ This is a focused reimplementation inspired by [LeiterConsulting/splunk-discover
 - Audit-first model publisher allowlists and local Ed25519 approvals bound to exact model revisions and content digests
 - Opt-in generic JSON and Slack Incoming Webhook adapters with exact redaction previews, hash-bound approval, guarded routing, and a tamper-evident local audit chain
 - Opt-in export of the verified audit chain to a dedicated Splunk HEC index with a durable cursor, bounded retries, and optional indexer acknowledgement
-- A destination-bound Splunk audit operations kit with review-only retention, dashboard, disabled alerts, stable-ID deduplication, and local export-lag health
+- A destination-bound Splunk audit operations kit with review-only retention, dashboard, disabled alerts, stable-ID deduplication, local export-lag health, and immutable read-only deployment reconciliation
 - Evidence-bound detection-as-code projects with immutable versions, exact-hash review, case linkage, and disabled-by-default Splunk packages
 - Ollama chat and tool-capable model support
 - Hugging Face chat, embedding, and token-classification adapters
@@ -770,7 +770,11 @@ Generating the kit does not call Splunk or install anything. All schedules remai
 configured, and retention changes only if a Splunk administrator deploys the indexer component. The raw macro
 preserves retry evidence; the canonical macro can deduplicate by `signalroom_event_id` without deleting indexed
 events. The Discovery page independently reports local cursor lag and cannot claim that destination content is
-installed or healthy.
+installed or healthy. After deployment, **Reconcile deployed pack** verifies the current ZIP and manifest, binds
+the observation to one admitted Splunk connection revision and tenant, checks HEC/MCP host parity, and makes five
+bounded configuration reads. The result distinguishes exact verification, explicit drift, fields the MCP does not
+expose, bounded-catalog uncertainty, and blocked reads. It runs no SPL, retains no unrelated catalog rows, and does
+not install, enable, or change anything in Splunk.
 
 Splunk SOAR now has a duplicate-safe, create-container-only adapter with exact-payload approval, automation disabled,
 no artifacts, durable correlation, self-signed/private-CA transport support, and a read-only container-options test.
@@ -790,9 +794,9 @@ form the shared application boundary. Additional Splunk aliases now have per-ali
 authorization, clients, durable identity, and tenant-aware routing. Administrators can now export and inspect a
 password-encrypted control-plane recovery package, stage only a compatible package, and retain an encrypted
 pre-restore checkpoint. Time-aligned durable multi-estate review packets now persist only verified
-references and materialize each tenant's source facts in place. The next production increment is
-read-only deployment reconciliation for the audit operations pack where the Splunk MCP field contract
-permits it.
+references and materialize each tenant's source facts in place. Audit operations packs now have immutable,
+tenant-filtered, read-only reconciliation history. The next production increment is retention and administrator
+cleanup policy for superseded tenant generations, reverse snapshots, and encrypted recovery exports/checkpoints.
 
 ### Operator-authored evaluation suites
 

@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import zipfile
 from datetime import UTC, datetime
 from html import escape as xml_escape
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 from uuid import uuid4
 
 from ..audit import AuditStore
@@ -17,6 +19,11 @@ from .store import AuditExportStore
 APP_ID = "signalroom_audit_operations"
 INDEXER_APP_ID = "signalroom_audit_retention"
 SCHEMA_VERSION = "signalroom.audit-operations.v1"
+RECONCILIATION_SCHEMA_VERSION = "signalroom.audit-operations-reconciliation.v1"
+
+
+class AuditOperationsReconciliationError(ValueError):
+    pass
 
 
 class AuditOperationsService:
@@ -35,7 +42,11 @@ class AuditOperationsService:
         self.export_dir = Path(export_dir)
         self.export_dir.mkdir(parents=True, exist_ok=True)
 
-    def overview(self, export_overview: dict[str, Any] | None = None) -> dict[str, Any]:
+    def overview(
+        self,
+        export_overview: dict[str, Any] | None = None,
+        allowed_connection_ids: set[str] | None = None,
+    ) -> dict[str, Any]:
         policy = self.store.operations_policy()
         preview = self._build(policy)
         export = export_overview or self.audit_export.overview()
@@ -47,6 +58,13 @@ class AuditOperationsService:
                 if item["policy_sha256"] == preview["policy_sha256"]
                 and item["destination_fingerprint"] == preview["destination_fingerprint"]
             ),
+            None,
+        )
+        reconciliations = self.store.operations_reconciliations(
+            allowed_connection_ids=allowed_connection_ids,
+        )
+        current_reconciliation = next(
+            (item for item in reconciliations if current and item["export_id"] == current["id"]),
             None,
         )
         return {
@@ -71,6 +89,31 @@ class AuditOperationsService:
                 ],
             },
             "exports": exports,
+            "reconciliation": {
+                "available": bool(current and preview["binding"]["origin"]),
+                "detail": (
+                    "Select an admitted Splunk scope to compare the current exported kit "
+                    "with read-only MCP configuration observations."
+                    if current and preview["binding"]["origin"]
+                    else "Configure a HEC destination and export the current review kit before reconciling."
+                    if not preview["binding"]["origin"]
+                    else "Export the current review kit before reconciling its deployed state."
+                ),
+                "authority": {
+                    "read_only": True,
+                    "calls": [
+                        "get_index_info",
+                        "get_knowledge_objects(saved_searches)",
+                        "get_knowledge_objects(macros)",
+                        "get_knowledge_objects(views)",
+                        "get_knowledge_objects(apps)",
+                    ],
+                    "runs_spl": False,
+                    "changes_splunk": False,
+                },
+                "current": current_reconciliation,
+                "history": reconciliations,
+            },
         }
 
     def update_policy(self, value: AuditOperationsPolicyUpdate) -> dict[str, Any]:
@@ -164,6 +207,594 @@ class AuditOperationsService:
             "url": f"/api/audit-operations/exports/{filename}",
             "authority": built["manifest"]["authority"],
         }
+
+    async def reconcile(
+        self,
+        scope: dict[str, Any],
+        client: Any,
+    ) -> dict[str, Any]:
+        """Compare one immutable exported kit with one admitted Splunk scope."""
+        policy = self.store.operations_policy()
+        built = self._build(policy)
+        export, manifest = self._validated_current_export(built)
+        observed_at = datetime.now(UTC).isoformat()
+        endpoint = str(getattr(getattr(client, "client", client), "url", "") or "")
+        destination_host = (urlsplit(str(manifest["binding"].get("origin") or "")).hostname or "").lower()
+        mcp_host = (urlsplit(endpoint).hostname or "").lower()
+        common = {
+            "schema_version": RECONCILIATION_SCHEMA_VERSION,
+            "subject": {
+                "export_id": export["id"],
+                "manifest_sha256": export["manifest_sha256"],
+                "archive_sha256": export["archive_sha256"],
+                "policy_sha256": export["policy_sha256"],
+                "destination_fingerprint": export["destination_fingerprint"],
+            },
+            "scope": {
+                "connection_alias": str(scope.get("alias") or "primary"),
+                "connection_fingerprint": str(scope.get("fingerprint") or ""),
+                "tenant_scope_id": str(scope.get("tenant_scope_id") or "workspace-primary"),
+                "display_name": str(scope.get("display_name") or scope.get("alias") or "Primary Splunk"),
+            },
+            "destination_identity": {
+                "hec_host": destination_host,
+                "mcp_host": mcp_host,
+                "host_match": bool(destination_host and mcp_host and destination_host == mcp_host),
+                "ports_may_differ": True,
+            },
+            "authority": {
+                "read_only": True,
+                "runs_spl": False,
+                "changes_splunk": False,
+                "installs_apps": False,
+                "enables_searches": False,
+                "stores_full_catalogs": False,
+            },
+            "observed_at": observed_at,
+        }
+        if not destination_host or not mcp_host or destination_host != mcp_host:
+            detail = (
+                "The selected MCP endpoint host does not match the exported kit's HEC host. "
+                "SignalRoom will not compare configuration across different Splunk identities."
+                if destination_host and mcp_host
+                else "SignalRoom could not establish both the HEC and MCP destination hosts."
+            )
+            return self._record_reconciliation(
+                export,
+                {
+                    **common,
+                    "status": "blocked",
+                    "summary": detail,
+                    "controls": [],
+                    "sources": [],
+                    "limitations": self._reconciliation_limitations(),
+                },
+            )
+
+        source_specs = [
+            ("index", "get_index_info", {"index_name": manifest["binding"]["index"]}, 1),
+            ("saved_searches", "get_knowledge_objects", {"type": "saved_searches", "row_limit": 1000}, 1000),
+            ("macros", "get_knowledge_objects", {"type": "macros", "row_limit": 1000}, 1000),
+            ("views", "get_knowledge_objects", {"type": "views", "row_limit": 1000}, 1000),
+            ("apps", "get_knowledge_objects", {"type": "apps", "row_limit": 1000}, 1000),
+        ]
+        collections: dict[str, list[dict[str, Any]]] = {}
+        collection_meta: dict[str, dict[str, Any]] = {}
+        sources: list[dict[str, Any]] = []
+        for source_id, tool, arguments, row_limit in source_specs:
+            try:
+                raw = await client.call(tool, arguments)
+                rows, meta = self._reconciliation_collection(raw, row_limit, source_id)
+                collections[source_id] = rows
+                collection_meta[source_id] = meta
+                sources.append(meta)
+            except Exception as exc:
+                collections[source_id] = []
+                meta = {
+                    "id": source_id,
+                    "tool": tool,
+                    "status": "unavailable",
+                    "returned": 0,
+                    "exhaustive": False,
+                    "detail": str(exc).strip()[:600] or "The MCP read failed.",
+                }
+                collection_meta[source_id] = meta
+                sources.append(meta)
+
+        controls: list[dict[str, Any]] = []
+        controls.append(
+            self._compare_object(
+                control_id="index-retention",
+                label="Dedicated audit index retention",
+                kind="index",
+                name=str(manifest["binding"]["index"]),
+                app="",
+                expected={"retention_seconds": int(manifest["policy"]["retention_days"]) * 86400},
+                field_aliases={
+                    "retention_seconds": (
+                        "frozenTimePeriodInSecs",
+                        "frozen_time_period_in_secs",
+                        "frozen_time_period",
+                        "retention_seconds",
+                    )
+                },
+                rows=collections["index"],
+                collection=collection_meta["index"],
+                normalizers={"retention_seconds": self._optional_int},
+            )
+        )
+        for app_id in (APP_ID, INDEXER_APP_ID):
+            controls.append(
+                self._compare_object(
+                    control_id=f"app:{app_id}",
+                    label=f"Splunk app {app_id}",
+                    kind="app",
+                    name=app_id,
+                    app="",
+                    expected={"version": "1.0.0"},
+                    field_aliases={"version": ("version", "app_version")},
+                    rows=collections["apps"],
+                    collection=collection_meta["apps"],
+                )
+            )
+        for expected in self._controls(policy):
+            controls.append(
+                self._compare_object(
+                    control_id=f"saved-search:{expected['id']}",
+                    label=expected["title"],
+                    kind="saved-search",
+                    name=expected["title"],
+                    app=APP_ID,
+                    expected={
+                        "search": self._normalize_text(expected["search"]),
+                        "cron_schedule": expected["schedule"],
+                        "earliest_time": expected["earliest"],
+                        "latest_time": "now",
+                        "disabled": True,
+                    },
+                    field_aliases={
+                        "search": ("search", "definition"),
+                        "cron_schedule": ("cron_schedule", "cron"),
+                        "earliest_time": (
+                            "dispatch.earliest_time",
+                            "dispatch_earliest_time",
+                            "earliest_time",
+                        ),
+                        "latest_time": (
+                            "dispatch.latest_time",
+                            "dispatch_latest_time",
+                            "latest_time",
+                        ),
+                        "disabled": ("disabled",),
+                    },
+                    rows=collections["saved_searches"],
+                    collection=collection_meta["saved_searches"],
+                    normalizers={
+                        "search": self._normalize_text,
+                        "disabled": self._optional_bool,
+                    },
+                )
+            )
+        base_macro = self._base_search(manifest["binding"])
+        canonical_macro = (
+            "`signalroom_audit_base` | dedup signalroom_event_id sortby - _time"
+            if manifest["policy"]["deduplication_mode"] == "stable-event-id"
+            else "`signalroom_audit_base`"
+        )
+        for macro_name, definition in (
+            ("signalroom_audit_base", base_macro),
+            ("signalroom_audit_canonical", canonical_macro),
+        ):
+            controls.append(
+                self._compare_object(
+                    control_id=f"macro:{macro_name}",
+                    label=f"Macro {macro_name}",
+                    kind="macro",
+                    name=macro_name,
+                    app=APP_ID,
+                    expected={"definition": self._normalize_text(definition), "iseval": False},
+                    field_aliases={"definition": ("definition", "search"), "iseval": ("iseval", "is_eval")},
+                    rows=collections["macros"],
+                    collection=collection_meta["macros"],
+                    normalizers={"definition": self._normalize_text, "iseval": self._optional_bool},
+                )
+            )
+        controls.append(
+            self._compare_object(
+                control_id="view:signalroom_audit_operations",
+                label="SignalRoom audit operations dashboard",
+                kind="view",
+                name="signalroom_audit_operations",
+                app=APP_ID,
+                expected={"definition": self._normalize_text(self._dashboard(policy))},
+                field_aliases={"definition": ("eai:data", "xml", "definition", "data")},
+                rows=collections["views"],
+                collection=collection_meta["views"],
+                normalizers={"definition": self._normalize_text},
+            )
+        )
+
+        successful_sources = sum(item["status"] == "observed" for item in sources)
+        if not successful_sources:
+            status = "blocked"
+            summary = "Every required MCP configuration read failed; no deployment conclusion was made."
+        elif any(item["status"] == "drifted" for item in controls):
+            status = "drifted"
+            summary = "One or more explicitly observed deployment values differ from the exported kit."
+        elif controls and all(item["status"] == "verified" for item in controls):
+            status = "verified"
+            summary = "Every required observable deployment value exactly matches the exported kit."
+        else:
+            status = "inconclusive"
+            summary = (
+                "No explicit drift was required for this result, but one or more values were "
+                "not observable or a bounded catalog was not exhaustive."
+            )
+        snapshot = {
+            **common,
+            "status": status,
+            "summary": summary,
+            "controls": controls,
+            "sources": sources,
+            "limitations": self._reconciliation_limitations(),
+            "counts": {
+                name: sum(item["status"] == name for item in controls)
+                for name in ("verified", "drifted", "not-observable", "inconclusive")
+            },
+        }
+        return self._record_reconciliation(export, snapshot)
+
+    def _validated_current_export(
+        self,
+        built: dict[str, Any],
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        export = next(
+            (
+                item
+                for item in self.store.operations_exports(100)
+                if item["policy_sha256"] == built["policy_sha256"]
+                and item["destination_fingerprint"] == built["destination_fingerprint"]
+            ),
+            None,
+        )
+        if export is None:
+            raise AuditOperationsReconciliationError(
+                "Export the current audit operations kit before reconciling it."
+            )
+        path = (self.export_dir / export["filename"]).resolve()
+        if path.parent != self.export_dir.resolve() or not path.is_file():
+            raise AuditOperationsReconciliationError("The current exported kit archive is unavailable.")
+        if hashlib.sha256(path.read_bytes()).hexdigest() != export["archive_sha256"]:
+            raise AuditOperationsReconciliationError(
+                "The current exported kit archive failed SHA-256 verification."
+            )
+        try:
+            with zipfile.ZipFile(path) as archive:
+                manifest = json.loads(archive.read("manifest.json"))
+                manifest_sha256 = hashlib.sha256(self._canonical(manifest).encode()).hexdigest()
+                if manifest_sha256 != export["manifest_sha256"]:
+                    raise AuditOperationsReconciliationError(
+                        "The exported kit manifest failed SHA-256 verification."
+                    )
+                if (
+                    manifest.get("policy_sha256") != built["policy_sha256"]
+                    or manifest.get("destination_fingerprint") != built["destination_fingerprint"]
+                ):
+                    raise AuditOperationsReconciliationError(
+                        "The exported kit is not bound to the current policy and destination."
+                    )
+                for name, expected in (manifest.get("files") or {}).items():
+                    body = archive.read(name)
+                    if hashlib.sha256(body).hexdigest() != expected.get("sha256"):
+                        raise AuditOperationsReconciliationError(
+                            f"Exported kit file failed verification: {name}"
+                        )
+        except AuditOperationsReconciliationError:
+            raise
+        except (OSError, KeyError, ValueError, zipfile.BadZipFile, json.JSONDecodeError) as exc:
+            raise AuditOperationsReconciliationError(
+                f"The exported kit could not be verified: {exc}"
+            ) from exc
+        return export, manifest
+
+    def _record_reconciliation(
+        self,
+        export: dict[str, Any],
+        snapshot: dict[str, Any],
+    ) -> dict[str, Any]:
+        snapshot_sha256 = hashlib.sha256(self._canonical(snapshot).encode()).hexdigest()
+        scope = snapshot["scope"]
+        result = self.store.record_operations_reconciliation(
+            reconciliation_id=str(uuid4()),
+            status=snapshot["status"],
+            policy_sha256=export["policy_sha256"],
+            destination_fingerprint=export["destination_fingerprint"],
+            export_id=export["id"],
+            manifest_sha256=export["manifest_sha256"],
+            connection_alias=scope["connection_alias"],
+            connection_fingerprint=scope["connection_fingerprint"],
+            tenant_scope_id=scope["tenant_scope_id"],
+            snapshot_sha256=snapshot_sha256,
+            snapshot=snapshot,
+        )
+        self.audit.record(
+            "audit.operations.pack.reconciled",
+            "verify",
+            target_type="audit-operations-pack",
+            target_id=export["id"],
+            outcome="success" if snapshot["status"] == "verified" else "warning",
+            summary=snapshot["summary"],
+            metadata={
+                "reconciliation_id": result["id"],
+                "status": result["status"],
+                "snapshot_sha256": snapshot_sha256,
+                "connection_alias": scope["connection_alias"],
+                "connection_fingerprint": scope["connection_fingerprint"],
+                "tenant_scope_id": scope["tenant_scope_id"],
+                "read_only": True,
+                "spl_executed": False,
+            },
+        )
+        return result
+
+    @classmethod
+    def _reconciliation_collection(
+        cls,
+        value: Any,
+        row_limit: int,
+        source_id: str,
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        if isinstance(value, dict) and value.get("error"):
+            raise AuditOperationsReconciliationError(str(value["error"]))
+        if isinstance(value, dict) and value.get("success") is False:
+            raise AuditOperationsReconciliationError(
+                str(value.get("message") or value.get("detail") or "The MCP read failed.")
+            )
+        total_rows = None
+        truncated_value = None
+        if isinstance(value, list):
+            source = value
+        elif isinstance(value, dict):
+            source = next(
+                (
+                    value[key]
+                    for key in (source_id, "results", "items", "data", "entries")
+                    if isinstance(value.get(key), list)
+                ),
+                None,
+            )
+            if source is None:
+                list_values = [item for item in value.values() if isinstance(item, list)]
+                source = list_values[0] if len(list_values) == 1 else None
+            if source is None:
+                nested = value.get("index") or value.get("result") or value.get("data")
+                source = [nested] if isinstance(nested, dict) else [value]
+            total_rows = cls._optional_int(value.get("total_rows") or value.get("total"))
+            truncated_value = cls._optional_bool(value.get("truncated"))
+        else:
+            raise AuditOperationsReconciliationError("The MCP tool returned an invalid collection.")
+        rows = [cls._flatten_row(item) for item in source if isinstance(item, dict)]
+        point_read = source_id == "index"
+        truncated = (
+            False
+            if point_read
+            else (
+                truncated_value
+                if truncated_value is not None
+                else bool(len(rows) >= row_limit or (total_rows is not None and total_rows > len(rows)))
+            )
+        )
+        exhaustive = point_read or (
+            not truncated and (total_rows <= len(rows) if total_rows is not None else len(rows) < row_limit)
+        )
+        return rows, {
+            "id": source_id,
+            "tool": "get_index_info" if source_id == "index" else "get_knowledge_objects",
+            "status": "observed",
+            "returned": len(rows),
+            "row_limit": row_limit,
+            "total_rows": total_rows,
+            "truncated": truncated,
+            "exhaustive": exhaustive,
+            "detail": (
+                "The returned catalog is bounded and may omit matching objects."
+                if truncated
+                else "The MCP response was normalized without retaining unrelated catalog rows."
+            ),
+        }
+
+    @classmethod
+    def _compare_object(
+        cls,
+        *,
+        control_id: str,
+        label: str,
+        kind: str,
+        name: str,
+        app: str,
+        expected: dict[str, Any],
+        field_aliases: dict[str, tuple[str, ...]],
+        rows: list[dict[str, Any]],
+        collection: dict[str, Any],
+        normalizers: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        normalizers = normalizers or {}
+        name_matches = [row for row in rows if cls._row_name(row) == name]
+        scoped_matches = [row for row in name_matches if not app or cls._row_app(row) == app]
+        candidates = scoped_matches
+        if not candidates and len(name_matches) == 1 and app and not cls._row_app(name_matches[0]):
+            candidates = name_matches
+        base = {
+            "id": control_id,
+            "label": label,
+            "kind": kind,
+            "source": collection["id"],
+            "expected_identity": {"name": name, "app": app},
+        }
+        if collection["status"] != "observed":
+            return {**base, "status": "not-observable", "detail": collection["detail"], "fields": []}
+        if not candidates:
+            status = "drifted" if collection.get("exhaustive") else "inconclusive"
+            return {
+                **base,
+                "status": status,
+                "detail": (
+                    "The expected object was absent from an exhaustive MCP response."
+                    if status == "drifted"
+                    else "The expected object was not returned, but the bounded catalog was not exhaustive."
+                ),
+                "fields": [],
+            }
+        if len(candidates) != 1:
+            return {
+                **base,
+                "status": "inconclusive",
+                "detail": "Multiple objects matched the expected identity; SignalRoom will not choose one.",
+                "fields": [],
+            }
+        row = candidates[0]
+        fields: list[dict[str, Any]] = []
+        if app:
+            observed_app = cls._row_app(row)
+            fields.append(
+                {
+                    "id": "app",
+                    "expected": app,
+                    "observed": observed_app or None,
+                    "status": "verified"
+                    if observed_app == app
+                    else "drifted"
+                    if observed_app
+                    else "not-observable",
+                }
+            )
+        normalized_observed: dict[str, Any] = {}
+        for field, expected_value in expected.items():
+            found, observed_value = cls._first_present(row, field_aliases[field])
+            normalizer = normalizers.get(field, lambda value: str(value).strip())
+            normalized = normalizer(observed_value) if found else None
+            if normalized is None:
+                field_status = "not-observable"
+            else:
+                field_status = "verified" if normalized == expected_value else "drifted"
+            normalized_observed[field] = normalized
+            fields.append(
+                {
+                    "id": field,
+                    "expected": expected_value,
+                    "observed": normalized,
+                    "status": field_status,
+                }
+            )
+        statuses = {item["status"] for item in fields}
+        status = (
+            "drifted"
+            if "drifted" in statuses
+            else "not-observable"
+            if "not-observable" in statuses
+            else "verified"
+        )
+        return {
+            **base,
+            "status": status,
+            "detail": (
+                "An explicitly observed value differs from the exported contract."
+                if status == "drifted"
+                else "The object was found, but the MCP response omitted a required field."
+                if status == "not-observable"
+                else "The object identity and every required exposed field match exactly."
+            ),
+            "observed_identity": {"name": cls._row_name(row), "app": cls._row_app(row)},
+            "observed": normalized_observed,
+            "fields": fields,
+        }
+
+    @staticmethod
+    def _flatten_row(row: dict[str, Any]) -> dict[str, Any]:
+        value: dict[str, Any] = {}
+        for key in ("content", "fields", "settings", "configuration", "properties", "data"):
+            if isinstance(row.get(key), dict):
+                value.update(row[key])
+        if isinstance(row.get("acl"), dict):
+            value.setdefault("eai:acl.app", row["acl"].get("app"))
+        value.update({key: item for key, item in row.items() if key not in {"content", "fields", "acl"}})
+        return value
+
+    @staticmethod
+    def _row_name(row: dict[str, Any]) -> str:
+        return str(
+            row.get("name")
+            or row.get("title")
+            or row.get("index_name")
+            or row.get("index")
+            or row.get("stanza")
+            or ""
+        ).strip()
+
+    @staticmethod
+    def _row_app(row: dict[str, Any]) -> str:
+        return str(row.get("app") or row.get("eai:acl.app") or row.get("eai_acl_app") or "").strip()
+
+    @staticmethod
+    def _first_present(row: dict[str, Any], aliases: tuple[str, ...]) -> tuple[bool, Any]:
+        for name in aliases:
+            if name in row and row[name] is not None:
+                return True, row[name]
+        return False, None
+
+    @staticmethod
+    def _normalize_text(value: Any) -> str:
+        return re.sub(r"\s+", " ", str(value or "")).strip()
+
+    @staticmethod
+    def _optional_bool(value: Any) -> bool | None:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        text = str(value or "").strip().lower()
+        if text in {"1", "true", "yes", "on"}:
+            return True
+        if text in {"0", "false", "no", "off"}:
+            return False
+        return None
+
+    @staticmethod
+    def _optional_int(value: Any) -> int | None:
+        try:
+            return int(value) if value is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _reconciliation_limitations() -> list[dict[str, str]]:
+        return [
+            {
+                "id": "app-conf",
+                "status": "not-observable",
+                "detail": (
+                    "The MCP contract can list apps but does not expose complete app.conf file content."
+                ),
+            },
+            {
+                "id": "navigation",
+                "status": "not-observable",
+                "detail": "The generated navigation XML is not exposed by the available MCP tools.",
+            },
+            {
+                "id": "metadata-acl",
+                "status": "not-observable",
+                "detail": "The complete default.meta ACL file is not exposed by the available MCP tools.",
+            },
+            {
+                "id": "deployment-topology",
+                "status": "not-observable",
+                "detail": (
+                    "MCP observations do not prove bundle replication across every "
+                    "search head or indexer peer."
+                ),
+            },
+        ]
 
     def _health(self, policy: dict[str, Any], export: dict[str, Any]) -> dict[str, Any]:
         export_policy = export["policy"]

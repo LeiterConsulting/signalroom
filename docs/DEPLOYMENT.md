@@ -196,7 +196,20 @@ and the
 
 The ZIP manifest hashes every generated file and binds the pack to the destination and operations-policy
 fingerprints. SignalRoom records exports in its local hash chain, but does not call Splunk, install either app,
-verify the installed configuration, enable a search, or configure an alert action.
+enable a search, or configure an alert action.
+
+After an administrator deploys the reviewed components, select the exact admitted Splunk target and choose
+**Reconcile deployed pack**. SignalRoom verifies the local archive before making any remote call, requires the HEC
+and MCP endpoint hostnames to match, and reads exact index information plus bounded app, saved-search, macro, and
+view catalogs. It executes no SPL and stores only matched normalized configuration. A result can be:
+
+- **Verified**: all required fields exposed by MCP match the exported contract.
+- **Drift detected**: a value explicitly differs, or an expected object is absent from an exhaustive response.
+- **Inconclusive**: a catalog is truncated, an identity is ambiguous, or a required field is unavailable.
+- **Blocked**: destination identity or all required MCP reads failed closed.
+
+The MCP contract does not prove full app.conf, navigation, metadata ACL, or cluster-wide bundle replication. Those
+limits remain visible in every retained reconciliation rather than being inferred from app presence.
 
 ## Windows
 

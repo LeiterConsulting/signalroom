@@ -300,6 +300,12 @@
                       <p id="auditOperationsHealth" aria-live="polite">Evaluating local export health.</p>
                       <div class="audit-operations-actions"><button class="button ghost small" id="previewAuditOperations" type="button">Preview controls</button><button class="button primary small" id="exportAuditOperations" type="button">Export review kit</button></div>
                     </div>
+                    <section class="audit-reconciliation" aria-labelledby="auditReconciliationTitle">
+                      <header><div><span>READ-ONLY DEPLOYMENT RECONCILIATION</span><h5 id="auditReconciliationTitle">Compare the exported contract with one exact Splunk scope</h5><p id="auditReconciliationHint">Export the current kit before reconciling its deployed state.</p></div><span class="subtle-pill" id="auditReconciliationStatus">Not observed</span></header>
+                      <div class="audit-reconciliation-runner"><label><span>Admitted Splunk target</span><select id="auditOperationsTarget" aria-describedby="auditReconciliationAuthority"></select></label><button class="button primary small" id="reconcileAuditOperations" type="button">Reconcile deployed pack</button></div>
+                      <p id="auditReconciliationAuthority" class="audit-reconciliation-authority">Configuration reads only · no SPL · no installation · no saved-search changes</p>
+                      <div id="auditReconciliationHistory" class="audit-reconciliation-history"><div class="empty-inline compact-empty">No deployment reconciliation has been recorded.</div></div>
+                    </section>
                     <div class="audit-operations-preview" id="auditOperationsPreview" hidden></div>
                     <div class="audit-operations-exports" id="auditOperationsExports"><div class="empty-inline compact-empty">No audit operations kit has been exported.</div></div>
                   </section>

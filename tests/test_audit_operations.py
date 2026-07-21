@@ -5,12 +5,15 @@ import zipfile
 from typing import Any
 from xml.etree import ElementTree
 
+import pytest
+
 from splunk_security_agent.audit import AuditStore
 from splunk_security_agent.audit_export import (
     AuditExportStore,
     AuditOperationsService,
     SplunkAuditExportService,
 )
+from splunk_security_agent.audit_export.operations import AuditOperationsReconciliationError
 from splunk_security_agent.config import ConfigStore
 from splunk_security_agent.schemas import (
     AuditExportPolicyUpdate,
@@ -32,6 +35,86 @@ def build_service(
         tmp_path / "operations-exports",
     )
     return operations, audit_export, audit
+
+
+class ReconciliationSplunk:
+    url = "https://splunk:8089/services/mcp"
+
+    def __init__(self, operations: AuditOperationsService, *, drift_retention: bool = False):
+        policy = operations.store.operations_policy()
+        binding = operations._build(policy)["binding"]
+        controls = operations._controls(policy)
+        self.calls: list[tuple[str, dict[str, Any]]] = []
+        self.values = {
+            "index": {
+                "name": binding["index"],
+                "frozenTimePeriodInSecs": (policy["retention_days"] * 86400 + (1 if drift_retention else 0)),
+            },
+            "apps": {
+                "results": [
+                    {"name": "signalroom_audit_operations", "version": "1.0.0"},
+                    {"name": "signalroom_audit_retention", "version": "1.0.0"},
+                ]
+            },
+            "saved_searches": {
+                "results": [
+                    {
+                        "name": item["title"],
+                        "app": "signalroom_audit_operations",
+                        "search": item["search"],
+                        "cron_schedule": item["schedule"],
+                        "dispatch.earliest_time": item["earliest"],
+                        "dispatch.latest_time": "now",
+                        "disabled": "1",
+                    }
+                    for item in controls
+                ]
+            },
+            "macros": {
+                "results": [
+                    {
+                        "name": "signalroom_audit_base",
+                        "app": "signalroom_audit_operations",
+                        "definition": operations._base_search(binding),
+                        "iseval": "0",
+                    },
+                    {
+                        "name": "signalroom_audit_canonical",
+                        "app": "signalroom_audit_operations",
+                        "definition": ("`signalroom_audit_base` | dedup signalroom_event_id sortby - _time"),
+                        "iseval": "0",
+                    },
+                ]
+            },
+            "views": {
+                "results": [
+                    {
+                        "name": "signalroom_audit_operations",
+                        "app": "signalroom_audit_operations",
+                        "eai:data": operations._dashboard(policy),
+                    }
+                ]
+            },
+        }
+
+    async def call(self, name: str, arguments: dict[str, Any]) -> Any:
+        self.calls.append((name, arguments))
+        if name == "get_index_info":
+            return self.values["index"]
+        return self.values[arguments["type"]]
+
+
+def export_reconcilable_kit(
+    operations: AuditOperationsService,
+    audit_export: SplunkAuditExportService,
+) -> None:
+    audit_export.update_policy(
+        AuditExportPolicyUpdate(
+            index_name="signalroom_audit",
+            hec_url="https://splunk:8088",
+        )
+    )
+    operations.export()
 
 
 def test_audit_operations_policy_is_durable_and_local_only_by_default(
@@ -152,3 +235,125 @@ def test_audit_operations_reports_a_local_chain_break(tmp_path: Any) -> None:
     assert health["status"] == "chain-invalid"
     assert health["local_chain_valid"] is False
     assert "sequence 1" in health["detail"]
+
+
+async def test_audit_operations_reconciliation_verifies_exact_read_only_contract(
+    tmp_path: Any,
+) -> None:
+    operations, audit_export, audit = build_service(tmp_path)
+    export_reconcilable_kit(operations, audit_export)
+    client = ReconciliationSplunk(operations)
+    scope = {
+        "alias": "primary",
+        "fingerprint": "a" * 64,
+        "tenant_scope_id": "workspace-primary",
+        "display_name": "Primary Splunk",
+    }
+
+    result = await operations.reconcile(scope, client)
+
+    assert result["status"] == "verified"
+    assert result["snapshot"]["counts"] == {
+        "verified": 10,
+        "drifted": 0,
+        "not-observable": 0,
+        "inconclusive": 0,
+    }
+    assert result["snapshot"]["authority"]["runs_spl"] is False
+    assert len(client.calls) == 5
+    assert all(name != "run_query" for name, _ in client.calls)
+    assert operations.overview()["reconciliation"]["current"]["id"] == result["id"]
+    assert audit.events()[0]["event_type"] == "audit.operations.pack.reconciled"
+
+
+async def test_audit_operations_reconciliation_exposes_drift_and_scope_binding(
+    tmp_path: Any,
+) -> None:
+    operations, audit_export, _ = build_service(tmp_path)
+    export_reconcilable_kit(operations, audit_export)
+    client = ReconciliationSplunk(operations, drift_retention=True)
+    scope = {
+        "alias": "east",
+        "fingerprint": "b" * 64,
+        "tenant_scope_id": "tenant-east",
+        "display_name": "East Splunk",
+    }
+
+    result = await operations.reconcile(scope, client)
+
+    assert result["status"] == "drifted"
+    control = next(item for item in result["snapshot"]["controls"] if item["id"] == "index-retention")
+    assert control["status"] == "drifted"
+    assert result["connection_alias"] == "east"
+    assert operations.overview(allowed_connection_ids={"primary"})["reconciliation"]["history"] == []
+
+
+async def test_audit_operations_reconciliation_blocks_cross_instance_comparison(
+    tmp_path: Any,
+) -> None:
+    operations, audit_export, _ = build_service(tmp_path)
+    export_reconcilable_kit(operations, audit_export)
+    client = ReconciliationSplunk(operations)
+    client.url = "https://different-splunk:8089/services/mcp"
+
+    result = await operations.reconcile(
+        {
+            "alias": "primary",
+            "fingerprint": "a" * 64,
+            "tenant_scope_id": "workspace-primary",
+        },
+        client,
+    )
+
+    assert result["status"] == "blocked"
+    assert result["snapshot"]["destination_identity"]["host_match"] is False
+    assert client.calls == []
+
+
+async def test_audit_operations_reconciliation_retains_unobservable_fields(
+    tmp_path: Any,
+) -> None:
+    operations, audit_export, _ = build_service(tmp_path)
+    export_reconcilable_kit(operations, audit_export)
+    client = ReconciliationSplunk(operations)
+    client.values["views"]["results"][0].pop("eai:data")
+
+    result = await operations.reconcile(
+        {
+            "alias": "primary",
+            "fingerprint": "a" * 64,
+            "tenant_scope_id": "workspace-primary",
+        },
+        client,
+    )
+
+    assert result["status"] == "inconclusive"
+    dashboard = next(
+        item for item in result["snapshot"]["controls"] if item["id"] == "view:signalroom_audit_operations"
+    )
+    assert dashboard["status"] == "not-observable"
+    assert dashboard["fields"][1]["status"] == "not-observable"
+
+
+async def test_audit_operations_reconciliation_rejects_a_tampered_archive(
+    tmp_path: Any,
+) -> None:
+    operations, audit_export, _ = build_service(tmp_path)
+    export_reconcilable_kit(operations, audit_export)
+    current = operations.overview()["pack"]["current_export"]
+    path = operations.export_dir / current["filename"]
+    with path.open("ab") as handle:
+        handle.write(b"tampered")
+    client = ReconciliationSplunk(operations)
+
+    with pytest.raises(AuditOperationsReconciliationError, match="archive failed SHA-256"):
+        await operations.reconcile(
+            {
+                "alias": "primary",
+                "fingerprint": "a" * 64,
+                "tenant_scope_id": "workspace-primary",
+            },
+            client,
+        )
+
+    assert client.calls == []

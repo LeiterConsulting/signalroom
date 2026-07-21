@@ -9,7 +9,7 @@ const state = {
   assurance: null, assurancePolicyDirty: false, connectionDiagnostics: null, queryIntelligence: null,
   workload: null,
   feedbackBenchmarks: null, goldenBenchmarks: null, selectedTournamentId: null, deliveryPolicyDirty: false,
-  auditExportPolicyDirty: false, auditOperationsPolicyDirty: false, auditOperationsPreview: null,
+  auditExportPolicyDirty: false, auditOperationsPolicyDirty: false, auditOperationsPreview: null, auditOperationsTarget: '',
   evaluationDraft: null, evaluationScenarioIndex: 0,
   deliveryPreview: null, detections: [], activeDetection: null, detectionGitExport: null,
   repositoryStatus: null, repositoryHandoff: null, auth: null, authUsers: [],
@@ -262,7 +262,7 @@ function applyAccessPermissions() {
     '#chatInput', '#chatForm .send-button', '#runDiscovery', '#cancelDiscoveryJob', '#runConnectionDiagnostics',
     '#runAssuranceNow', '#assuranceForm button', '#deliveryForm button', '#auditExportForm button',
     '#auditOperationsForm button', '#runAuditExport', '#previewAuditOperations',
-    '#exportAuditOperations', '#scanSplunkModels',
+    '#exportAuditOperations', '#reconcileAuditOperations', '#scanSplunkModels',
     '#runModelTournament', '#runGoldenBenchmark', '#addArtifact', '#uploadArtifact',
     '#newCase', '#newDetection', '#runTimeSeriesForecast',
     '#timeSeriesScheduleForm input', '#timeSeriesScheduleForm select',
@@ -282,7 +282,7 @@ function applyAccessPermissions() {
   });
   const connectionSelectors = [
     '#chatInput', '#chatForm .send-button', '#runDiscovery', '#cancelDiscoveryJob',
-    '#runConnectionDiagnostics', '#runAssuranceNow', '#scanSplunkModels',
+    '#runConnectionDiagnostics', '#runAssuranceNow', '#reconcileAuditOperations', '#scanSplunkModels',
     '#runTimeSeriesForecast', '#timeSeriesScheduleForm button',
     '#timeSeriesScheduleHistory button'
   ];
@@ -300,7 +300,7 @@ function applyAccessPermissions() {
     '#auditExportForm input', '#auditExportForm select', '#auditExportForm button',
     '#auditOperationsForm input', '#auditOperationsForm select',
     '#auditOperationsForm button', '#runAuditExport', '#previewAuditOperations',
-    '#exportAuditOperations',
+    '#exportAuditOperations', '#auditOperationsTarget', '#reconcileAuditOperations',
     '[data-pull-profile]', '[data-activate-model]', '[data-promote-tournament]',
     '#modelTrustPolicyForm input', '#modelTrustPolicyForm select',
     '#modelTrustPolicyForm button', '[data-approve-model-artifact]',
@@ -885,6 +885,7 @@ async function loadConnections() {
     state.activeScope = scopes.find(item => scopeKey(item) === prior) || scopes[0] || state.connections.primary || null;
     renderConnections();
     renderScopeSelector();
+    if (state.assurance?.audit_operations) renderAuditOperations(state.assurance.audit_operations);
   } catch (_) {
     state.connections = null;
   }
@@ -3877,6 +3878,33 @@ function renderAuditOperationsPreview(preview) {
     <p class="audit-operations-warning">${escapeHtml(preview.retention?.warning || '')}</p>`;
 }
 
+function auditReconciliationValue(value) {
+  if (value === null || value === undefined || value === '') return 'Not reported';
+  const text = typeof value === 'string' ? value : JSON.stringify(value);
+  return text.length > 180 ? `${text.slice(0,177)}…` : text;
+}
+
+function renderAuditOperationsReconciliation(value = {}) {
+  const history = value.history || [];
+  const latest = value.current || history[0] || null;
+  const statusLabels = {verified:'Verified',drifted:'Drift detected',inconclusive:'Inconclusive',blocked:'Blocked'};
+  const statusNode = $('#auditReconciliationStatus');
+  statusNode.textContent = latest ? (statusLabels[latest.status] || latest.status) : 'Not observed';
+  statusNode.className = `subtle-pill ${latest?.status === 'verified' ? 'ok' : ['drifted','blocked'].includes(latest?.status) ? 'warn' : ''}`;
+  $('#auditReconciliationHint').textContent = value.detail || 'Export the current kit before reconciling its deployed state.';
+  const holder = $('#auditReconciliationHistory');
+  holder.innerHTML = history.length ? history.slice(0,8).map(item => {
+    const snapshot = item.snapshot || {}; const counts = snapshot.counts || {};
+    const controls = snapshot.controls || []; const limitations = snapshot.limitations || [];
+    const attention = controls.filter(control => control.status !== 'verified');
+    const detailRows = attention.map(control => {
+      const fields = (control.fields || []).filter(field => field.status !== 'verified');
+      return `<li><div><b>${escapeHtml(control.label || control.id)}</b><span class="reconciliation-state ${escapeHtml(control.status)}">${escapeHtml(control.status)}</span></div><p>${escapeHtml(control.detail || '')}</p>${fields.length ? `<dl>${fields.map(field => `<dt>${escapeHtml(String(field.id).replaceAll('_',' '))}</dt><dd><span>Expected: <code>${escapeHtml(auditReconciliationValue(field.expected))}</code></span><span>Observed: <code>${escapeHtml(auditReconciliationValue(field.observed))}</code></span></dd>`).join('')}</dl>` : ''}</li>`;
+    }).join('');
+    return `<details class="audit-reconciliation-record ${escapeHtml(item.status)}" ${item.id === latest?.id ? 'open' : ''}><summary><div><b>${escapeHtml(statusLabels[item.status] || item.status)}</b><span>${escapeHtml(snapshot.summary || '')}</span></div><small>${escapeHtml(item.connection_alias)} · ${escapeHtml(item.tenant_scope_id)} · ${escapeHtml(assuranceTime(item.observed_at))}</small></summary><div class="audit-reconciliation-proof"><span><b>${Number(counts.verified || 0)}</b> verified</span><span><b>${Number(counts.drifted || 0)}</b> drifted</span><span><b>${Number(counts['not-observable'] || 0)}</b> not observable</span><span><b>${Number(counts.inconclusive || 0)}</b> inconclusive</span><span><b>Revision</b><code>${escapeHtml(shortFingerprint(item.connection_fingerprint))}</code></span><span><b>Snapshot</b><code>${escapeHtml(shortFingerprint(item.snapshot_sha256))}</code></span></div>${detailRows ? `<ul class="audit-reconciliation-findings">${detailRows}</ul>` : '<p class="audit-reconciliation-clean">Every required observable control matched the immutable export.</p>'}<details class="audit-reconciliation-limitations"><summary>Observation limits (${limitations.length})</summary><ul>${limitations.map(limit => `<li><b>${escapeHtml(limit.id.replaceAll('-',' '))}</b><span>${escapeHtml(limit.detail)}</span></li>`).join('')}</ul></details></details>`;
+  }).join('') : '<div class="empty-inline compact-empty">No deployment reconciliation has been recorded.</div>';
+}
+
 function renderAuditOperations(value) {
   hydrateAuditOperations(value);
   const policy = value?.policy || {};
@@ -3902,12 +3930,23 @@ function renderAuditOperations(value) {
   const lacksAdmin = Boolean(state.auth?.authenticated && !state.auth?.permissions?.can_administer);
   $('#previewAuditOperations').disabled = lacksAdmin;
   $('#exportAuditOperations').disabled = lacksAdmin;
+  const target = $('#auditOperationsTarget');
+  const scopes = executionScopes();
+  const selected = scopes.find(item => scopeKey(item) === state.auditOperationsTarget) || state.activeScope || scopes[0] || {};
+  target.innerHTML = scopes.length ? scopeOptions(selected) : '<option value="">No admitted Splunk scope</option>';
+  if (scopes.length) {
+    target.value = scopeKey(selected);
+    state.auditOperationsTarget = target.value;
+  }
+  target.disabled = lacksAdmin || !scopes.length;
+  $('#reconcileAuditOperations').disabled = lacksAdmin || !value?.reconciliation?.available || !scopes.length;
   const exports = value?.exports || [];
   $('#auditOperationsExports').innerHTML = exports.length ? exports.map(item => `
     <article class="${item.policy_sha256 === pack.policy_sha256 && item.destination_fingerprint === pack.destination_fingerprint ? 'current' : ''}">
       <div><b>${item.policy_sha256 === pack.policy_sha256 && item.destination_fingerprint === pack.destination_fingerprint ? 'Current policy kit' : 'Superseded kit'}</b><a href="/api/audit-operations/exports/${encodeURIComponent(item.filename)}" download>${escapeHtml(item.filename)}</a></div>
       <span>${escapeHtml(assuranceTime(item.created_at))}</span><code>${escapeHtml(item.archive_sha256.slice(0,12))}</code>
     </article>`).join('') : '<div class="empty-inline compact-empty">No audit operations kit has been exported.</div>';
+  renderAuditOperationsReconciliation(value?.reconciliation || {});
   renderAuditOperationsPreview(state.auditOperationsPreview);
 }
 
@@ -4137,6 +4176,25 @@ async function exportAuditOperations() {
   finally {
     button.disabled = false;
     button.textContent = 'Export review kit';
+  }
+}
+
+async function reconcileAuditOperations() {
+  const button = $('#reconcileAuditOperations');
+  button.disabled = true;
+  button.textContent = 'Reading deployment…';
+  $('#auditReconciliationHint').textContent = 'Verifying the archive, then reading the exact index, apps, saved searches, macros, and dashboard through Splunk MCP.';
+  try {
+    const scope = selectedScope('#auditOperationsTarget');
+    state.auditOperationsTarget = scopeKey(scope);
+    const result = await api('/api/audit-operations/reconcile', {method:'POST',body:JSON.stringify(bindingPayload(scope))});
+    await loadAssurance();
+    toast(result.status === 'verified' ? 'Deployed audit pack verified' : result.status === 'drifted' ? 'Audit pack drift detected' : `Audit pack reconciliation ${result.status}`);
+  } catch (error) {
+    toast(error.message);
+    await loadAssurance();
+  } finally {
+    button.textContent = 'Reconcile deployed pack';
   }
 }
 
@@ -6047,6 +6105,8 @@ $('#testSoarDeliveryDestination').addEventListener('click', testDeliveryDestinat
 $('#runAuditExport').addEventListener('click', runAuditExportNow);
 $('#previewAuditOperations').addEventListener('click', previewAuditOperations);
 $('#exportAuditOperations').addEventListener('click', exportAuditOperations);
+$('#reconcileAuditOperations').addEventListener('click', reconcileAuditOperations);
+$('#auditOperationsTarget').addEventListener('change', event => { state.auditOperationsTarget = event.target.value; });
 $('#runAssuranceNow').addEventListener('click', runAssuranceNow);
 $('#cancelAssuranceRun').addEventListener('click', cancelAssuranceRun);
 $('#assuranceDepth').addEventListener('change', updateAssuranceBudgetHelp);

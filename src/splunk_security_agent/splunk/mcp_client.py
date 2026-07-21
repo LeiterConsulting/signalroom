@@ -18,6 +18,7 @@ TOOL_ALIASES: dict[str, list[str]] = {
     "run_query": ["splunk_run_query", "run_splunk_query", "run_query"],
     "get_info": ["splunk_get_info", "get_splunk_info", "server_info"],
     "get_indexes": ["splunk_get_indexes", "get_indexes", "list_indexes"],
+    "get_index_info": ["splunk_get_index_info", "get_index_info"],
     "get_metadata": ["splunk_get_metadata", "get_metadata", "metadata"],
     "get_users": ["splunk_get_user_info", "splunk_get_user_list", "get_user_list"],
     "get_knowledge_objects": ["splunk_get_knowledge_objects", "get_knowledge_objects"],
@@ -29,6 +30,7 @@ TOOL_ALIASES: dict[str, list[str]] = {
 CACHEABLE_TOOLS = {
     "get_info",
     "get_indexes",
+    "get_index_info",
     "get_metadata",
     "get_users",
     "get_knowledge_objects",

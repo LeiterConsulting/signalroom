@@ -575,6 +575,10 @@ class ConnectionScopeReference(BaseModel):
     tenant_scope_id: str = Field(default="workspace-primary", min_length=1, max_length=160)
 
 
+class AuditOperationsReconcileRequest(ConnectionScopeReference):
+    pass
+
+
 class DiscoveryComparisonRequest(BaseModel):
     left: ConnectionScopeReference
     right: ConnectionScopeReference

@@ -391,6 +391,20 @@ actions, or claim destination health. The local health calculation is intentiona
 chain, cursor state, pending count, oldest pending event, and the configured export-lag expectation. Destination
 observation begins only after an operator reviews and deploys the generated content.
 
+Explicit reconciliation is a separate read-only action. It first verifies the selected current archive SHA-256,
+manifest SHA-256, every manifested file hash, operations-policy fingerprint, and destination fingerprint. It then
+binds the observation to one admitted connection alias, immutable connection revision, and tenant. The exported HEC
+host must equal the selected MCP endpoint host; differing ports are expected, while a missing or different host
+blocks all remote reads.
+
+The reconciler makes no more than five configuration calls: exact index information plus bounded saved-search,
+macro, view, and app catalogs. It runs no SPL and retains only normalized objects matching the generated contract.
+An exhaustive absence or an explicit field mismatch is drift. A truncated catalog, duplicate identity, or omitted
+required field is inconclusive or `not-observable`; it is never upgraded to a match. Complete app.conf contents,
+navigation XML, default.meta ACL content, and topology-wide bundle replication remain explicit observation limits.
+Each snapshot is SHA-256 bound to the export and scope and is stored in `audit_export.db`; RBAC listing filters the
+history by authorized connection alias.
+
 ### MCP exists on both sides
 
 SignalRoom is an MCP client of a Splunk MCP server and an MCP server to agent hosts. That lets another agent call the controlled, domain-specific workflows without receiving raw Splunk credentials.
@@ -445,11 +459,9 @@ there is deliberately no remote recovery route.
 
 ## Next production increments
 
-1. Add read-only deployment reconciliation for the audit operations pack when the Splunk MCP contract exposes the
-   required index and knowledge-object configuration fields
-2. Add retention and administrator cleanup policy for superseded tenant generations, reverse snapshots, and
+1. Add retention and administrator cleanup policy for superseded tenant generations, reverse snapshots, and
    encrypted recovery exports/checkpoints
-3. Complete release-candidate upgrade, installer, recovery, multi-instance, and security acceptance testing
+2. Complete release-candidate upgrade, installer, recovery, multi-instance, and security acceptance testing
 
 ## Recovery is a restart-gated control-plane transaction
 

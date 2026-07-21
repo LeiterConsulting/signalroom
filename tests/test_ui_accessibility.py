@@ -265,7 +265,13 @@ def test_remote_audit_export_is_explicit_and_accessible() -> None:
     assert 'id="auditDeduplicationMode"' in INDEX_HTML
     assert 'id="previewAuditOperations"' in INDEX_HTML
     assert 'id="exportAuditOperations"' in INDEX_HTML
+    assert 'id="auditOperationsTarget"' in INDEX_HTML
+    assert 'id="reconcileAuditOperations"' in INDEX_HTML
+    assert "Configuration reads only · no SPL" in INDEX_HTML
     assert "async function previewAuditOperations" in APP_JS
     assert "async function exportAuditOperations" in APP_JS
+    assert "async function reconcileAuditOperations" in APP_JS
+    assert "renderAuditOperationsReconciliation" in APP_JS
     assert "renderAuditOperations(value.audit_operations || {})" in APP_JS
     assert ".audit-operations-workspace" in STYLES_CSS
+    assert ".audit-reconciliation-runner select" in STYLES_CSS

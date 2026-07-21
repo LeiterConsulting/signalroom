@@ -20,6 +20,7 @@ from .assurance import AssuranceResponseService, AssuranceService
 from .audit import AuditStore, bind_audit_actor, reset_audit_actor
 from .audit_export import (
     AuditExportStore,
+    AuditOperationsReconciliationError,
     AuditOperationsService,
     SplunkAuditExportService,
 )
@@ -72,6 +73,7 @@ from .schemas import (
     AssuranceRunCreate,
     AuditExportPolicyUpdate,
     AuditOperationsPolicyUpdate,
+    AuditOperationsReconcileRequest,
     AuthBootstrapRequest,
     AuthDisableRequest,
     AuthLoginRequest,
@@ -1044,7 +1046,9 @@ def _recovery_frozen_response() -> JSONResponse:
 @app.middleware("http")
 async def sensitive_cache_control(request: Request, call_next: Any) -> Response:
     response = await call_next(request)
-    if request.url.path.startswith(("/api/recovery", "/api/discovery/review-packets")):
+    if request.url.path.startswith(
+        ("/api/recovery", "/api/discovery/review-packets", "/api/audit-operations")
+    ):
         response.headers["Cache-Control"] = "no-store"
     return response
 
@@ -3647,7 +3651,10 @@ async def assurance_overview(request: Request) -> dict[str, Any]:
     result["delivery"] = services.delivery.overview(policy["tenant_scope_id"])
     result["audit"] = services.audit.overview(20)
     result["audit_export"] = services.audit_export.overview()
-    result["audit_operations"] = services.audit_operations.overview(result["audit_export"])
+    result["audit_operations"] = services.audit_operations.overview(
+        result["audit_export"],
+        _allowed_connection_ids(),
+    )
     return result
 
 
@@ -3969,7 +3976,9 @@ async def run_audit_export() -> dict[str, Any]:
 
 @app.get("/api/audit-operations")
 async def audit_operations_overview() -> dict[str, Any]:
-    return services.audit_operations.overview()
+    return services.audit_operations.overview(
+        allowed_connection_ids=_allowed_connection_ids()
+    )
 
 
 @app.put("/api/audit-operations/policy")
@@ -3987,6 +3996,23 @@ async def preview_audit_operations() -> dict[str, Any]:
 @app.post("/api/audit-operations/export", status_code=201)
 async def export_audit_operations() -> dict[str, Any]:
     return services.audit_operations.export()
+
+
+@app.post("/api/audit-operations/reconcile", status_code=201)
+async def reconcile_audit_operations(
+    request: AuditOperationsReconcileRequest,
+) -> dict[str, Any]:
+    scope = _request_scope(
+        request.connection_alias,
+        request.connection_fingerprint,
+        request.tenant_scope_id,
+    )
+    try:
+        client = services.splunk_for_scope(scope)
+        async with services.workload.scope("audit-operations:reconcile"):
+            return await services.audit_operations.reconcile(scope, client)
+    except (AuditOperationsReconciliationError, ValueError) as exc:
+        raise HTTPException(409, str(exc)) from exc
 
 
 @app.get("/api/audit-operations/exports/{filename}")

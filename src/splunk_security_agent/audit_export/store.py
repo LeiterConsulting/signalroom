@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
@@ -105,6 +106,27 @@ class AuditExportStore:
                 );
                 CREATE INDEX IF NOT EXISTS idx_audit_operations_exports_created
                     ON audit_operations_exports(created_at DESC);
+                CREATE TABLE IF NOT EXISTS audit_operations_reconciliations (
+                    id TEXT PRIMARY KEY,
+                    status TEXT NOT NULL,
+                    policy_sha256 TEXT NOT NULL,
+                    destination_fingerprint TEXT NOT NULL,
+                    export_id TEXT NOT NULL,
+                    manifest_sha256 TEXT NOT NULL,
+                    connection_alias TEXT NOT NULL,
+                    connection_fingerprint TEXT NOT NULL,
+                    tenant_scope_id TEXT NOT NULL,
+                    snapshot_sha256 TEXT NOT NULL,
+                    snapshot TEXT NOT NULL,
+                    observed_at TEXT NOT NULL,
+                    FOREIGN KEY(export_id) REFERENCES audit_operations_exports(id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_audit_operations_reconciliations_observed
+                    ON audit_operations_reconciliations(observed_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_audit_operations_reconciliations_binding
+                    ON audit_operations_reconciliations(
+                        connection_alias,connection_fingerprint,tenant_scope_id,observed_at DESC
+                    );
                 """
             )
             db.execute(
@@ -309,9 +331,7 @@ class AuditExportStore:
         elif retryable and failures < int(policy["max_attempts"]):
             status = "retrying"
             delay = int(policy["retry_backoff_seconds"]) * (2 ** max(0, failures - 1))
-            next_attempt_at = datetime.fromtimestamp(
-                now.timestamp() + min(delay, 3600), UTC
-            ).isoformat()
+            next_attempt_at = datetime.fromtimestamp(now.timestamp() + min(delay, 3600), UTC).isoformat()
             cursor = int(state["cursor_sequence"])
         else:
             status = "failed"
@@ -395,25 +415,19 @@ class AuditExportStore:
 
     def operations_policy(self) -> dict[str, Any]:
         with self.connect() as db:
-            row = db.execute(
-                "SELECT * FROM audit_operations_policy WHERE id=1"
-            ).fetchone()
+            row = db.execute("SELECT * FROM audit_operations_policy WHERE id=1").fetchone()
         assert row is not None
         return {
             "retention_days": int(row["retention_days"]),
             "deduplication_mode": row["deduplication_mode"],
-            "expected_export_lag_minutes": int(
-                row["expected_export_lag_minutes"]
-            ),
+            "expected_export_lag_minutes": int(row["expected_export_lag_minutes"]),
             "source_silence_minutes": int(row["source_silence_minutes"]),
             "denied_request_threshold": int(row["denied_request_threshold"]),
             "dashboard_earliest": row["dashboard_earliest"],
             "updated_at": row["updated_at"],
         }
 
-    def update_operations_policy(
-        self, value: AuditOperationsPolicyUpdate
-    ) -> dict[str, Any]:
+    def update_operations_policy(self, value: AuditOperationsPolicyUpdate) -> dict[str, Any]:
         now = _now()
         with self._lock, self.connect() as db:
             db.execute(
@@ -489,3 +503,97 @@ class AuditExportStore:
             }
             for row in rows
         ]
+
+    def record_operations_reconciliation(
+        self,
+        *,
+        reconciliation_id: str,
+        status: str,
+        policy_sha256: str,
+        destination_fingerprint: str,
+        export_id: str,
+        manifest_sha256: str,
+        connection_alias: str,
+        connection_fingerprint: str,
+        tenant_scope_id: str,
+        snapshot_sha256: str,
+        snapshot: dict[str, Any],
+    ) -> dict[str, Any]:
+        observed_at = str(snapshot.get("observed_at") or _now())
+        with self._lock, self.connect() as db:
+            db.execute(
+                """INSERT INTO audit_operations_reconciliations
+                (id,status,policy_sha256,destination_fingerprint,export_id,
+                manifest_sha256,connection_alias,connection_fingerprint,
+                tenant_scope_id,snapshot_sha256,snapshot,observed_at)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    reconciliation_id,
+                    status[:40],
+                    policy_sha256,
+                    destination_fingerprint,
+                    export_id,
+                    manifest_sha256,
+                    connection_alias,
+                    connection_fingerprint,
+                    tenant_scope_id,
+                    snapshot_sha256,
+                    json.dumps(snapshot, sort_keys=True, separators=(",", ":"), default=str),
+                    observed_at,
+                ),
+            )
+        result = self.operations_reconciliation(reconciliation_id)
+        assert result is not None
+        return result
+
+    def operations_reconciliation(self, reconciliation_id: str) -> dict[str, Any] | None:
+        with self.connect() as db:
+            row = db.execute(
+                "SELECT * FROM audit_operations_reconciliations WHERE id=?",
+                (reconciliation_id,),
+            ).fetchone()
+        return self._operations_reconciliation(row) if row else None
+
+    def operations_reconciliations(
+        self,
+        limit: int = 20,
+        allowed_connection_ids: set[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        requested = min(max(limit, 1), 100)
+        if allowed_connection_ids is not None and not allowed_connection_ids:
+            return []
+        with self.connect() as db:
+            if allowed_connection_ids is None:
+                rows = db.execute(
+                    """SELECT * FROM audit_operations_reconciliations
+                    ORDER BY observed_at DESC LIMIT ?""",
+                    (requested,),
+                ).fetchall()
+            else:
+                aliases = sorted(allowed_connection_ids)
+                placeholders = ",".join("?" for _ in aliases)
+                rows = db.execute(
+                    f"""SELECT * FROM audit_operations_reconciliations
+                    WHERE connection_alias IN ({placeholders})
+                    ORDER BY observed_at DESC LIMIT ?""",
+                    (*aliases, requested),
+                ).fetchall()
+        values = [self._operations_reconciliation(row) for row in rows]
+        return values
+
+    @staticmethod
+    def _operations_reconciliation(row: sqlite3.Row) -> dict[str, Any]:
+        return {
+            "id": row["id"],
+            "status": row["status"],
+            "policy_sha256": row["policy_sha256"],
+            "destination_fingerprint": row["destination_fingerprint"],
+            "export_id": row["export_id"],
+            "manifest_sha256": row["manifest_sha256"],
+            "connection_alias": row["connection_alias"],
+            "connection_fingerprint": row["connection_fingerprint"],
+            "tenant_scope_id": row["tenant_scope_id"],
+            "snapshot_sha256": row["snapshot_sha256"],
+            "snapshot": json.loads(row["snapshot"]),
+            "observed_at": row["observed_at"],
+        }
