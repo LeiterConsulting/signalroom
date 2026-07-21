@@ -483,6 +483,13 @@ function renderOidcPolicy() {
   $('#oidcRequiredAcr').value = (policy.required_acr_values || []).join(', ');
   $('#oidcRequiredAmr').value = (policy.required_amr_values || []).join(', ');
   $('#oidcGrantPrimary').checked = Boolean(policy.grant_primary_connection);
+  const mappingHolder = $('#oidcConnectionMappings');
+  const catalog = oidc.connection_catalog || [];
+  mappingHolder.innerHTML = catalog.length ? catalog.map(item => `<label class="oidc-connection-map ${item.available ? '' : 'stale'}"><span><b>${escapeHtml(item.label || item.id)}</b><small><code>${escapeHtml(item.id)}</code>${item.available ? ' · configured alias' : ' · no longer configured; clear groups before saving'}</small></span><input data-oidc-connection-groups="${escapeHtml(item.id)}" maxlength="8000" value="${escapeHtml((item.groups || []).join(', '))}" placeholder="Exact provider groups, comma separated"></label>`).join('') : '<div class="empty-inline compact-empty">No Splunk aliases are available for enterprise mapping.</div>';
+  const preview = oidc.assignment_preview || {rows:[]};
+  $('#oidcAssignmentPreview').innerHTML = preview.rows?.length
+    ? `<header><b>Effective-access preview</b><span>${Number(preview.identity_count || 0)} known enterprise identit${Number(preview.identity_count || 0) === 1 ? 'y' : 'ies'}</span></header><p>Projection uses each identity’s last verified token claims. A fresh sign-in is required before any projected change becomes active.</p><div>${preview.rows.map(item => `<article class="${item.admitted ? 'admitted' : 'denied'}"><header><b>@${escapeHtml(item.username)}</b><span>${item.active ? (item.admitted ? escapeHtml(item.projected_role || 'viewer') : 'would be denied') : 'locally inactive'}</span></header><small>${item.admitted ? `Splunk: ${(item.projected_connection_ids || []).length ? item.projected_connection_ids.map(value => `<code>${escapeHtml(value)}</code>`).join(' ') : 'local context only'}` : escapeHtml(item.reason || 'Claims do not satisfy policy')}</small></article>`).join('')}</div>`
+    : '<div class="empty-inline compact-empty">No enterprise identity has signed in yet. Saved mappings will be evaluated at the first verified sign-in.</div>';
   $('#oidcClientSecret').value = '';
   $('#oidcClearClientSecret').checked = false;
   $('#oidcSecretHelp').textContent = policy.client_secret_environment_managed
@@ -513,6 +520,10 @@ async function saveOidcPolicy() {
     admin_groups:listField('#oidcAdminGroups'),
     default_role:$('#oidcDefaultRole').value,
     grant_primary_connection:$('#oidcGrantPrimary').checked,
+    connection_group_mappings:$$('[data-oidc-connection-groups]').map(node => ({
+      connection_alias:node.dataset.oidcConnectionGroups,
+      groups:node.value.split(',').map(value => value.trim()).filter(Boolean)
+    })).filter(item => item.groups.length),
     required_acr_values:listField('#oidcRequiredAcr'),
     required_amr_values:listField('#oidcRequiredAmr')
   };

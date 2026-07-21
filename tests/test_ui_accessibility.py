@@ -87,6 +87,9 @@ def test_optional_rbac_is_visible_and_keyboard_operable() -> None:
     assert 'id="enterpriseLogin"' in INDEX_HTML
     assert 'id="oidcEnabled"' in INDEX_HTML
     assert 'id="oidcRequiredAmr"' in INDEX_HTML
+    assert 'id="oidcConnectionMappings"' in INDEX_HTML
+    assert 'id="oidcAssignmentPreview"' in INDEX_HTML
+    assert "Group-to-Splunk access" in INDEX_HTML
     assert 'id="loginForm"' in INDEX_HTML
     assert 'id="accessControlSection"' in INDEX_HTML
     assert "Access control · optional" in INDEX_HTML
@@ -99,8 +102,11 @@ def test_optional_rbac_is_visible_and_keyboard_operable() -> None:
     assert 'id="managedSplunkVerifyTls"' in INDEX_HTML
     assert "X-SignalRoom-CSRF" in APP_JS
     assert "await loadAuthStatus()" in APP_JS
+    assert "connection_group_mappings" in APP_JS
+    assert "Effective-access preview" in APP_JS
     assert "if (state.auth.enabled && !state.auth.authenticated) return" in APP_JS
     assert ".access-user-controls" in STYLES_CSS
+    assert ".oidc-connection-map" in STYLES_CSS
 
 
 def test_model_artifact_trust_is_explicit_and_audit_first() -> None:

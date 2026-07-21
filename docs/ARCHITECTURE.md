@@ -419,8 +419,11 @@ issued-at time, nonce, and authorized party when multiple audiences are present.
 
 Exact tenant and group claims form the admission contract. Signed `acr` and/or `amr` values form the provider MFA
 evidence contract. The immutable `(issuer, sub)` pair is the only external identity key; display names and local
-handles are attributes and never linking keys. Provider groups deterministically derive SignalRoom role and the
-policy independently decides Primary Splunk assignment. Policy changes revoke all external sessions.
+handles are attributes and never linking keys. Provider groups independently derive SignalRoom role and exact
+Splunk-alias authority. Each mapped alias must exist in the current connection catalog when policy is saved; every
+sign-in filters mappings through the current catalog again so an archived alias cannot survive as execution
+authority. Policy changes revoke all external sessions. The administrator preview projects role and alias access
+from only the last locally retained, verified claim values and cannot create a session or bypass fresh sign-in.
 
 The provider authenticates; SignalRoom continues to authorize every API request and own its audit record. This is
 not data-plane tenant isolation. One active local administrator must remain for recovery. The `signalroom-access`
@@ -429,7 +432,7 @@ there is deliberately no remote recovery route.
 
 ## Next production increments
 
-1. Add OIDC group-to-alias assignment policy and encrypted credential backup/restore controls
+1. Add encrypted configuration and credential backup/restore with compatibility and recovery validation
 2. Add time-aligned durable multi-estate review packets without cross-tenant fact copying
 3. Add read-only deployment reconciliation for the audit operations pack when the Splunk MCP contract exposes the
    required index and knowledge-object configuration fields

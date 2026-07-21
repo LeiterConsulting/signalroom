@@ -639,7 +639,12 @@
                   <label><span>Unmapped identity role</span><select id="oidcDefaultRole"><option value="viewer">Viewer · read only</option><option value="analyst">Analyst · can change local work</option></select></label>
                   <label><span>Accepted ACR values <em>optional</em></span><input id="oidcRequiredAcr" maxlength="4000" placeholder="Exact provider assurance values"></label>
                   <label class="full"><span>Required AMR methods</span><input id="oidcRequiredAmr" maxlength="4000" value="mfa"><small class="field-help">All listed methods must appear in the verified ID token. Configure ACR instead only when your provider does not emit <code>amr=mfa</code>.</small></label>
-                  <label class="full switch-line nested-switch"><span><b>Assign Primary Splunk to admitted identities</b><small>Role and connection access remain independent; disabled identities can read local context only</small></span><input type="checkbox" id="oidcGrantPrimary"><span class="switch-control" aria-hidden="true"></span></label>
+                  <label class="full switch-line nested-switch"><span><b>Fallback: assign Primary Splunk to every admitted identity</b><small>Prefer exact group mappings below. This broad fallback is retained for simple providers and existing policies.</small></span><input type="checkbox" id="oidcGrantPrimary"><span class="switch-control" aria-hidden="true"></span></label>
+                  <section class="full oidc-connection-policy" aria-labelledby="oidcConnectionPolicyTitle">
+                    <header><div><b id="oidcConnectionPolicyTitle">Group-to-Splunk access</b><small>Map exact verified group values to each configured Splunk alias. Role and connection authority remain independent.</small></div><span>Exact match</span></header>
+                    <div id="oidcConnectionMappings"></div>
+                    <div class="oidc-assignment-preview" id="oidcAssignmentPreview" aria-live="polite"></div>
+                  </section>
                 </div>
               </details>
               <div class="oidc-recovery"><b>Recovery boundary</b><span>The active local administrator remains the host-recovery identity. OIDC policy cannot remove the last local admin, and policy changes revoke every external session.</span></div>

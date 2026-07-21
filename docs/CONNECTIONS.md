@@ -160,9 +160,11 @@ preservation copies only the selected source's measures and findings, plus its c
 snapshot identifiers. It deliberately does not copy the other estate's facts into a tenant-scoped
 case item.
 
-Tenant-aware store routing and staged copy/digest/rollback remain future work after the readiness planner.
-OIDC group-to-alias mapping beyond the current Primary grant, backup and migration tooling for connection
-credentials, and time-aligned durable multi-estate review packets also remain future work.
+Tenant-aware stores now support staged copy, digest verification, isolated routing, zero-write rollback, verified
+reverse migration, and explicit shared-source finalization for all ten routed components. OIDC policy can map exact
+provider groups to any current Splunk alias independently of role; changed policy revokes external sessions and an
+archived alias is filtered from the next sign-in. Encrypted backup and migration tooling for connection credentials,
+plus time-aligned durable multi-estate review packets, remain future work.
 
 ## Why additional MCP connections belong in SignalRoom
 

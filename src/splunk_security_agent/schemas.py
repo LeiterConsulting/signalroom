@@ -238,6 +238,15 @@ class AuthUserUpdate(BaseModel):
     connection_ids: list[str] | None = Field(default=None, max_length=16)
 
 
+class AuthOIDCConnectionGroupMapping(BaseModel):
+    connection_alias: str = Field(
+        min_length=3,
+        max_length=48,
+        pattern=r"^[a-z][a-z0-9-]{2,47}$",
+    )
+    groups: list[str] = Field(min_length=1, max_length=100)
+
+
 class AuthOIDCPolicyUpdate(BaseModel):
     enabled: bool = False
     provider_label: str = Field(default="Enterprise identity", min_length=1, max_length=120)
@@ -256,6 +265,10 @@ class AuthOIDCPolicyUpdate(BaseModel):
     admin_groups: list[str] = Field(default_factory=list, max_length=100)
     default_role: Literal["viewer", "analyst"] = "viewer"
     grant_primary_connection: bool = False
+    connection_group_mappings: list[AuthOIDCConnectionGroupMapping] = Field(
+        default_factory=list,
+        max_length=32,
+    )
     required_acr_values: list[str] = Field(default_factory=list, max_length=50)
     required_amr_values: list[str] = Field(default_factory=lambda: ["mfa"], max_length=50)
 

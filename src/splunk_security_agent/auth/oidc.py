@@ -93,6 +93,8 @@ class OIDCService:
                     "oidc_client_secret"
                 ),
             }
+            value["connection_catalog"] = self._connection_catalog(policy)
+            value["assignment_preview"] = self._assignment_preview(policy)
         return value
 
     async def update_policy(
@@ -125,6 +127,23 @@ class OIDCService:
         allowed_groups = _csv_values(value.allowed_groups)
         analyst_groups = _csv_values(value.analyst_groups)
         admin_groups = _csv_values(value.admin_groups)
+        available_connections = self.auth.available_connections()
+        available_ids = {item["id"] for item in available_connections}
+        connection_mappings: list[dict[str, Any]] = []
+        mapped_aliases: set[str] = set()
+        for mapping in value.connection_group_mappings:
+            alias = mapping.connection_alias.strip()
+            if alias in mapped_aliases:
+                raise ValueError(f"Connection alias {alias!r} is mapped more than once")
+            if alias not in available_ids:
+                raise ValueError(
+                    f"Connection alias {alias!r} is not currently configured in SignalRoom"
+                )
+            groups = _csv_values(mapping.groups)
+            if not groups:
+                raise ValueError(f"Connection alias {alias!r} requires at least one exact group")
+            mapped_aliases.add(alias)
+            connection_mappings.append({"connection_alias": alias, "groups": groups})
         required_acr = _csv_values(value.required_acr_values)
         required_amr = [item.casefold() for item in _csv_values(value.required_amr_values)]
         if tenants and not value.tenant_claim:
@@ -173,6 +192,7 @@ class OIDCService:
                 "admin_groups": admin_groups,
                 "default_role": value.default_role,
                 "grant_primary_connection": value.grant_primary_connection,
+                "connection_group_mappings": connection_mappings,
                 "required_acr_values": required_acr,
                 "required_amr_values": required_amr,
             }
@@ -198,6 +218,10 @@ class OIDCService:
                 "group_admission_rules": len(allowed_groups),
                 "analyst_group_rules": len(analyst_groups),
                 "admin_group_rules": len(admin_groups),
+                "connection_group_mappings": len(connection_mappings),
+                "mapped_connection_aliases": [
+                    item["connection_alias"] for item in connection_mappings
+                ],
                 "required_acr_values": required_acr,
                 "required_amr_values": required_amr,
                 "external_sessions_revoked": revoked,
@@ -299,7 +323,38 @@ class OIDCService:
         subject = claims.get("sub")
         if not isinstance(subject, str) or not subject or len(subject) > 255:
             raise OIDCError("The ID token subject was not a valid immutable identifier")
-        admission = self._admit(claims, policy)
+        try:
+            admission = self._admit(
+                claims,
+                policy,
+                available_connection_ids=[
+                    item["id"] for item in self.auth.available_connections()
+                ],
+            )
+        except OIDCError:
+            existing = self.store.get_user_by_external_identity(
+                policy["issuer_url"], subject
+            )
+            if existing:
+                revoked = self.store.revoke_user_sessions(existing["id"])
+                self.audit.record(
+                    "auth.oidc.identity.deauthorized",
+                    "revoke",
+                    target_type="auth-user",
+                    target_id=existing["id"],
+                    outcome="warning",
+                    summary=(
+                        "A newly verified provider identity no longer satisfied OIDC "
+                        "admission; its existing SignalRoom sessions were revoked."
+                    ),
+                    metadata={
+                        "provider_label": policy["provider_label"],
+                        "issuer": policy["issuer_url"],
+                        "sessions_revoked": revoked,
+                    },
+                    actor=existing["username"],
+                )
+            raise
         existing = self.store.get_user_by_external_identity(policy["issuer_url"], subject)
         username = existing["username"] if existing else self._external_username(
             str(claims.get(policy["username_claim"]) or subject),
@@ -347,6 +402,7 @@ class OIDCService:
                 "connection_ids": user["connection_ids"],
                 "tenant": admission["tenant"],
                 "matched_groups": admission["matched_groups"],
+                "matched_connection_groups": admission["matched_connection_groups"],
                 "acr": str(claims.get("acr") or ""),
                 "amr": admission["amr"],
                 "source_match": source == transaction["source"],
@@ -526,7 +582,11 @@ class OIDCService:
         return claims
 
     @staticmethod
-    def _admit(claims: dict[str, Any], policy: dict[str, Any]) -> dict[str, Any]:
+    def _admit(
+        claims: dict[str, Any],
+        policy: dict[str, Any],
+        available_connection_ids: list[str] | None = None,
+    ) -> dict[str, Any]:
         raw_groups = claims.get(policy["groups_claim"], [])
         if isinstance(raw_groups, str):
             groups = [raw_groups]
@@ -567,13 +627,121 @@ class OIDCService:
         else:
             role = policy["default_role"]
             matched = sorted(group_set.intersection(allowed_groups))
+        available = (
+            set(available_connection_ids)
+            if available_connection_ids is not None
+            else None
+        )
+        connection_ids: list[str] = []
+        connection_matches: dict[str, list[str]] = {}
+        if policy.get("grant_primary_connection") and (
+            available is None or "primary" in available
+        ):
+            connection_ids.append("primary")
+            connection_matches["primary"] = ["all-admitted-identities"]
+        for mapping in policy.get("connection_group_mappings") or []:
+            if not isinstance(mapping, dict):
+                continue
+            alias = str(mapping.get("connection_alias") or "")
+            if not alias or (available is not None and alias not in available):
+                continue
+            matches = sorted(group_set.intersection(set(mapping.get("groups") or [])))
+            if matches:
+                if alias not in connection_ids:
+                    connection_ids.append(alias)
+                connection_matches[alias] = matches
         return {
             "groups": sorted(groups),
             "tenant": tenant,
             "amr": sorted(amr),
             "role": role,
             "matched_groups": matched,
-            "connection_ids": ["primary"] if policy["grant_primary_connection"] else [],
+            "connection_ids": connection_ids,
+            "matched_connection_groups": connection_matches,
+        }
+
+    def _connection_catalog(self, policy: dict[str, Any]) -> list[dict[str, Any]]:
+        current = self.auth.available_connections()
+        current_ids = {item["id"] for item in current}
+        mapped = {
+            str(item.get("connection_alias") or ""): list(item.get("groups") or [])
+            for item in policy.get("connection_group_mappings") or []
+            if isinstance(item, dict)
+        }
+        values = [
+            {
+                **item,
+                "groups": mapped.get(item["id"], []),
+                "available": True,
+            }
+            for item in current
+        ]
+        values.extend(
+            {
+                "id": alias,
+                "label": alias,
+                "groups": groups,
+                "available": False,
+            }
+            for alias, groups in mapped.items()
+            if alias not in current_ids
+        )
+        return values
+
+    def _assignment_preview(self, policy: dict[str, Any]) -> dict[str, Any]:
+        available = [item["id"] for item in self.auth.available_connections()]
+        rows: list[dict[str, Any]] = []
+        for user in self.store.external_policy_subjects():
+            safe = user.get("external_claims") or {}
+            claims: dict[str, Any] = {
+                policy["groups_claim"]: safe.get("groups") or [],
+                "acr": safe.get("acr") or "",
+                "amr": safe.get("amr") or [],
+            }
+            if policy["tenant_claim"]:
+                claims[policy["tenant_claim"]] = safe.get("tenant") or ""
+            try:
+                projected = self._admit(
+                    claims,
+                    policy,
+                    available_connection_ids=available,
+                )
+                rows.append(
+                    {
+                        "user_id": user["id"],
+                        "username": user["username"],
+                        "active": user["active"],
+                        "admitted": True,
+                        "current_role": user["role"],
+                        "projected_role": projected["role"],
+                        "current_connection_ids": user["connection_ids"],
+                        "projected_connection_ids": projected["connection_ids"],
+                        "matched_connection_groups": projected[
+                            "matched_connection_groups"
+                        ],
+                        "reason": "Last verified claims satisfy the saved policy.",
+                    }
+                )
+            except OIDCError as exc:
+                rows.append(
+                    {
+                        "user_id": user["id"],
+                        "username": user["username"],
+                        "active": user["active"],
+                        "admitted": False,
+                        "current_role": user["role"],
+                        "projected_role": "",
+                        "current_connection_ids": user["connection_ids"],
+                        "projected_connection_ids": [],
+                        "matched_connection_groups": {},
+                        "reason": str(exc),
+                    }
+                )
+        return {
+            "identity_count": len(rows),
+            "rows": rows,
+            "claims_source": "last-verified-id-token",
+            "requires_fresh_sign_in": True,
         }
 
     @staticmethod

@@ -90,6 +90,7 @@ class AuthStore:
                     admin_groups TEXT NOT NULL,
                     default_role TEXT NOT NULL,
                     grant_primary_connection INTEGER NOT NULL,
+                    connection_group_mappings TEXT NOT NULL DEFAULT '[]',
                     required_acr_values TEXT NOT NULL,
                     required_amr_values TEXT NOT NULL,
                     updated_at TEXT NOT NULL
@@ -123,6 +124,15 @@ class AuthStore:
                 db.execute(
                     "ALTER TABLE auth_users ADD COLUMN external_claims TEXT NOT NULL DEFAULT '{}'"
                 )
+            oidc_columns = {
+                row["name"]
+                for row in db.execute("PRAGMA table_info(auth_oidc_policy)").fetchall()
+            }
+            if "connection_group_mappings" not in oidc_columns:
+                db.execute(
+                    """ALTER TABLE auth_oidc_policy ADD COLUMN
+                    connection_group_mappings TEXT NOT NULL DEFAULT '[]'"""
+                )
             db.execute(
                 """CREATE UNIQUE INDEX IF NOT EXISTS idx_auth_users_external_identity
                 ON auth_users(external_issuer, external_subject)
@@ -138,11 +148,11 @@ class AuthStore:
                 (id,enabled,provider_label,issuer_url,client_id,redirect_uri,
                 username_claim,display_name_claim,groups_claim,tenant_claim,
                 allowed_tenant_values,allowed_groups,analyst_groups,admin_groups,
-                default_role,grant_primary_connection,required_acr_values,
+                default_role,grant_primary_connection,connection_group_mappings,required_acr_values,
                 required_amr_values,updated_at)
                 VALUES (1,0,'Enterprise identity','','','',
                 'preferred_username','name','groups','',
-                '[]','[]','[]','[]','viewer',0,'[]','["mfa"]',?)""",
+                '[]','[]','[]','[]','viewer',0,'[]','[]','["mfa"]',?)""",
                 (now,),
             )
 
@@ -319,6 +329,24 @@ class AuthStore:
                 ORDER BY active DESC, role='admin' DESC, username"""
             ).fetchall()
         return [self._user(row, include_password=False) for row in rows]
+
+    def external_policy_subjects(self, limit: int = 100) -> list[dict[str, Any]]:
+        with self.connect() as db:
+            rows = db.execute(
+                """SELECT * FROM auth_users WHERE auth_source='oidc'
+                ORDER BY active DESC,updated_at DESC LIMIT ?""",
+                (max(1, min(500, int(limit))),),
+            ).fetchall()
+        values: list[dict[str, Any]] = []
+        for row in rows:
+            value = self._user(row, include_password=False)
+            try:
+                claims = json.loads(str(row["external_claims"] or "{}"))
+            except (TypeError, ValueError):
+                claims = {}
+            value["external_claims"] = claims if isinstance(claims, dict) else {}
+            values.append(value)
+        return values
 
     def update_user(
         self,
@@ -541,6 +569,7 @@ class AuthStore:
             "admin_groups": json.loads(row["admin_groups"]),
             "default_role": row["default_role"],
             "grant_primary_connection": bool(row["grant_primary_connection"]),
+            "connection_group_mappings": json.loads(row["connection_group_mappings"]),
             "required_acr_values": json.loads(row["required_acr_values"]),
             "required_amr_values": json.loads(row["required_amr_values"]),
             "updated_at": row["updated_at"],
@@ -563,6 +592,7 @@ class AuthStore:
             "admin_groups",
             "default_role",
             "grant_primary_connection",
+            "connection_group_mappings",
             "required_acr_values",
             "required_amr_values",
         )
@@ -571,6 +601,7 @@ class AuthStore:
             "allowed_groups",
             "analyst_groups",
             "admin_groups",
+            "connection_group_mappings",
             "required_acr_values",
             "required_amr_values",
         }

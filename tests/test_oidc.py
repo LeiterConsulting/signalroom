@@ -128,6 +128,44 @@ async def test_oidc_pkce_token_validation_and_subject_binding(tmp_path, monkeypa
             source="127.0.0.1",
         )
 
+    denied_transaction = await oidc.begin(source="127.0.0.1")
+    denied_query = parse_qs(urlparse(denied_transaction["authorization_url"]).query)
+    denied_token = jwt.encode(
+        {
+            "iss": "https://identity.example",
+            "aud": "signalroom-client",
+            "sub": "immutable-provider-subject",
+            "iat": now,
+            "exp": now + 300,
+            "nonce": denied_query["nonce"][0],
+            "preferred_username": "alice",
+            "name": "Alice Analyst",
+            "groups": ["group-no-longer-admitted"],
+            "tid": "tenant-security",
+            "amr": ["mfa"],
+        },
+        private_key,
+        algorithm="RS256",
+        headers={"kid": "signing-key-1"},
+    )
+
+    async def denied_exchange(*_args, **_kwargs):
+        return {"id_token": denied_token}
+
+    monkeypatch.setattr(oidc, "_exchange", denied_exchange)
+    with pytest.raises(OIDCError, match="admitted SignalRoom group"):
+        await oidc.complete(
+            code="newly-denied-code",
+            state=denied_transaction["state"],
+            state_cookie=denied_transaction["state"],
+            source="127.0.0.1",
+        )
+    assert auth.authenticate(session["token"]) is None
+    assert any(
+        event["event_type"] == "auth.oidc.identity.deauthorized"
+        for event in oidc.audit.events(limit=20)
+    )
+
 
 @pytest.mark.asyncio
 async def test_oidc_policy_requires_mfa_and_local_recovery_admin(tmp_path) -> None:
@@ -185,6 +223,118 @@ def test_oidc_admission_fails_closed_on_tenant_group_and_mfa() -> None:
         OIDCService._admit({**valid_claims, "tid": "other"}, current)
     with pytest.raises(OIDCError, match="required MFA"):
         OIDCService._admit({**valid_claims, "amr": ["pwd"]}, current)
+
+
+def test_oidc_groups_map_independently_to_current_splunk_aliases() -> None:
+    current = policy(
+        grant_primary_connection=False,
+        connection_group_mappings=[
+            {"connection_alias": "primary", "groups": ["tier-one-soc"]},
+            {"connection_alias": "eu-prod", "groups": ["eu-hunters"]},
+        ],
+    ).model_dump()
+    claims = {
+        "groups": ["signalroom-users", "soc-analysts", "tier-one-soc", "eu-hunters"],
+        "tid": "tenant-security",
+        "amr": ["mfa"],
+    }
+
+    admitted = OIDCService._admit(
+        claims,
+        current,
+        available_connection_ids=["primary", "eu-prod"],
+    )
+
+    assert admitted["role"] == "analyst"
+    assert admitted["connection_ids"] == ["primary", "eu-prod"]
+    assert admitted["matched_connection_groups"] == {
+        "primary": ["tier-one-soc"],
+        "eu-prod": ["eu-hunters"],
+    }
+    filtered = OIDCService._admit(
+        claims,
+        current,
+        available_connection_ids=["primary"],
+    )
+    assert filtered["connection_ids"] == ["primary"]
+
+
+@pytest.mark.asyncio
+async def test_oidc_connection_policy_validates_aliases_and_previews_last_claims(
+    tmp_path,
+) -> None:
+    store = AuthStore(tmp_path / "mapped-auth.db")
+    audit = AuditStore(tmp_path / "mapped-audit.db")
+    auth = AuthService(
+        store,
+        audit,
+        lambda: [
+            {"id": "primary", "label": "Primary Splunk"},
+            {"id": "eu-prod", "label": "EU Production"},
+        ],
+    )
+    config = ConfigStore(tmp_path / "mapped-config")
+    oidc = OIDCService(store, auth, config, audit)
+    local = auth.bootstrap(
+        username="mapped-admin",
+        display_name="Mapped Admin",
+        password="local mapped recovery password",
+        source="127.0.0.1",
+    )
+    config.update_secrets(oidc_client_secret="client-secret")
+    with pytest.raises(ValueError, match="not currently configured"):
+        await oidc.update_policy(
+            policy(
+                connection_group_mappings=[
+                    {"connection_alias": "retired", "groups": ["retired-team"]}
+                ]
+            ),
+            actor=local["user"],
+        )
+
+    external = store.upsert_external_user(
+        issuer="https://identity.example",
+        subject="eu-analyst-subject",
+        username="eu-analyst-1234567890",
+        display_name="EU Analyst",
+        role="viewer",
+        connection_ids=[],
+        claims={
+            "groups": ["signalroom-users", "soc-analysts", "eu-hunters"],
+            "tenant": "tenant-security",
+            "acr": "",
+            "amr": ["mfa"],
+        },
+    )
+    external_session = auth.federated_session(external)
+    status = await oidc.update_policy(
+        policy(
+            grant_primary_connection=False,
+            connection_group_mappings=[
+                {
+                    "connection_alias": "eu-prod",
+                    "groups": ["eu-hunters", "eu-hunters"],
+                }
+            ],
+        ),
+        actor=local["user"],
+    )
+
+    assert auth.authenticate(external_session["token"]) is None
+    assert status["policy"]["connection_group_mappings"] == [
+        {"connection_alias": "eu-prod", "groups": ["eu-hunters"]}
+    ]
+    assert status["connection_catalog"][1] == {
+        "id": "eu-prod",
+        "label": "EU Production",
+        "groups": ["eu-hunters"],
+        "available": True,
+    }
+    preview = status["assignment_preview"]["rows"][0]
+    assert preview["admitted"] is True
+    assert preview["projected_role"] == "analyst"
+    assert preview["projected_connection_ids"] == ["eu-prod"]
+    assert preview["current_connection_ids"] == []
 
 
 def test_host_recovery_is_local_only_and_revokes_sessions(tmp_path) -> None:

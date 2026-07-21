@@ -102,9 +102,11 @@ exposure.
 After named access is active, an administrator can opt in to one enterprise OpenID Connect issuer. SignalRoom uses
 the authorization-code flow with S256 PKCE, one-time state and nonce values, exact issuer/audience/callback checks,
 provider signing keys, and asymmetric ID-token algorithms only. Admission can require an exact tenant and group.
-Provider groups map to viewer, analyst, or admin, while the current OIDC policy independently controls
-Primary Splunk assignment. Administrators can assign additional aliases to local named users; richer
-OIDC group-to-alias mapping remains on the roadmap.
+Provider groups map independently to viewer, analyst, or admin and to any currently configured Splunk alias.
+Mappings use exact group values; a role never implies connection authority. The broad “grant Primary to every
+admitted identity” fallback remains available for simple providers, but explicit per-alias mappings are preferred.
+Settings previews effective access from each identity's last verified claims, while a fresh enterprise sign-in is
+still required to activate a changed policy.
 Configured `amr` and/or `acr` values must prove that the identity provider applied the required MFA assurance.
 
 OIDC identities bind only to `(issuer, sub)` and are never linked by matching email or username. Policy changes
@@ -764,12 +766,13 @@ Investigate, Discovery, Validation, Assurance, and MLTK traffic with live queue 
 per-instance concurrency, and audit-first risk and UTC-day budget policy. Operator-authored evaluation suites now
 extend the durable golden and tournament authorities. Verified audit events can now be exported to a dedicated
 Splunk index under an explicit HEC delivery policy. Optional single-issuer OIDC now adds PKCE, provider MFA
-evidence, exact tenant/group admission, immutable-subject binding, and host-only local-account recovery.
+evidence, exact tenant/group admission, immutable-subject binding, exact group-to-Splunk-alias authorization,
+effective-access previews, and host-only local-account recovery.
 Deployment-specific audit operations now add a destination-bound, disabled-by-default Splunk content pack and a
 local export-lag contract. Tenant-scoped evidence, cases, discovery history, and explicit instance selection now
-form the shared application boundary. The next production increment is executable additional Splunk aliases:
-per-alias credentials and health, per-connection authorization, alias-aware clients, and identity lifecycle
-provisioning/deprovisioning.
+form the shared application boundary. Additional Splunk aliases now have per-alias encrypted credentials, health,
+authorization, clients, durable identity, and tenant-aware routing. The next production increment is encrypted,
+operator-controlled configuration and credential backup/restore with compatibility and recovery validation.
 
 ### Operator-authored evaluation suites
 

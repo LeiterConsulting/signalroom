@@ -67,13 +67,18 @@ Enterprise identity**:
 1. Register the exact callback URI shown in Setup: `/api/auth/oidc/callback` on the externally visible HTTPS origin.
 2. Provide the provider's exact issuer URL, client ID, and confidential-client secret.
 3. Configure the provider claim names and, where applicable, exact allowed tenant values and admitted groups.
-4. Map analyst and administrator groups. Choose separately whether admitted identities receive Primary Splunk.
-5. Keep at least one required `amr` method (normally `mfa`) or configure accepted provider-specific `acr` values.
-6. Save the policy and run **Test saved provider** before signing out.
+4. Map analyst and administrator groups independently from connection authority.
+5. Under **Group-to-Splunk access**, map exact provider group values to each configured alias. Prefer these scoped
+   mappings over the broad Primary fallback.
+6. Keep at least one required `amr` method (normally `mfa`) or configure accepted provider-specific `acr` values.
+7. Save the policy, review the last-claims effective-access preview, and run **Test saved provider** before signing
+   out. Every enterprise identity must sign in again after a policy change.
 
 The test reads discovery metadata and signing keys; it does not authenticate a user. The browser flow uses
 authorization code plus S256 PKCE and validates issuer, audience, nonce, expiry, signature, tenant, groups, and MFA
-evidence before issuing a local SignalRoom session. Identity linkage uses only `(issuer, sub)`.
+evidence before issuing a local SignalRoom session. Identity linkage uses only `(issuer, sub)`. Alias mappings are
+exact and filtered against SignalRoom's current connection catalog during every sign-in; archived aliases grant no
+new session authority.
 
 The client secret is encrypted in the local vault. An environment-managed deployment can instead set:
 
@@ -92,10 +97,10 @@ Use `--data-dir` when `SIGNALROOM_DATA_DIR` is not available in the recovery she
 active local identity, revokes its sessions, and records `auth.local.password.recovered`. It cannot change an OIDC
 identity. Direct data-directory access is the recovery authority, so restrict that directory accordingly.
 
-OIDC tenant/group admission does not itself partition artifacts, cases, or a shared Splunk connection into
-independent tenants. SignalRoom can route eight tenant-owned workflow databases and two manifested file roots into
-a digest-verified tenant generation, but sealed shared rollback copies remain until future finalization.
-Deploy separate instances where complete hard data-plane or process isolation is required.
+OIDC tenant/group admission and alias authorization do not themselves partition artifacts or processes. SignalRoom
+can route eight tenant-owned workflow databases and two manifested file roots into a digest-verified tenant
+generation, then build a verified return path before explicitly finalizing shared duplicates. Deploy separate
+instances where complete process, credential, control-plane, or audit-authority isolation is required.
 
 ## Splunk TLS certificates
 
