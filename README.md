@@ -795,8 +795,10 @@ authorization, clients, durable identity, and tenant-aware routing. Administrato
 password-encrypted control-plane recovery package, stage only a compatible package, and retain an encrypted
 pre-restore checkpoint. Time-aligned durable multi-estate review packets now persist only verified
 references and materialize each tenant's source facts in place. Audit operations packs now have immutable,
-tenant-filtered, read-only reconciliation history. The next production increment is retention and administrator
-cleanup policy for superseded tenant generations, reverse snapshots, and encrypted recovery exports/checkpoints.
+tenant-filtered, read-only reconciliation history. Administrators now have preview-bound, metadata-preserving local
+retention controls for superseded tenant generations, terminal reverse snapshots, and encrypted recovery artifacts.
+The next production increment is release-candidate upgrade, installer, recovery, multi-instance, retention, and
+security acceptance testing.
 
 ### Operator-authored evaluation suites
 
@@ -887,6 +889,23 @@ signalroom-recovery --data-dir .\data restore .\data\recovery\rollbacks\pre-rest
 The command prompts for the package password and exact restore confirmation. Start or restart SignalRoom afterward
 to apply it. Protect the package and its password separately; neither SignalRoom nor the checkpoint can recover a
 lost password.
+
+### Local retention and cleanup
+
+Setup → **Retention and storage cleanup** gives administrators a read-only inventory before any deletion. Separate
+minimum-age and keep-newest controls cover superseded tenant generations, terminal reverse snapshots, encrypted
+recovery exports, and encrypted pre-restore checkpoints. Conservative defaults retain recent material, and cleanup
+never runs automatically.
+
+The preview names every eligible local path, size, age, reason, and content digest. Active tenant routes, in-flight
+migrations, immediate rollback sources, active reverse migrations, and recovery files referenced by a pending
+restore are excluded. To execute, copy the exact confirmation displayed for the current preview. SignalRoom then
+revalidates routing, policy, membership, and every content digest before deleting anything. A changed preview fails
+closed and asks the administrator to review again.
+
+Cleanup removes only eligible payload storage. Migration and reverse-migration metadata remains retained, and the
+local receipt records what was deleted or failed without copying artifact contents into the audit trail. Export an
+encrypted recovery package before cleanup when the retained control-plane policy or receipts must be portable.
 
 ## Production boundary
 

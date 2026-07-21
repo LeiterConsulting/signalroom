@@ -64,6 +64,7 @@ from .model_setup import ModelSetupService
 from .model_trust import ModelTrustService, ModelTrustStore
 from .providers import ModelProviderError, ModelRouter
 from .recovery import RecoveryPackageError, RecoveryPackageService, apply_pending_restore
+from .retention import RetentionService, RetentionStore
 from .schemas import (
     AnalystFeedbackCreate,
     ArtifactCreate,
@@ -131,6 +132,8 @@ from .schemas import (
     QueryIntelligenceRequest,
     RecoveryPackageCreate,
     RecoveryRestoreStage,
+    RetentionCleanupRequest,
+    RetentionPolicyUpdate,
     SettingsUpdate,
     SplunkConnection,
     TenantDataMigrationActionRequest,
@@ -210,6 +213,12 @@ class Services:
             DATA / "model_attestations",
         )
         self.recovery = RecoveryPackageService(DATA, APPLICATION_VERSION)
+        self.retention_store = RetentionStore(DATA / "retention.db")
+        self.retention = RetentionService(
+            self.retention_store,
+            self.tenant_data_registry,
+            self.recovery,
+        )
         self.evidence = RoutedEvidenceStore(self.tenant_data_registry)
         self.feedback = AnalystFeedbackStore(DATA / "feedback.db")
         self.evaluation_suite_store = EvaluationSuiteStore(DATA / "evaluation_suites.db")
@@ -1072,6 +1081,7 @@ async def sensitive_cache_control(request: Request, call_next: Any) -> Response:
             "/api/discovery/review-packets",
             "/api/audit-operations",
             "/api/connections",
+            "/api/retention",
         )
     ):
         response.headers["Cache-Control"] = "no-store"
@@ -1492,6 +1502,83 @@ async def cancel_pending_recovery_restore(request: Request) -> dict[str, Any]:
         outcome="warning",
         summary="Cancelled a pending control-plane restore before restart; its checkpoint was retained.",
         metadata={"checkpoint": result.get("checkpoint_retained")},
+        actor=actor,
+    )
+    return result
+
+
+@app.get("/api/retention")
+async def retention_overview(request: Request) -> dict[str, Any]:
+    _admin_actor(request)
+    return services.retention.overview()
+
+
+@app.put("/api/retention/policy")
+async def update_retention_policy(
+    value: RetentionPolicyUpdate,
+    request: Request,
+) -> dict[str, Any]:
+    actor = _admin_actor(request)
+    try:
+        result = services.retention.update_policy(value, actor)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    services.audit.record(
+        "retention.policy.updated",
+        "update",
+        target_type="local-retention-policy",
+        target_id="primary",
+        summary=(
+            "Updated the local storage retention thresholds. Cleanup remains manual and "
+            "requires an exact fresh preview."
+        ),
+        metadata={"policy": result["policy"]},
+        actor=actor,
+    )
+    return result
+
+
+@app.post("/api/retention/cleanup")
+async def execute_retention_cleanup(
+    value: RetentionCleanupRequest,
+    request: Request,
+) -> dict[str, Any]:
+    actor = _admin_actor(request)
+    try:
+        result = services.retention.execute(
+            value.expected_preview_sha256,
+            value.confirmation,
+            actor,
+        )
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    run = result["run"]
+    services.audit.record(
+        "retention.cleanup.executed",
+        "delete",
+        target_type="local-retention-run",
+        target_id=run["id"],
+        outcome="success" if run["status"] == "complete" else "warning",
+        summary=(
+            f"Retention cleanup {run['status']}; deleted {run['item_count']} exact local "
+            "storage item(s) while retaining immutable migration and cleanup metadata."
+        ),
+        metadata={
+            "preview_sha256": run["preview_sha256"],
+            "status": run["status"],
+            "item_count": run["item_count"],
+            "deleted_bytes": run["deleted_bytes"],
+            "items": [
+                {
+                    "kind": item["kind"],
+                    "id": item["id"],
+                    "tenant_scope_id": item.get("tenant_scope_id") or "",
+                    "content_sha256": item["content_sha256"],
+                    "status": item["status"],
+                }
+                for item in run["items"]
+            ],
+        },
         actor=actor,
     )
     return result

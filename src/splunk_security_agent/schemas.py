@@ -90,6 +90,24 @@ class RecoveryRestoreStage(BaseModel):
     confirmation: str = Field(min_length=44, max_length=80)
 
 
+class RetentionPolicyUpdate(BaseModel):
+    generation_min_age_days: int = Field(default=30, ge=1, le=3650)
+    generation_keep_count: int = Field(default=2, ge=1, le=20)
+    reverse_min_age_days: int = Field(default=30, ge=1, le=3650)
+    reverse_keep_count: int = Field(default=2, ge=1, le=20)
+    recovery_export_min_age_days: int = Field(default=30, ge=1, le=3650)
+    recovery_export_keep_count: int = Field(default=3, ge=1, le=20)
+    recovery_checkpoint_min_age_days: int = Field(default=90, ge=1, le=3650)
+    recovery_checkpoint_keep_count: int = Field(default=3, ge=1, le=20)
+
+
+class RetentionCleanupRequest(BaseModel):
+    expected_preview_sha256: str = Field(
+        min_length=64, max_length=64, pattern=r"^[a-f0-9]{64}$"
+    )
+    confirmation: str = Field(min_length=20, max_length=80)
+
+
 class TimeSeriesRuntimeUpdate(BaseModel):
     endpoint: str = Field(min_length=8, max_length=2048)
     verify_ssl: bool = True

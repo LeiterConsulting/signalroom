@@ -672,6 +672,40 @@ class TenantDataPlaneRegistry:
             ).fetchall()
         return [self._migration(row) for row in rows]
 
+    def retention_migrations(self) -> list[dict[str, Any]]:
+        """Return all migration manifests for bounded local-retention evaluation."""
+        with self.connect() as database:
+            rows = database.execute(
+                "SELECT * FROM tenant_data_migrations ORDER BY created_at DESC"
+            ).fetchall()
+        return [self._migration(row) for row in rows]
+
+    def retention_reverse_migrations(self) -> list[dict[str, Any]]:
+        """Return all reverse manifests without deleting their immutable metadata."""
+        with self.connect() as database:
+            rows = database.execute(
+                "SELECT * FROM tenant_reverse_migrations ORDER BY created_at DESC"
+            ).fetchall()
+        return [self._reverse_migration(row) for row in rows]
+
+    def remove_generation_file_manifests(
+        self, tenant_scope_id: str, generation_id: str
+    ) -> int:
+        """Remove file lookup rows only after inactive generation storage is deleted."""
+        tenant = _safe_scope(tenant_scope_id)
+        if not re.fullmatch(r"[a-f0-9]{32}", generation_id):
+            raise ValueError("Tenant generation ID is invalid.")
+        route = self.route(tenant)
+        if route.get("mode") == "isolated-routing" and route.get("generation_id") == generation_id:
+            raise ValueError("The active tenant generation cannot be removed by retention.")
+        with self.connect() as database:
+            result = database.execute(
+                """DELETE FROM tenant_file_manifests
+                WHERE tenant_scope_id=? AND storage_generation_id=?""",
+                (tenant, generation_id),
+            )
+        return int(result.rowcount)
+
     def migration(self, migration_id: str) -> dict[str, Any] | None:
         with self.connect() as database:
             row = database.execute(

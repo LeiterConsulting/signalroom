@@ -709,6 +709,17 @@
           <section class="recovery-inspection" id="recoveryInspection" hidden aria-live="polite"></section>
           <details class="recovery-inventory"><summary>What is—and is not—in this package</summary><div id="recoveryInventory"></div></details>
           <section class="recovery-history" aria-labelledby="recoveryHistoryTitle"><header><div><b id="recoveryHistoryTitle">Locally retained encrypted files</b><small>Delete downloaded exports from SignalRoom after moving them to your approved backup store. Automatic checkpoints use the same password as the package being restored.</small></div></header><div id="recoveryHistory"><div class="empty-inline compact-empty">No recovery files have been created.</div></div></section>
+          <section class="retention-manager" aria-labelledby="retentionTitle">
+            <header><div><span>GOVERNED LOCAL CLEANUP</span><h4 id="retentionTitle">Retention and storage cleanup</h4><p>Preview exact inactive tenant generations, terminal reverse snapshots, encrypted exports, and rollback checkpoints. Active routes, rollback sources, pending work, and immutable metadata remain protected.</p></div><b>MANUAL ONLY</b></header>
+            <div class="retention-policy-grid">
+              <fieldset><legend>Tenant generations</legend><label><span>Minimum age · days</span><input id="retentionGenerationAge" type="number" min="1" max="3650"></label><label><span>Always keep per tenant</span><input id="retentionGenerationKeep" type="number" min="1" max="20"></label></fieldset>
+              <fieldset><legend>Reverse snapshots</legend><label><span>Minimum age · days</span><input id="retentionReverseAge" type="number" min="1" max="3650"></label><label><span>Always keep per tenant</span><input id="retentionReverseKeep" type="number" min="1" max="20"></label></fieldset>
+              <fieldset><legend>Encrypted exports</legend><label><span>Minimum age · days</span><input id="retentionExportAge" type="number" min="1" max="3650"></label><label><span>Always keep locally</span><input id="retentionExportKeep" type="number" min="1" max="20"></label></fieldset>
+              <fieldset><legend>Rollback checkpoints</legend><label><span>Minimum age · days</span><input id="retentionCheckpointAge" type="number" min="1" max="3650"></label><label><span>Always keep locally</span><input id="retentionCheckpointKeep" type="number" min="1" max="20"></label></fieldset>
+            </div>
+            <div class="retention-policy-actions"><button class="button ghost small" type="button" id="saveRetentionPolicy">Save policy and refresh preview</button><span id="retentionPolicyResult" role="status" aria-live="polite"></span></div>
+            <div class="retention-preview" id="retentionPreview" aria-live="polite"><div class="empty-inline compact-empty">Loading the local cleanup inventory…</div></div>
+          </section>
         </div>
         <div class="form-section" id="workloadPolicySection">
           <h3>Splunk workload protection</h3>

@@ -459,9 +459,8 @@ there is deliberately no remote recovery route.
 
 ## Next production increments
 
-1. Add retention and administrator cleanup policy for superseded tenant generations, reverse snapshots, and
-   encrypted recovery exports/checkpoints
-2. Complete release-candidate upgrade, installer, recovery, multi-instance, and security acceptance testing
+1. Complete release-candidate upgrade, installer, recovery, multi-instance, retention, and security acceptance
+   testing
 
 ## Recovery is a restart-gated control-plane transaction
 
@@ -488,6 +487,24 @@ contract again, retains temporary originals for automatic in-process rollback if
 component atomically, removes all restored sessions and OIDC transactions again, and records an applied receipt.
 The host-only `signalroom-recovery` command can inspect or stage a retained checkpoint when the web process is not
 available; it does not bypass password, compatibility, digest, or exact-confirmation checks.
+
+## Retention cleanup is preview-bound and metadata preserving
+
+`RetentionService` applies one administrator-controlled policy to superseded tenant generations, terminal reverse
+snapshots, encrypted recovery exports, and encrypted recovery checkpoints. Each class has an independent minimum
+age and minimum number of newest copies to retain. Cleanup is manual only: no scheduled task or request path can
+silently remove retained local storage.
+
+Every preview protects the active tenant generation, an in-flight migration, the immediate zero-write rollback
+source, active reverse-migration storage, and packages or checkpoints referenced by a pending restore. The preview
+streams every eligible file through SHA-256 and binds the policy revision, relative path, type, identity, size,
+file count, and content digest into one canonical digest. Execution requires both that exact digest and an exact
+typed confirmation. SignalRoom recomputes eligibility and rehashes the complete candidate set under the tenant
+operation lock before deleting the first item; any changed byte or route fails closed.
+
+Only payload storage is removed. Immutable migration and reverse-migration records remain available for audit, and
+every cleanup attempt records a payload-free receipt. The retention database is an optional component of encrypted
+control-plane recovery, so packages created before this authority existed remain compatible.
 
 ### Physical isolation begins with a non-mutating plan
 

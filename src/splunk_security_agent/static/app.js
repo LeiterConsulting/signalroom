@@ -13,7 +13,7 @@ const state = {
   evaluationDraft: null, evaluationScenarioIndex: 0,
   deliveryPreview: null, detections: [], activeDetection: null, detectionGitExport: null,
   repositoryStatus: null, repositoryHandoff: null, auth: null, authUsers: [],
-  recovery: null, recoveryInspection: null,
+  recovery: null, recoveryInspection: null, retention: null,
   codeScreenResult: null, timeSeriesStatus: null, timeSeriesResult: null,
   timeSeriesExperiments: null, timeSeriesSchedules: null, timeSeriesScheduleTimer: null,
   workspaceLoaded: false, assuranceTimer: null, discoveryJobs: null,
@@ -875,6 +875,94 @@ async function deleteRecoveryPackage(packageId) {
     await api(`/api/recovery/packages/${encodeURIComponent(packageId)}`, {method:'DELETE'});
     await loadRecovery(); toast('Local encrypted export deleted');
   } catch (error) { toast(error.message); }
+}
+
+const RETENTION_KIND_LABELS = {
+  'tenant-generation':'Tenant generations',
+  'reverse-snapshot':'Reverse snapshots',
+  'recovery-export':'Encrypted exports',
+  'recovery-checkpoint':'Rollback checkpoints'
+};
+
+function renderRetention() {
+  const value = state.retention; if (!value || !$('#retentionPreview')) return;
+  const policy = value.policy || {};
+  $('#retentionGenerationAge').value = policy.generation_min_age_days ?? 30;
+  $('#retentionGenerationKeep').value = policy.generation_keep_count ?? 2;
+  $('#retentionReverseAge').value = policy.reverse_min_age_days ?? 30;
+  $('#retentionReverseKeep').value = policy.reverse_keep_count ?? 2;
+  $('#retentionExportAge').value = policy.recovery_export_min_age_days ?? 30;
+  $('#retentionExportKeep').value = policy.recovery_export_keep_count ?? 3;
+  $('#retentionCheckpointAge').value = policy.recovery_checkpoint_min_age_days ?? 90;
+  $('#retentionCheckpointKeep').value = policy.recovery_checkpoint_keep_count ?? 3;
+  const preview = value.preview || {};
+  const candidates = preview.candidates || [];
+  const categories = Object.entries(RETENTION_KIND_LABELS).map(([kind,label]) => {
+    const summary = preview.by_kind?.[kind] || {};
+    return `<span><b>${Number(summary.count || 0).toLocaleString()}</b>${escapeHtml(label)}<small>${escapeHtml(formatBytes(summary.size_bytes || 0))}</small></span>`;
+  }).join('');
+  const candidateList = candidates.length ? `<details class="retention-candidates" open><summary>${candidates.length} exact deletion candidate${candidates.length === 1 ? '' : 's'}</summary><div>${candidates.map(item => `<article><div><span>${escapeHtml(RETENTION_KIND_LABELS[item.kind] || item.kind)}${item.tenant_scope_id ? ` · ${escapeHtml(item.tenant_scope_id)}` : ''}</span><b>${escapeHtml(item.relative_path)}</b><small>${escapeHtml(item.reason)} · ${escapeHtml(formatBytes(item.size_bytes))} · ${Number(item.file_count || 0).toLocaleString()} file${item.file_count === 1 ? '' : 's'}</small></div><code>${escapeHtml(item.content_sha256.slice(0,12))}…</code></article>`).join('')}</div></details>` : '<div class="retention-empty"><b>Nothing currently satisfies this policy</b><span>Protected and minimum-retained storage remains untouched. Preview again after changing the policy or as retained items age.</span></div>';
+  const protectedValue = preview.protected || {};
+  const protection = `<div class="retention-protection"><b>Protection check</b><span>${Number(protectedValue.active_generation_count || 0)} active generation${protectedValue.active_generation_count === 1 ? '' : 's'} · ${Number(protectedValue.rollback_source_count || 0)} rollback source${protectedValue.rollback_source_count === 1 ? '' : 's'} · ${Number(protectedValue.active_reverse_snapshot_count || 0)} active reverse path${protectedValue.active_reverse_snapshot_count === 1 ? '' : 's'}${protectedValue.pending_recovery_package ? ' · pending restore package protected' : ''}</span></div>`;
+  const gate = candidates.length ? `<div class="retention-gate"><div><span>EXACT PREVIEW · SHA-256 ${escapeHtml(preview.preview_sha256.slice(0,12))}…</span><b>Delete ${candidates.length} item${candidates.length === 1 ? '' : 's'} · ${escapeHtml(formatBytes(preview.candidate_size_bytes || 0))}</b><small>Files are rehashed before deletion. Migration records and cleanup receipts remain. Any changed byte invalidates this preview.</small><code>${escapeHtml(preview.confirmation)}</code></div><label><span>Type the exact confirmation</span><input id="retentionConfirmation" autocomplete="off" maxlength="80" placeholder="${escapeHtml(preview.confirmation)}"></label><button class="button danger small" type="button" id="executeRetentionCleanup">Delete exact preview</button><span id="retentionCleanupResult" role="status" aria-live="polite"></span></div>` : '';
+  const runs = (value.recent_runs || []).length ? `<details class="retention-runs"><summary>Cleanup receipts · ${value.recent_runs.length}</summary><div>${value.recent_runs.map(run => `<article><span>${escapeHtml(run.status.toUpperCase())}</span><div><b>${Number(run.item_count || 0).toLocaleString()} items · ${escapeHtml(formatBytes(run.deleted_bytes || 0))}</b><small>${escapeHtml(new Date(run.created_at).toLocaleString())} by ${escapeHtml(run.created_by)} · ${escapeHtml(run.preview_sha256.slice(0,12))}…</small></div></article>`).join('')}</div></details>` : '';
+  $('#retentionPreview').innerHTML = `<div class="retention-summary">${categories}</div>${protection}${candidateList}${gate}${runs}`;
+}
+
+async function loadRetention() {
+  if (!state.auth?.permissions?.can_administer) return;
+  try {
+    state.retention = await api('/api/retention');
+    renderRetention();
+  } catch (error) {
+    $('#retentionPreview').innerHTML = `<div class="empty-inline compact-empty error">${escapeHtml(error.message)}</div>`;
+  }
+}
+
+async function saveRetentionPolicy() {
+  const output = $('#retentionPolicyResult');
+  const payload = {
+    generation_min_age_days:Number($('#retentionGenerationAge').value),
+    generation_keep_count:Number($('#retentionGenerationKeep').value),
+    reverse_min_age_days:Number($('#retentionReverseAge').value),
+    reverse_keep_count:Number($('#retentionReverseKeep').value),
+    recovery_export_min_age_days:Number($('#retentionExportAge').value),
+    recovery_export_keep_count:Number($('#retentionExportKeep').value),
+    recovery_checkpoint_min_age_days:Number($('#retentionCheckpointAge').value),
+    recovery_checkpoint_keep_count:Number($('#retentionCheckpointKeep').value)
+  };
+  if (Object.values(payload).some(value => !Number.isInteger(value) || value < 1)) {
+    output.textContent = 'Every threshold and minimum-retained count must be at least 1.';
+    return;
+  }
+  output.textContent = 'Saving policy and hashing the fresh inventory…';
+  try {
+    const result = await api('/api/retention/policy', {method:'PUT',body:JSON.stringify(payload)});
+    state.retention = {...state.retention,...result};
+    renderRetention();
+    $('#retentionPolicyResult').textContent = `Policy revision ${result.policy.revision} saved · cleanup remains manual.`;
+  } catch (error) { output.textContent = error.message; }
+}
+
+async function executeRetentionCleanup() {
+  const preview = state.retention?.preview; if (!preview?.candidate_count) return;
+  const output = $('#retentionCleanupResult');
+  const confirmation = $('#retentionConfirmation').value;
+  if (confirmation !== preview.confirmation) {
+    output.textContent = `Type ${preview.confirmation} exactly.`;
+    return;
+  }
+  const button = $('#executeRetentionCleanup');
+  button.disabled = true;
+  output.textContent = 'Rehashing every candidate before the first deletion…';
+  try {
+    const result = await api('/api/retention/cleanup', {method:'POST',body:JSON.stringify({
+      expected_preview_sha256:preview.preview_sha256,
+      confirmation
+    })});
+    await loadRetention();
+    toast(`Retention cleanup ${result.run.status} · ${result.run.item_count} exact item${result.run.item_count === 1 ? '' : 's'} deleted`);
+  } catch (error) { output.textContent = error.message; button.disabled = false; }
 }
 
 async function loadConnections() {
@@ -6180,6 +6268,10 @@ $('#contextNext').addEventListener('click', () => { state.contextPage += 1; rend
 $('#settingsForm').addEventListener('submit', saveSettings);
 $('#createRecoveryPackage').addEventListener('click', createRecoveryPackage);
 $('#inspectRecoveryPackage').addEventListener('click', inspectRecoveryPackage);
+$('#saveRetentionPolicy').addEventListener('click', saveRetentionPolicy);
+$('#retentionPreview').addEventListener('click', event => {
+  if (event.target.closest('#executeRetentionCleanup')) executeRetentionCleanup();
+});
 $('#saveSplunkConnection').addEventListener('click', saveManagedSplunkConnection);
 $('#addSplunkConnection').addEventListener('click', () => openManagedSplunkForm());
 $('#buildTenantIsolationPlan').addEventListener('click', buildTenantIsolationPlan);
@@ -6271,7 +6363,7 @@ const accessObserver = new MutationObserver(() => {
 accessObserver.observe(document.body, { childList:true, subtree:true });
 
 async function loadWorkspace() {
-  await Promise.all([loadSettings(), loadWorkload(), loadArtifacts(), loadCases(), loadLatestDiscovery(), loadDiscoveryJobs(), loadEstateReviewPackets(), loadValidations(), loadDetections(), loadModelCatalog(), loadTimeSeriesStatus(), loadModelTrust(), loadSplunkModels(), loadAssurance(), loadConnectionDiagnostics(), loadFeedbackBenchmarks(), loadGoldenBenchmarks(), loadRecovery()]);
+  await Promise.all([loadSettings(), loadWorkload(), loadArtifacts(), loadCases(), loadLatestDiscovery(), loadDiscoveryJobs(), loadEstateReviewPackets(), loadValidations(), loadDetections(), loadModelCatalog(), loadTimeSeriesStatus(), loadModelTrust(), loadSplunkModels(), loadAssurance(), loadConnectionDiagnostics(), loadFeedbackBenchmarks(), loadGoldenBenchmarks(), loadRecovery(), loadRetention()]);
   renderPromptTree(); renderValidations(); renderDetections(); handleDeepLink(); renderAuth();
   state.workspaceLoaded = true;
   if (!state.assuranceTimer) state.assuranceTimer = setInterval(() => {

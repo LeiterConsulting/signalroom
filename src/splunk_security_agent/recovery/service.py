@@ -63,6 +63,11 @@ COMPONENTS = {
         "required": True,
         "description": "Ed25519 identity paired with the retained model approval history.",
     },
+    "retention.db": {
+        "category": "retention-policy",
+        "required": False,
+        "description": "Local retention policy and payload-free cleanup receipts.",
+    },
 }
 
 EXCLUDED = [
@@ -81,6 +86,7 @@ SQLITE_TABLES = {
     },
     "auth.db": {"auth_policy", "auth_users", "auth_oidc_policy"},
     "model_trust.db": {"model_trust_policy", "model_artifact_attestations"},
+    "retention.db": {"retention_policy", "retention_cleanup_runs"},
 }
 
 
@@ -357,7 +363,8 @@ def _validate_payload(payload: dict[str, Any], current_version: str) -> dict[str
         raise RecoveryPackageError("The encrypted vault does not match the packaged vault key.") from exc
     validations["credential-vault"] = {"valid": True, "secret_entries": len(secrets)}
     for name in SQLITE_TABLES:
-        validations[name] = _sqlite_validate(name, decoded[name])
+        if name in decoded:
+            validations[name] = _sqlite_validate(name, decoded[name])
     with tempfile.TemporaryDirectory(prefix="signalroom-binding-") as directory:
         connection_path = Path(directory) / "connection_registry.db"
         auth_path = Path(directory) / "auth.db"
