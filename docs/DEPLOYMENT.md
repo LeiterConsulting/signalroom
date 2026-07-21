@@ -265,6 +265,7 @@ All lifecycle files stay inside the repository:
 | `signalroom.err.log` | Server and startup errors |
 | `data/` | Configuration, encrypted secrets, evidence database, and artifacts |
 | `data/discovery_jobs.db` | Durable manual discovery queue, progress, cancellation, recovery, and compact results |
+| `data/estate_reviews.db` | Content-free immutable multi-estate review references, alignment decisions, and lifecycle state |
 | `data/model_trust.db` | Model publisher policy and exact artifact approval history |
 | `data/time_series_experiments.db` | Immutable forecast runs, accepted baselines, drift comparisons, and review-only alert candidates |
 | `data/time_series_schedules.db` | Shadow schedules, hard-budget attempt history, progress events, restart recovery, and analyst dispositions |

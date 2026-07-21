@@ -580,6 +580,14 @@ class DiscoveryComparisonRequest(BaseModel):
     right: ConnectionScopeReference
 
 
+class EstateReviewPacketCreate(DiscoveryComparisonRequest):
+    alignment_window_minutes: int = Field(default=1440, ge=15, le=10_080)
+
+
+class EstateReviewPacketStatusUpdate(BaseModel):
+    status: Literal["open", "reviewed", "archived"]
+
+
 class TenantIsolationPlanRequest(ConnectionScopeReference):
     pass
 

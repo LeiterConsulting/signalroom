@@ -49,6 +49,8 @@ from .discovery import (
     DiscoveryComparisonService,
     DiscoveryJobService,
     DiscoveryPipeline,
+    EstateReviewPacketService,
+    EstateReviewPacketStore,
 )
 from .feedback import AnalystFeedbackStore
 from .forecasting import (
@@ -107,6 +109,8 @@ from .schemas import (
     DetectionValidationDraftRequest,
     DiscoveryComparisonRequest,
     DiscoveryRequest,
+    EstateReviewPacketCreate,
+    EstateReviewPacketStatusUpdate,
     EvaluationSuiteArchiveRequest,
     EvaluationSuiteCreate,
     EvaluationSuitePublishRequest,
@@ -270,6 +274,11 @@ class Services:
         self.auth = AuthService(self.auth_store, self.audit, self.available_auth_connections)
         self.oidc = OIDCService(self.auth_store, self.auth, self.config, self.audit)
         self.discovery_job_store = RoutedDiscoveryJobStore(self.tenant_data_registry)
+        self.estate_review_store = EstateReviewPacketStore(DATA / "estate_reviews.db")
+        self.estate_reviews = EstateReviewPacketService(
+            self.estate_review_store,
+            self.discovery_job_store,
+        )
         self.assurance_store = RoutedAssuranceStore(self.tenant_data_registry)
         self.delivery_store = RoutedDeliveryStore(self.tenant_data_registry)
         self.connection_diagnostics_store = ConnectionDiagnosticsStore(DATA / "connection_diagnostics.db")
@@ -1033,9 +1042,9 @@ def _recovery_frozen_response() -> JSONResponse:
 
 
 @app.middleware("http")
-async def recovery_cache_control(request: Request, call_next: Any) -> Response:
+async def sensitive_cache_control(request: Request, call_next: Any) -> Response:
     response = await call_next(request)
-    if request.url.path.startswith("/api/recovery"):
+    if request.url.path.startswith(("/api/recovery", "/api/discovery/review-packets")):
         response.headers["Cache-Control"] = "no-store"
     return response
 
@@ -3365,6 +3374,112 @@ async def compare_discovery_snapshots(value: DiscoveryComparisonRequest, request
                 "run_id": result["right"]["run_id"],
             },
         },
+        actor=actor,
+    )
+    return result
+
+
+def _authorized_review_packet(packet_id: str) -> dict[str, Any]:
+    packet = services.estate_review_store.get(packet_id)
+    if not packet:
+        raise HTTPException(404, "Estate review packet not found")
+    manifest = packet["manifest"]
+    _authorize_connection_alias(str(manifest["left"]["connection_alias"]))
+    _authorize_connection_alias(str(manifest["right"]["connection_alias"]))
+    return packet
+
+
+@app.get("/api/discovery/review-packets")
+async def estate_review_packets(limit: int = 50) -> dict[str, Any]:
+    return services.estate_reviews.overview(
+        max(1, min(limit, 200)),
+        _allowed_connection_ids(),
+    )
+
+
+@app.post("/api/discovery/review-packets", status_code=201)
+async def create_estate_review_packet(
+    value: EstateReviewPacketCreate, request: Request
+) -> dict[str, Any]:
+    left_scope = _request_scope(
+        value.left.connection_alias,
+        value.left.connection_fingerprint,
+        value.left.tenant_scope_id,
+    )
+    right_scope = _request_scope(
+        value.right.connection_alias,
+        value.right.connection_fingerprint,
+        value.right.tenant_scope_id,
+    )
+    actor = str(
+        (getattr(request.state, "principal", {}) or {}).get("username") or "local-operator"
+    )
+    try:
+        result = services.estate_reviews.create(
+            left_scope,
+            right_scope,
+            value.alignment_window_minutes,
+            actor,
+        )
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    packet = result["packet"]
+    manifest = packet["manifest"]
+    services.audit.record(
+        "discovery.estate-review.created",
+        "create-time-aligned-packet",
+        target_type="estate-review-packet",
+        target_id=packet["id"],
+        summary=(
+            "Created a time-aligned, source-preserving review packet from two exact durable "
+            "discovery runs without copying tenant facts."
+        ),
+        metadata={
+            "alignment": manifest["alignment"],
+            "comparison_id": manifest["comparison_id"],
+            "global_facts_persisted": False,
+            "splunk_queries": 0,
+            "model_inference": False,
+            "left": manifest["left"],
+            "right": manifest["right"],
+        },
+        actor=actor,
+    )
+    return result
+
+
+@app.get("/api/discovery/review-packets/{packet_id}")
+async def estate_review_packet(packet_id: str) -> dict[str, Any]:
+    _authorized_review_packet(packet_id)
+    try:
+        result = services.estate_reviews.get(packet_id)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    if result is None:
+        raise HTTPException(404, "Estate review packet not found")
+    return result
+
+
+@app.patch("/api/discovery/review-packets/{packet_id}")
+async def update_estate_review_packet(
+    packet_id: str,
+    value: EstateReviewPacketStatusUpdate,
+    request: Request,
+) -> dict[str, Any]:
+    _authorized_review_packet(packet_id)
+    actor = str(
+        (getattr(request.state, "principal", {}) or {}).get("username") or "local-operator"
+    )
+    result = services.estate_reviews.set_status(packet_id, value.status, actor)
+    if result is None:
+        raise HTTPException(404, "Estate review packet not found")
+    services.audit.record(
+        "discovery.estate-review.status-changed",
+        "update-review-lifecycle",
+        target_type="estate-review-packet",
+        target_id=packet_id,
+        summary=f"Changed the source-preserving estate review packet to {value.status}.",
+        metadata={"status": value.status, "immutable_manifest": True},
         actor=actor,
     )
     return result

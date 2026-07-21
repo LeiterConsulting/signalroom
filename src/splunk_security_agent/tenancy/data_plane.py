@@ -2593,7 +2593,14 @@ class RoutedDiscoveryJobStore:
         found = self._find(job_id)
         return found[0].events(job_id, limit, after_id) if found else []
 
-    def result(self, job_id: str) -> dict[str, Any] | None:
+    def result(
+        self, job_id: str, tenant_scope_id: str | None = None
+    ) -> dict[str, Any] | None:
+        if tenant_scope_id:
+            store = self._store(tenant_scope_id)
+            if not store.get_job(job_id, tenant_scope_id):
+                return None
+            return store.result(job_id)
         found = self._find(job_id)
         return found[0].result(job_id) if found else None
 

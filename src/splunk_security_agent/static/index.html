@@ -6,7 +6,7 @@
   <meta name="description" content="Local-first Splunk security agent with model routing, discovery, and evidence-backed chat.">
   <title>SignalRoom · Splunk Security Agent</title>
   <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 64 64%22><rect width=%2264%22 height=%2264%22 rx=%2214%22 fill=%22%2314251d%22/><path d=%22M17 40l10-10 8 8 13-15%22 fill=%22none%22 stroke=%22%233ed387%22 stroke-width=%226%22 stroke-linecap=%22round%22 stroke-linejoin=%22round%22/></svg>">
-  <link rel="stylesheet" href="/static/styles.css?v=20260720-multi-splunk-2">
+  <link rel="stylesheet" href="/static/styles.css?v=20260720-estate-review-1">
 </head>
 <body class="chat-active">
   <div class="app-shell">
@@ -126,18 +126,27 @@
           </article>
           <article class="wide-card estate-comparison" aria-labelledby="estateComparisonTitle">
             <header>
-              <div><p class="eyebrow">SPLUNK ESTATE COMPARISON</p><h3 id="estateComparisonTitle">Compare retained posture without blending evidence</h3><p>Choose two admitted immutable scopes. SignalRoom reads their latest local discovery summaries, keeps every fact attached to its source, and runs zero new Splunk queries or model inference.</p></div>
+              <div><p class="eyebrow">SPLUNK ESTATE COMPARISON</p><h3 id="estateComparisonTitle">Compare retained posture without blending evidence</h3><p>Compare the latest local summaries immediately, or create a durable review packet from the closest completed discovery runs. Every fact remains attached to—and stored within—its source tenant; either path runs zero new Splunk queries or model inference.</p></div>
               <span class="subtle-pill" id="estateComparisonStatus">Two scopes required</span>
             </header>
             <form id="estateComparisonForm" class="estate-comparison-controls">
               <label><span>Left source</span><select id="estateComparisonLeft" required aria-label="Left Splunk comparison source"></select><small>Baseline label only—not a claim that this estate is authoritative.</small></label>
               <div class="estate-comparison-direction" aria-hidden="true">↔</div>
               <label><span>Right source</span><select id="estateComparisonRight" required aria-label="Right Splunk comparison source"></select><small>Differences remain attributed to this exact revision.</small></label>
-              <button class="button primary" id="runEstateComparison" type="submit">Compare retained snapshots</button>
+              <div class="estate-comparison-actions">
+                <label><span>Review alignment window</span><select id="estateReviewWindow" aria-label="Maximum time between durable discovery runs"><option value="60">Within 1 hour</option><option value="360">Within 6 hours</option><option value="1440" selected>Within 24 hours</option><option value="10080">Within 7 days</option></select><small>The closest completed pair is selected—not simply the newest pair.</small></label>
+                <button class="button ghost" id="runEstateComparison" type="submit">Compare latest summaries</button>
+                <button class="button primary" id="createEstateReviewPacket" type="button">Create aligned review packet</button>
+              </div>
             </form>
             <div class="estate-comparison-boundary" role="note"><b>Read-only comparison contract</b><span>0 new Splunk queries · 0 model calls · no raw rows · no global conclusion · source-specific follow-ups only</span></div>
             <div id="estateComparisonEmpty" class="empty-inline compact-empty">Enable a second admitted Splunk connection and run discovery on both scopes to compare them here. <button class="button ghost small" type="button" data-open-settings>Open connection setup</button></div>
             <div id="estateComparisonResult" class="estate-comparison-result" hidden aria-live="polite"></div>
+            <section class="estate-review-ledger" aria-labelledby="estateReviewLedgerTitle">
+              <header><div><p class="eyebrow">DURABLE REVIEW PACKETS</p><h4 id="estateReviewLedgerTitle">Time-aligned reviews that survive refreshes</h4></div><span class="subtle-pill" id="estateReviewPacketCount">Loading</span></header>
+              <p>Only immutable bindings, timestamps, digests, and lifecycle state are stored here. Opening a packet verifies and reads each tenant-owned snapshot in place.</p>
+              <div id="estateReviewPackets"><div class="empty-inline compact-empty">No aligned review packets have been created.</div></div>
+            </section>
           </article>
           <article class="wide-card assurance-workspace" aria-labelledby="assuranceTitle">
             <div class="panel-heading"><div><p class="eyebrow">CONTINUOUS ASSURANCE</p><h3 id="assuranceTitle">Re-run discovery safely—and know what persists</h3><p class="panel-intro">Opt in to a durable local schedule. SignalRoom separates transient changes from recurring drift, then packages bounded response work without approving or running SPL.</p></div><span id="assuranceWorker" class="subtle-pill">Loading worker</span></div>
@@ -825,6 +834,6 @@
     </aside>
   </div>
   <div class="toast" id="toast" role="status"></div>
-  <script src="/static/app.js?v=20260720-multi-splunk-1" defer></script>
+  <script src="/static/app.js?v=20260720-estate-review-1" defer></script>
 </body>
 </html>

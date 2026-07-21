@@ -160,12 +160,19 @@ preservation copies only the selected source's measures and findings, plus its c
 snapshot identifiers. It deliberately does not copy the other estate's facts into a tenant-scoped
 case item.
 
+The adjacent durable-packet action selects the closest pair of completed manual-discovery observations
+inside an explicit alignment window. The global packet index retains both authorized immutable aliases,
+revisions, tenant scopes, job/run IDs, timestamps, and SHA-256 digests—but no findings, measures, or labels.
+`GET /api/discovery/review-packets/{id}` authorizes both aliases, reads each compact result from its own
+tenant-routed discovery database, verifies the manifest, and only then rematerializes the comparison.
+
 Tenant-aware stores now support staged copy, digest verification, isolated routing, zero-write rollback, verified
 reverse migration, and explicit shared-source finalization for all ten routed components. OIDC policy can map exact
 provider groups to any current Splunk alias independently of role; changed policy revokes external sessions and an
 archived alias is filtered from the next sign-in. The encrypted control-plane recovery package now preserves the
 connection registry and paired vault credentials without importing tenant evidence or environment-managed secrets.
-Time-aligned durable multi-estate review packets remain future work.
+Time-aligned durable multi-estate review packets now provide a source-preserving review bridge between admitted
+instances; they do not grant one estate's live tool authority to the other.
 
 ## Why additional MCP connections belong in SignalRoom
 

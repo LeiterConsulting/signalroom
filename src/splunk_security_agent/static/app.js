@@ -1,7 +1,7 @@
 const state = {
   settings: null, artifacts: [], modelReadiness: null, conversationId: null, busy: false,
   connections: null, activeScope: null, tenantIsolation: null,
-  ledger: [], lastDiscovery: null, estateComparison: null, promptPath: [], contextKind: 'all', cases: [],
+  ledger: [], lastDiscovery: null, estateComparison: null, estateReviewPackets: [], activeEstateReviewPacket: null, promptPath: [], contextKind: 'all', cases: [],
   activeCase: null, caseCockpit: null, pendingCaseItem: null, detailActions: [], contextPage: 1, contextPageSize: 9,
   contextItems: [], editingArtifactId: null, editingCaseItemId: null, demoTourStep: -1,
   modelRecommendations: {}, validations: [], editingValidationId: null,
@@ -4348,6 +4348,7 @@ function renderEstateComparisonControls() {
   const ready = scopes.length >= 2;
   left.disabled = !ready; right.disabled = !ready;
   $('#runEstateComparison').disabled = !ready;
+  $('#createEstateReviewPacket').disabled = !ready;
   $('#estateComparisonEmpty').hidden = ready || Boolean(state.estateComparison);
   $('#estateComparisonStatus').textContent = ready ? `${scopes.length} authorized scopes` : 'Two scopes required';
 }
@@ -4372,6 +4373,8 @@ function renderEstateComparison(value) {
   const holder = $('#estateComparisonResult'); if (!holder || !value?.comparison_id) return;
   state.estateComparison = value;
   const left = value.left || {}; const right = value.right || {};
+  const packet = value.review_packet || null;
+  state.activeEstateReviewPacket = packet;
   const findings = value.findings || {left:[],right:[]};
   const metrics = (value.metrics || []).map(item => {
     const delta = item.delta_right_minus_left;
@@ -4384,7 +4387,8 @@ function renderEstateComparison(value) {
     <div><section><span>LEFT ONLY · ${Number(item.left_only_count || 0).toLocaleString()}</span><p>${(item.left_only || []).map(entry => `<code>${escapeHtml(entry)}</code>`).join('') || '<em>None reported</em>'}</p></section><section><span>RIGHT ONLY · ${Number(item.right_only_count || 0).toLocaleString()}</span><p>${(item.right_only || []).map(entry => `<code>${escapeHtml(entry)}</code>`).join('') || '<em>None reported</em>'}</p></section></div>
     ${item.truncated ? '<small>Visible labels are bounded to 25 per side.</small>' : ''}
   </article>`).join('');
-  holder.innerHTML = `<div class="estate-comparison-sources">${comparisonSourceCard(left,findings.left || [],'left')}${comparisonSourceCard(right,findings.right || [],'right')}</div>
+  const packetBanner = packet ? `<aside class="estate-review-active"><div><b>Verified durable review packet · ${escapeHtml(packet.status)}</b><span>Closest source observations are ${Number(packet.manifest.alignment.delta_seconds || 0).toLocaleString()} seconds apart within a ${Number(packet.manifest.alignment.window_minutes || 0).toLocaleString()}-minute window.</span></div><code>${escapeHtml(String(packet.id).slice(0,16))}</code></aside>` : '';
+  holder.innerHTML = `${packetBanner}<div class="estate-comparison-sources">${comparisonSourceCard(left,findings.left || [],'left')}${comparisonSourceCard(right,findings.right || [],'right')}</div>
     <section class="estate-comparison-table"><header><div><span>BOUNDED METRICS</span><h4>Side-by-side observations</h4></div><small>Delta is right minus left—not a risk score</small></header><div class="table-scroll"><table><thead><tr><th>Observed measure</th><th>${escapeHtml(left.display_name)}</th><th>${escapeHtml(right.display_name)}</th><th>Right − left</th></tr></thead><tbody>${metrics}</tbody></table></div></section>
     <section class="estate-comparison-table"><header><div><span>SECURITY DOMAINS</span><h4>Coverage observations by source</h4></div><small>“Gap” means validate collection—not proven absence</small></header><div class="table-scroll"><table><thead><tr><th>Domain</th><th>${escapeHtml(left.display_name)}</th><th>${escapeHtml(right.display_name)}</th><th>Relationship</th></tr></thead><tbody>${domains}</tbody></table></div></section>
     <section class="estate-contrasts"><header><div><span>LABEL CONTRASTS</span><h4>What each retained catalog reports</h4></div><small>String identity only · no semantic equivalence inference</small></header>${contrasts || '<div class="empty-inline compact-empty">No comparable catalog labels were retained by these snapshots.</div>'}</section>
@@ -4392,6 +4396,62 @@ function renderEstateComparison(value) {
   holder.hidden = false;
   $('#estateComparisonEmpty').hidden = true;
   $('#estateComparisonStatus').textContent = 'Source-preserving result ready';
+}
+
+function renderEstateReviewPackets() {
+  const holder = $('#estateReviewPackets'); if (!holder) return;
+  const packets = state.estateReviewPackets || [];
+  $('#estateReviewPacketCount').textContent = `${packets.length} retained`;
+  holder.className = packets.length ? 'estate-review-list' : '';
+  holder.innerHTML = packets.length ? packets.map(packet => {
+    const manifest = packet.manifest || {}; const left = manifest.left || {}; const right = manifest.right || {}; const alignment = manifest.alignment || {};
+    return `<article class="estate-review-row ${escapeHtml(packet.status)}">
+      <div><header><h5>${escapeHtml(left.display_name || left.connection_alias)} ↔ ${escapeHtml(right.display_name || right.connection_alias)}</h5><span>${escapeHtml(packet.status)}</span></header>
+      <p>${escapeHtml(assuranceTime(left.observed_at))} ↔ ${escapeHtml(assuranceTime(right.observed_at))} · ${Number(alignment.delta_seconds || 0).toLocaleString()}s apart · ${escapeHtml(left.tenant_scope_id)} / ${escapeHtml(right.tenant_scope_id)}</p>
+      <code>${escapeHtml(String(packet.id).slice(0,16))} · runs ${escapeHtml(String(left.discovery_run_id || '').slice(0,8))} / ${escapeHtml(String(right.discovery_run_id || '').slice(0,8))}</code></div>
+      <footer><button class="button ghost small" type="button" data-open-estate-review="${escapeHtml(packet.id)}">Verify and open</button><label><span class="sr-only">Review lifecycle</span><select data-estate-review-status="${escapeHtml(packet.id)}" aria-label="Review lifecycle for ${escapeHtml(left.display_name || left.connection_alias)} and ${escapeHtml(right.display_name || right.connection_alias)}"><option value="open" ${packet.status === 'open' ? 'selected' : ''}>Open</option><option value="reviewed" ${packet.status === 'reviewed' ? 'selected' : ''}>Reviewed</option><option value="archived" ${packet.status === 'archived' ? 'selected' : ''}>Archived</option></select></label></footer>
+    </article>`;
+  }).join('') : '<div class="empty-inline compact-empty">No aligned review packets have been created. Run durable discovery on two scopes, then create a packet above.</div>';
+}
+
+async function loadEstateReviewPackets() {
+  const result = await api('/api/discovery/review-packets?limit=50');
+  state.estateReviewPackets = result.packets || [];
+  renderEstateReviewPackets();
+}
+
+async function createEstateReviewPacket() {
+  let left; let right;
+  try { left = selectedScope('#estateComparisonLeft'); right = selectedScope('#estateComparisonRight'); }
+  catch (error) { toast(error.message); return; }
+  if (scopeKey(left) === scopeKey(right)) { toast('Choose two different immutable Splunk scopes'); return; }
+  const button = $('#createEstateReviewPacket'); const prior = button.textContent;
+  button.disabled = true; button.textContent = 'Aligning durable runs…';
+  $('#estateComparisonStatus').textContent = 'Selecting the closest completed discovery pair';
+  try {
+    const result = await api('/api/discovery/review-packets', {method:'POST',body:JSON.stringify({left:bindingPayload(left),right:bindingPayload(right),alignment_window_minutes:Number($('#estateReviewWindow').value)})});
+    const comparison = {...result.comparison, review_packet:result.packet};
+    renderEstateComparison(comparison);
+    await loadEstateReviewPackets();
+    toast('Time-aligned review packet created · source facts stayed in place');
+  } catch (error) {
+    $('#estateComparisonStatus').textContent = 'Aligned review needs attention'; toast(error.message);
+  } finally { button.disabled = executionScopes().length < 2; button.textContent = prior; }
+}
+
+async function openEstateReviewPacket(packetId) {
+  $('#estateComparisonStatus').textContent = 'Verifying tenant-scoped source digests';
+  const result = await api(`/api/discovery/review-packets/${encodeURIComponent(packetId)}`);
+  renderEstateComparison({...result.comparison, review_packet:result.packet});
+  $('#estateComparisonResult').scrollIntoView({behavior:'smooth',block:'start'});
+  toast('Review packet verified and materialized from both source stores');
+}
+
+async function updateEstateReviewPacketStatus(packetId, status) {
+  await api(`/api/discovery/review-packets/${encodeURIComponent(packetId)}`, {method:'PATCH',body:JSON.stringify({status})});
+  await loadEstateReviewPackets();
+  if (state.activeEstateReviewPacket?.id === packetId) await openEstateReviewPacket(packetId);
+  toast(`Review packet marked ${status}`);
 }
 
 async function runEstateComparison(event) {
@@ -5941,6 +6001,7 @@ $('#toggleEvidence').addEventListener('click', () => $('.evidence-panel').classL
 $('#closeEvidence').addEventListener('click', () => $('.evidence-panel').classList.remove('mobile-open'));
 $('#runDiscovery').addEventListener('click', runDiscovery);
 $('#estateComparisonForm').addEventListener('submit', runEstateComparison);
+$('#createEstateReviewPacket').addEventListener('click', createEstateReviewPacket);
 $('#estateComparisonLeft').addEventListener('change', event => {
   if ($('#estateComparisonRight').value === event.target.value) {
     const alternative = executionScopes().find(item => scopeKey(item) !== event.target.value);
@@ -5960,6 +6021,14 @@ $('#estateComparisonResult').addEventListener('click', event => {
   if (open) useEstateComparisonSource(open.dataset.openComparisonSource, 'open').catch(error => toast(error.message));
   else if (investigate) useEstateComparisonSource(investigate.dataset.investigateComparison, 'investigate').catch(error => toast(error.message));
   else if (preserve) useEstateComparisonSource(preserve.dataset.preserveComparison, 'preserve').catch(error => toast(error.message));
+});
+$('#estateReviewPackets').addEventListener('click', event => {
+  const target = event.target.closest('[data-open-estate-review]');
+  if (target) openEstateReviewPacket(target.dataset.openEstateReview).catch(error => toast(error.message));
+});
+$('#estateReviewPackets').addEventListener('change', event => {
+  const target = event.target.closest('[data-estate-review-status]');
+  if (target) updateEstateReviewPacketStatus(target.dataset.estateReviewStatus, target.value).catch(error => toast(error.message));
 });
 $('#cancelDiscoveryJob').addEventListener('click', cancelDiscoveryJob);
 $('#discoveryJobHistory').addEventListener('click', event => {
@@ -6113,7 +6182,7 @@ const accessObserver = new MutationObserver(() => {
 accessObserver.observe(document.body, { childList:true, subtree:true });
 
 async function loadWorkspace() {
-  await Promise.all([loadSettings(), loadWorkload(), loadArtifacts(), loadCases(), loadLatestDiscovery(), loadDiscoveryJobs(), loadValidations(), loadDetections(), loadModelCatalog(), loadTimeSeriesStatus(), loadModelTrust(), loadSplunkModels(), loadAssurance(), loadConnectionDiagnostics(), loadFeedbackBenchmarks(), loadGoldenBenchmarks(), loadRecovery()]);
+  await Promise.all([loadSettings(), loadWorkload(), loadArtifacts(), loadCases(), loadLatestDiscovery(), loadDiscoveryJobs(), loadEstateReviewPackets(), loadValidations(), loadDetections(), loadModelCatalog(), loadTimeSeriesStatus(), loadModelTrust(), loadSplunkModels(), loadAssurance(), loadConnectionDiagnostics(), loadFeedbackBenchmarks(), loadGoldenBenchmarks(), loadRecovery()]);
   renderPromptTree(); renderValidations(); renderDetections(); handleDeepLink(); renderAuth();
   state.workspaceLoaded = true;
   if (!state.assuranceTimer) state.assuranceTimer = setInterval(() => {

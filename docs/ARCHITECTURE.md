@@ -409,6 +409,19 @@ states its zero-query/zero-inference contract. It stores no additional cross-ten
 UI investigation pivots select one authorized estate as the sole live tool target. Case preservation
 is source-only because existing case and RAG stores treat tenant scope as a hard query boundary.
 
+`EstateReviewPacketService` turns that ephemeral comparison into a time-aligned durable review without
+creating a shared fact store. It considers up to 100 complete or partial durable manual-discovery results
+for each exact scope, deterministically selects the pair with the smallest observation-time distance, and
+requires the pair to fall inside the operator's 15-minute to seven-day window. The global
+`estate_reviews.db` row contains only immutable scope/job/run references, observation timestamps, compact
+snapshot digests, the comparison ID, alignment metadata, and lifecycle state.
+
+Opening a packet resolves each discovery job through its tenant-routed store, verifies alias, revision,
+tenant, run ID, and compact-result SHA-256, then rematerializes the deterministic comparison in memory.
+Missing, reassigned, or changed source state fails closed. The packet database never receives findings,
+metrics, catalog labels, raw rows, or model output; RBAC listing and access require authority to both
+connection aliases.
+
 ## External identity remains authentication evidence
 
 `OIDCService` supports one opt-in issuer only after local RBAC is active. Browser login uses authorization code plus
@@ -432,12 +445,11 @@ there is deliberately no remote recovery route.
 
 ## Next production increments
 
-1. Add time-aligned durable multi-estate review packets without cross-tenant fact copying
-2. Add read-only deployment reconciliation for the audit operations pack when the Splunk MCP contract exposes the
+1. Add read-only deployment reconciliation for the audit operations pack when the Splunk MCP contract exposes the
    required index and knowledge-object configuration fields
-3. Add retention and administrator cleanup policy for superseded tenant generations, reverse snapshots, and
+2. Add retention and administrator cleanup policy for superseded tenant generations, reverse snapshots, and
    encrypted recovery exports/checkpoints
-4. Complete release-candidate upgrade, installer, recovery, multi-instance, and security acceptance testing
+3. Complete release-candidate upgrade, installer, recovery, multi-instance, and security acceptance testing
 
 ## Recovery is a restart-gated control-plane transaction
 

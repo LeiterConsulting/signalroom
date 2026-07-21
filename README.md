@@ -158,6 +158,15 @@ counts only as arithmetic; and never labels a difference as improvement or regre
 investigating, or preserving a review item first enters that source's authorized scope. A case item
 receives only that side's observations so cross-tenant facts are not copied into a blended record.
 
+For a review that must survive a refresh, choose an alignment window and create a **durable review
+packet**. SignalRoom searches up to 100 completed or partial manual-discovery runs per selected scope
+and selects the pair with the smallest observation-time distance inside that window.
+`data/estate_reviews.db` stores only the two immutable bindings, discovery job/run IDs, timestamps,
+snapshot digests, comparison ID, alignment decision, and lifecycle state. Opening the packet re-reads
+each exact compact result from its tenant-routed discovery store and verifies both digests before
+rematerializing the comparison. Metrics, findings, labels, raw rows, and model output are never copied
+into the global packet index.
+
 For deployments evaluating stronger data boundaries, **Setup → Physical tenant isolation readiness**
 builds a review-only plan for an admitted tenant and immutable Splunk revision. The planner reads SQLite
 schema and row counts and streams manifested files through SHA-256 without parsing or exposing them. It does
@@ -604,6 +613,12 @@ conclusion. A deterministic comparison fingerprint covers both scope identities,
 snapshot digests. Different depths or collection gaps remain visible caveats rather than silently
 normalizing incomparable evidence.
 
+The same controls can create a time-aligned durable packet from completed manual-discovery history.
+The closest retained pair—not merely the latest pair—is selected within an explicit one-hour to
+seven-day window. A packet is an immutable, content-free manifest plus `open`, `reviewed`, or `archived`
+lifecycle state. Materialization fails closed if either tenant-owned job is unavailable, its immutable
+Splunk binding changed, its run ID differs, or its compact snapshot digest no longer matches.
+
 ### Continuous assurance
 
 The Discovery page can opt in to a local recurring schedule. The policy selects an admitted Splunk
@@ -774,8 +789,10 @@ local export-lag contract. Tenant-scoped evidence, cases, discovery history, and
 form the shared application boundary. Additional Splunk aliases now have per-alias encrypted credentials, health,
 authorization, clients, durable identity, and tenant-aware routing. Administrators can now export and inspect a
 password-encrypted control-plane recovery package, stage only a compatible package, and retain an encrypted
-pre-restore checkpoint. The next production increment is time-aligned durable multi-estate review packets without
-copying one tenant's facts into another tenant boundary.
+pre-restore checkpoint. Time-aligned durable multi-estate review packets now persist only verified
+references and materialize each tenant's source facts in place. The next production increment is
+read-only deployment reconciliation for the audit operations pack where the Splunk MCP field contract
+permits it.
 
 ### Operator-authored evaluation suites
 

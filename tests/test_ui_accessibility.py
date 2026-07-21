@@ -238,6 +238,13 @@ def test_discovery_comparison_is_explicit_source_preserving_and_accessible() -> 
     assert "other estate's facts are intentionally not copied" in APP_JS
     assert "data-investigate-comparison" in APP_JS
     assert ".estate-comparison-controls select:focus-visible" in STYLES_CSS
+    assert 'id="createEstateReviewPacket"' in INDEX_HTML
+    assert 'aria-label="Maximum time between durable discovery runs"' in INDEX_HTML
+    assert 'id="estateReviewPackets"' in INDEX_HTML
+    assert "async function createEstateReviewPacket()" in APP_JS
+    assert "async function openEstateReviewPacket(packetId)" in APP_JS
+    assert ".estate-review-row" in STYLES_CSS
+    assert ".estate-review-row select:focus-visible" in STYLES_CSS
 
 
 def test_remote_audit_export_is_explicit_and_accessible() -> None:
