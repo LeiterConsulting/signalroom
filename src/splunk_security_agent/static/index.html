@@ -699,6 +699,10 @@
         <div class="form-section recovery-section" id="recoverySection" data-settings-section="recoverySection" data-settings-title="Recovery and retention" data-settings-eyebrow="SETTINGS · RESILIENCE" data-settings-description="encrypted recovery and governed cleanup">
           <div class="recovery-heading"><div><h3>Encrypted control-plane recovery</h3><p>Back up SignalRoom settings, encrypted credentials, Splunk connection identities, access policy, and paired model-trust authority without copying investigation data.</p></div><span class="subtle-pill">ADMIN · LOCAL FILE</span></div>
           <div class="recovery-contract" role="note"><b>Inspect first. Restore on restart.</b><span>Every package is password-derived AES-256-GCM encrypted and integrity checked. Inspection is read only. A compatible restore creates an encrypted rollback checkpoint, freezes configuration changes, and applies before services open on the next process start.</span></div>
+          <section class="operational-acceptance-panel" aria-labelledby="operationalAcceptanceTitle">
+            <header><div><span>OPERATIONS · EXPLICIT DRILLS</span><h4 id="operationalAcceptanceTitle">Recovery and multi-instance acceptance</h4><p>Prove the local recovery contract, current Splunk revisions, tenant ownership, authorization boundary, and durable workers. Reading this panel never calls Splunk or stages a restore.</p></div><div><button class="button ghost small" type="button" id="refreshOperationalAcceptance">Refresh local evidence</button><button class="button primary small" type="button" id="captureOperationalAcceptance">Capture assessment</button></div></header>
+            <div class="operational-acceptance" id="operationalAcceptance" aria-live="polite"><div class="empty-inline compact-empty">Reading retained diagnostics and local operational contracts…</div></div>
+          </section>
           <div class="recovery-pending" id="recoveryPending" hidden aria-live="assertive"></div>
           <div class="recovery-grid">
             <section class="recovery-action-card" aria-labelledby="recoveryBackupTitle">

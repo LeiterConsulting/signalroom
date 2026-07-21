@@ -13,7 +13,7 @@ const state = {
   evaluationDraft: null, evaluationScenarioIndex: 0,
   deliveryPreview: null, detections: [], activeDetection: null, detectionGitExport: null,
   repositoryStatus: null, repositoryHandoff: null, auth: null, authUsers: [],
-  recovery: null, recoveryInspection: null, retention: null, releaseReadiness: null, upgradeReadiness: null,
+  recovery: null, recoveryInspection: null, operationalAcceptance: null, retention: null, releaseReadiness: null, upgradeReadiness: null,
   codeScreenResult: null, timeSeriesStatus: null, timeSeriesResult: null,
   timeSeriesExperiments: null, timeSeriesSchedules: null, timeSeriesScheduleTimer: null,
   workspaceLoaded: false, assuranceTimer: null, discoveryJobs: null,
@@ -837,6 +837,86 @@ async function loadRecovery() {
   } catch (error) {
     $('#recoveryHistory').innerHTML = `<div class="empty-inline compact-empty error">${escapeHtml(error.message)}</div>`;
   }
+}
+
+function operationalStatusLabel(status) {
+  return ({pass:'Passed',attention:'Attention','not-yet-drilled':'Not yet drilled',blocked:'Blocked'})[status] || status;
+}
+
+function renderOperationalAcceptance() {
+  const value = state.operationalAcceptance;
+  const holder = $('#operationalAcceptance');
+  if (!holder || !value) return;
+  const decision = value.decision || 'incomplete';
+  const labels = {ready:'Operationally ready',attention:'Ready with accepted attention',incomplete:'Drills incomplete',blocked:'Acceptance blocked'};
+  const checks = (value.checks || []).map(item => {
+    const connections = item.id === 'splunk-instances' ? `<div class="operational-instance-list">${(item.items || []).map(instance => `
+      <article class="operational-instance ${escapeHtml(instance.status)}" data-acceptance-instance="${escapeHtml(instance.alias)}">
+        <i aria-hidden="true"></i><div><b>${escapeHtml(instance.display_name)}</b><span>${escapeHtml(instance.summary)}</span><small><code>${escapeHtml(instance.alias)}</code> · ${escapeHtml(instance.tenant_scope_id)} · ${escapeHtml(shortFingerprint(instance.fingerprint))}${instance.diagnostic_checked_at ? ` · checked ${escapeHtml(new Date(instance.diagnostic_checked_at).toLocaleString())}` : ''}</small><strong>Next: ${escapeHtml(instance.next_action)}</strong></div>
+        <button class="button ghost small" type="button" data-acceptance-diagnose="${escapeHtml(instance.alias)}">Run live diagnostics</button>
+      </article>`).join('')}</div>` : '';
+    let action = '';
+    if (item.action === 'rehearse-recovery') action = '<button class="button primary small" type="button" id="rehearseOperationalRecovery">Run local recovery rehearsal</button>';
+    if (item.action === 'review-instances') action = '<button class="button ghost small" type="button" data-operational-section="settingsConnections">Review instance controls</button>';
+    if (item.action === 'review-routing') action = '<button class="button ghost small" type="button" data-operational-section="settingsConnections">Review tenant routing</button>';
+    if (item.action === 'review-access') action = '<button class="button ghost small" type="button" data-operational-section="accessControlSection">Review access boundary</button>';
+    if (item.action === 'review-workflows') action = '<button class="button ghost small" type="button" data-operational-section="settingsConnections">Review workflow bindings</button>';
+    return `<article class="operational-check ${escapeHtml(item.status)}"><header><div><i aria-hidden="true"></i><span>${escapeHtml(operationalStatusLabel(item.status))}</span><h5>${escapeHtml(item.title)}</h5></div>${action}</header><b>${escapeHtml(item.summary)}</b><p>${escapeHtml(item.detail)}</p>${connections}</article>`;
+  }).join('');
+  const receipts = (value.recent_receipts || []).length ? `<details class="operational-receipts"><summary>Captured acceptance receipts · ${value.recent_receipts.length}</summary><div>${value.recent_receipts.map(item => `<article><span>${escapeHtml(String(item.decision || '').toUpperCase())}</span><div><b>${escapeHtml(new Date(item.created_at).toLocaleString())} · ${escapeHtml(item.created_by || 'unknown')}</b><small>State ${escapeHtml(shortDigest(item.state_sha256))} · ${Number(item.connection_revisions?.length || 0)} immutable instance revision${item.connection_revisions?.length === 1 ? '' : 's'}</small></div></article>`).join('')}</div></details>` : '<p class="operational-no-receipt">No assessment receipt has been captured. Refreshing remains read only; Capture assessment retains only statuses, revision fingerprints, and a state digest.</p>';
+  holder.innerHTML = `<div class="operational-decision ${escapeHtml(decision)}"><div><span>${escapeHtml(labels[decision] || decision)}</span><b>${Number(value.counts?.pass || 0)} passed · ${Number(value.counts?.attention || 0)} attention · ${Number(value.counts?.['not-yet-drilled'] || 0)} not drilled · ${Number(value.counts?.blocked || 0)} blocked</b><small>Observed ${escapeHtml(new Date(value.checked_at).toLocaleString())}; state ${escapeHtml(shortDigest(value.state_sha256))}</small></div><em>NO AUTOMATIC SPLUNK CALLS</em></div><div class="operational-check-list">${checks}</div>${receipts}`;
+}
+
+async function loadOperationalAcceptance() {
+  if (!state.auth?.permissions?.can_administer) return;
+  const holder = $('#operationalAcceptance');
+  if (holder) holder.innerHTML = '<div class="empty-inline compact-empty">Reading retained diagnostics and local operational contracts…</div>';
+  try {
+    state.operationalAcceptance = await api('/api/operational-acceptance');
+    renderOperationalAcceptance();
+  } catch (error) {
+    if (holder) holder.innerHTML = `<div class="empty-inline compact-empty error">${escapeHtml(error.message)}</div>`;
+  }
+}
+
+async function captureOperationalAcceptance() {
+  const button = $('#captureOperationalAcceptance');
+  button.disabled = true; button.textContent = 'Capturing state digest…';
+  try {
+    const receipt = await api('/api/operational-acceptance/assess', {method:'POST'});
+    await loadOperationalAcceptance();
+    toast(`Operational assessment captured · ${receipt.decision}`);
+  } catch (error) { toast(error.message); }
+  finally { button.disabled = false; button.textContent = 'Capture assessment'; }
+}
+
+async function rehearseOperationalRecovery() {
+  const button = $('#rehearseOperationalRecovery');
+  if (!button) return;
+  button.disabled = true; button.textContent = 'Snapshotting and validating locally…';
+  try {
+    const result = await api('/api/operational-acceptance/recovery-rehearsal', {method:'POST'});
+    state.operationalAcceptance = result.acceptance;
+    await loadRecovery();
+    renderOperationalAcceptance();
+    toast(`${Number(result.rehearsal.components?.length || 0)} recovery components passed · no package retained`);
+  } catch (error) { toast(error.message); button.disabled = false; button.textContent = 'Run local recovery rehearsal'; }
+}
+
+async function diagnoseAcceptanceConnection(alias, button) {
+  const card = button.closest('[data-acceptance-instance]');
+  const detail = card?.querySelector('strong');
+  button.disabled = true;
+  if (detail) detail.textContent = 'Starting explicit configuration, network, TLS, MCP, and tool checks…';
+  try {
+    const path = alias === 'primary' ? '/api/connection/diagnostics/stream' : `/api/connections/splunk/${encodeURIComponent(alias)}/diagnostics/stream`;
+    const result = await streamApi(path, {}, event => {
+      if (detail && (event.type === 'progress' || event.type === 'heartbeat')) detail.textContent = `${event.label || 'Working'} · ${event.detail || ''}`;
+    });
+    await Promise.all([loadConnections(), loadOperationalAcceptance()]);
+    toast(result.ready ? `${alias} diagnostics passed` : `${alias} blocked at ${result.blocking_stage || 'preflight'}`);
+  } catch (error) { if (detail) detail.textContent = error.message; else toast(error.message); }
+  finally { button.disabled = false; }
 }
 
 function downloadRecovery(url, filename = '') {
@@ -5884,6 +5964,13 @@ function navigateView(name) {
 }
 
 document.addEventListener('click', async event => {
+  if (event.target.closest('#refreshOperationalAcceptance')) { await loadOperationalAcceptance(); return; }
+  if (event.target.closest('#captureOperationalAcceptance')) { await captureOperationalAcceptance(); return; }
+  if (event.target.closest('#rehearseOperationalRecovery')) { await rehearseOperationalRecovery(); return; }
+  const acceptanceDiagnostic = event.target.closest('[data-acceptance-diagnose]');
+  if (acceptanceDiagnostic) { await diagnoseAcceptanceConnection(acceptanceDiagnostic.dataset.acceptanceDiagnose, acceptanceDiagnostic); return; }
+  const operationalSection = event.target.closest('[data-operational-section]');
+  if (operationalSection) { navigateSettingsSection(operationalSection.dataset.operationalSection); return; }
   if (event.target.closest('#stageRecoveryRestore')) { await stageRecoveryRestore(); return; }
   if (event.target.closest('#cancelRecoveryRestore')) { await cancelRecoveryRestore(); return; }
   const deleteRecovery = event.target.closest('[data-delete-recovery]');
@@ -6137,7 +6224,7 @@ document.addEventListener('click', async event => {
   }
   const change = event.target.closest('[data-change-investigate]');
   if (change) openInvestigation('discovery', `Explain and validate this change since the previous discovery: ${change.dataset.changeCategory} ${change.dataset.changeInvestigate}. Determine whether it is a real posture change or a collection issue.`, false);
-  if (event.target.closest('#openSettings,#configureModels,[data-open-settings]')) { openSettings(); loadWorkload(); await loadConnections(); await loadTenantIsolation(); await loadRecovery(); await loadRetention(); await loadReleaseReadiness(); await loadUpgradeReadiness(); }
+  if (event.target.closest('#openSettings,#configureModels,[data-open-settings]')) { openSettings(); loadWorkload(); await loadConnections(); await loadTenantIsolation(); await loadRecovery(); await loadOperationalAcceptance(); await loadRetention(); await loadReleaseReadiness(); await loadUpgradeReadiness(); }
   if (event.target.closest('#closeSettings')) $('#settingsModal').hidden = true;
   if (event.target.closest('#stageTenantMigration')) await stageTenantMigration();
   if (event.target.closest('#stageTenantReverse')) await stageTenantReverseMigration();
@@ -6470,7 +6557,7 @@ const accessObserver = new MutationObserver(() => {
 accessObserver.observe(document.body, { childList:true, subtree:true });
 
 async function loadWorkspace() {
-  await Promise.all([loadSettings(), loadWorkload(), loadArtifacts(), loadCases(), loadLatestDiscovery(), loadDiscoveryJobs(), loadEstateReviewPackets(), loadValidations(), loadDetections(), loadModelCatalog(), loadTimeSeriesStatus(), loadModelTrust(), loadSplunkModels(), loadAssurance(), loadConnectionDiagnostics(), loadFeedbackBenchmarks(), loadGoldenBenchmarks(), loadRecovery(), loadRetention(), loadReleaseReadiness(), loadUpgradeReadiness()]);
+  await Promise.all([loadSettings(), loadWorkload(), loadArtifacts(), loadCases(), loadLatestDiscovery(), loadDiscoveryJobs(), loadEstateReviewPackets(), loadValidations(), loadDetections(), loadModelCatalog(), loadTimeSeriesStatus(), loadModelTrust(), loadSplunkModels(), loadAssurance(), loadConnectionDiagnostics(), loadFeedbackBenchmarks(), loadGoldenBenchmarks(), loadRecovery(), loadOperationalAcceptance(), loadRetention(), loadReleaseReadiness(), loadUpgradeReadiness()]);
   renderPromptTree(); renderValidations(); renderDetections(); handleDeepLink(); renderAuth();
   state.workspaceLoaded = true;
   if (!state.assuranceTimer) state.assuranceTimer = setInterval(() => {

@@ -62,6 +62,27 @@ def test_recovery_package_is_encrypted_and_inspected_without_mutation(tmp_path: 
     assert service.overview()["pending_restore"] is None
 
 
+def test_recovery_rehearsal_discards_package_password_and_restore_authority(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "data"
+    control_plane(root)
+    service = RecoveryPackageService(root, "0.1.0")
+
+    receipt = service.rehearse("security-admin")
+
+    assert receipt["status"] == "pass"
+    assert receipt["package_retained"] is False
+    assert receipt["password_retained"] is False
+    assert receipt["restore_staged"] is False
+    assert receipt["live_state_changed"] is False
+    assert len(receipt["components"]) >= 6
+    assert list(service.exports.glob("*")) == []
+    assert list(service.inspections.glob("*")) == []
+    assert not service.pending_marker.exists()
+    assert service.overview()["recent_rehearsals"][0]["id"] == receipt["id"]
+
+
 def test_recovery_inspection_rejects_wrong_password_and_ciphertext_tampering(
     tmp_path: Path,
 ) -> None:

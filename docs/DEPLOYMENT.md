@@ -312,6 +312,8 @@ All lifecycle files stay inside the repository:
 | `data/recovery/pending/` | Validated restart stage and mutation-freeze marker |
 | `data/recovery/rollbacks/` | Automatic password-encrypted pre-restore checkpoints |
 | `data/recovery/receipts/` | Non-secret applied-restore receipts |
+| `data/recovery/rehearsals/` | Payload-free local cryptographic round-trip receipts; no package or password |
+| `data/operational_acceptance/receipts/` | State-bound operational assessments without evidence, SPL, prompts, or credentials |
 
 The lifecycle manager validates that a PID belongs to SignalRoom before stopping it. A stale PID will never be used to terminate an unrelated process.
 
@@ -360,6 +362,12 @@ The package restores settings, the local credential vault/key, Splunk connection
 state, and paired model-trust state. It does not restore investigation data, queues, schedules, audit history,
 models, generated artifacts, environment variables, external service state, or private CA files. A restored CA
 path must exist and be independently trusted on the destination host.
+
+Use Setup → **Recovery and multi-instance acceptance** before promotion and after a connection, tenant route,
+access-policy, runtime-bind, or worker lifecycle change. Refresh is local-only. Splunk diagnostics and the encrypted
+recovery rehearsal are separate explicit actions. The assessment deliberately blocks local single-user mode when
+the recorded runtime host is `0.0.0.0` or `::`; enable RBAC or return the process to loopback. Follow
+[Operational acceptance](OPERATIONAL_ACCEPTANCE.md) for the complete sequence.
 
 ## Port fallback
 

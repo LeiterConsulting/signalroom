@@ -459,7 +459,16 @@ there is deliberately no remote recovery route.
 
 ## Next production increments
 
-1. Complete operational recovery and multi-instance acceptance
+1. Run deployment-specific sandbox restore and adversarial multi-instance acceptance
+2. Add trusted HTTPS/proxy ingress and production identity hardening
+3. Complete a deployment-specific threat model and recovery-objective evidence pack
+
+The in-product operational acceptance service now synthesizes five independent contracts without contacting
+Splunk: recovery rehearsal, immutable instance diagnostics, tenant route ownership, authorization/runtime exposure,
+and durable worker/binding state. A deliberate diagnostic action exercises one selected Splunk revision. A separate
+local rehearsal round-trips an ephemeral encrypted control-plane package and retains no package or password.
+Captured assessments contain only statuses, immutable connection fingerprints, and a canonical state digest.
+They are operational evidence, not proof that an off-host package was restored successfully in another environment.
 
 ## Upgrade readiness is a read-only retained-data contract
 

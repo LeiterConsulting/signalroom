@@ -40,6 +40,7 @@ This is a focused reimplementation inspired by [LeiterConsulting/splunk-discover
 - Conditional specialist inference, short-lived inventory caches, and warm Ollama model retention
 - Encrypted Splunk and Hugging Face tokens at rest
 - Password-encrypted control-plane recovery packages with read-only inspection, release compatibility checks, restart-gated restore, and an automatic encrypted rollback checkpoint
+- A payload-free operational acceptance board with a real local encrypted recovery rehearsal, per-revision Splunk diagnostics, tenant/authorization/worker checks, and retained state-bound receipts
 - A source-bound release-candidate gate for Settings density, navigation, labels, disclosure cues, typography, WCAG AA semantic contrast, production language, function ownership, lint, JavaScript syntax, tests, and named viewport review
 - A read-only install/upgrade preflight for exact-source drift, retained-data integrity, recovery and tenant-migration boundaries, runtime visibility, model preservation, and process/container parity
 - A safe demo workspace that runs without Splunk, Ollama, or Hugging Face
@@ -802,8 +803,9 @@ references and materialize each tenant's source facts in place. Audit operations
 tenant-filtered, read-only reconciliation history. Administrators now have preview-bound, metadata-preserving local
 retention controls for superseded tenant generations, terminal reverse snapshots, and encrypted recovery artifacts.
 The upgrade and installer matrix now binds exact source, retained data, recovery state, lifecycle ownership, and
-container boundaries before mutation. The next production increment is operational recovery and multi-instance
-security acceptance testing.
+container boundaries before mutation. Operational acceptance now binds recovery rehearsal, every configured Splunk
+revision, tenant ownership, authorization exposure, and durable workers into one explicit evidence view. The next
+production increment is deployment-specific sandbox restore and adversarial multi-instance failure testing.
 
 ### Release-candidate quality gate
 
@@ -913,6 +915,28 @@ signalroom-recovery --data-dir .\data restore .\data\recovery\rollbacks\pre-rest
 The command prompts for the package password and exact restore confirmation. Start or restart SignalRoom afterward
 to apply it. Protect the package and its password separately; neither SignalRoom nor the checkpoint can recover a
 lost password.
+
+### Operational recovery and multi-instance acceptance
+
+Setup → **Recovery and multi-instance acceptance** separates observation from drills. Refreshing reads retained
+diagnostics, immutable connection revisions, tenant routes, access policy, runtime binding, recovery receipts, and
+worker state; it never contacts Splunk. Each instance has a separate **Run live diagnostics** action so an operator
+can deliberately exercise configuration, DNS, TCP, TLS, MCP authentication, and tool compatibility for that exact
+revision. A self-signed connection with certificate verification disabled can pass MCP admission while remaining
+clearly marked **Attention**.
+
+**Run local recovery rehearsal** creates an ephemeral password, snapshots the fixed control-plane allowlist,
+encrypts it, decrypts it, and reruns the complete package/digest/database/vault/model-trust validation contract.
+The encrypted package and password are discarded, no inspection or restore stage is created, and the payload-free
+receipt records the release, component digests, and validation names. **Capture assessment** retains only statuses,
+immutable revision fingerprints, a state digest, and operator identity; it never retains SPL, evidence, cases,
+prompts, results, or credentials.
+
+The board blocks an unavailable or incompatible current Splunk revision, duplicate/orphan tenant ownership,
+offline durable workers, binding drift, RBAC without a local break-glass admin, and network-exposed local
+single-user mode. “Not yet drilled” is distinct from failure. See
+[Operational acceptance](docs/OPERATIONAL_ACCEPTANCE.md) for the operator sequence and the separate sandbox restore
+exercise required before production promotion.
 
 ### Local retention and cleanup
 

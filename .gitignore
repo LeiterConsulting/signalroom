@@ -23,6 +23,7 @@ data/model_attestations/*
 data/models/*
 !data/models/.gitkeep
 data/recovery/*
+data/operational_acceptance/*
 data/upgrade/
 .env
 .install_manifest.json

@@ -457,9 +457,16 @@ class RecoveryPackageService:
         self.root = self.data_root / "recovery"
         self.exports = self.root / "exports"
         self.inspections = self.root / "inspections"
+        self.rehearsals = self.root / "rehearsals"
         self.rollbacks = self.root / "rollbacks"
         self.pending_root = self.root / "pending"
-        for directory in (self.exports, self.inspections, self.rollbacks, self.pending_root):
+        for directory in (
+            self.exports,
+            self.inspections,
+            self.rehearsals,
+            self.rollbacks,
+            self.pending_root,
+        ):
             directory.mkdir(parents=True, exist_ok=True)
 
     @property
@@ -476,6 +483,10 @@ class RecoveryPackageService:
             "application_version": self.application_version,
             "pending_restore": pending or None,
             "recent_receipts": [self._read_json(path) for path in receipts],
+            "recent_rehearsals": [
+                self._read_json(path)
+                for path in sorted(self.rehearsals.glob("*.json"), reverse=True)[:10]
+            ],
             "exports": [
                 self._export_record(path)
                 for path in sorted(
@@ -497,6 +508,42 @@ class RecoveryPackageService:
                 "It never imports investigation records or starts retained work."
             ),
         }
+
+    def rehearse(self, actor: str) -> dict[str, Any]:
+        """Exercise the package cryptography and contracts without retaining a package."""
+        password = "signalroom-local-rehearsal-" + os.urandom(32).hex()
+        payload = self._build_payload(actor=actor, package_type="acceptance-rehearsal")
+        package = _encrypt(payload, password)
+        inspected = _validate_payload(_decrypt(package, password), self.application_version)
+        receipt = {
+            "id": str(uuid4()),
+            "status": "pass",
+            "created_at": _now(),
+            "created_by": actor[:120],
+            "application_version": self.application_version,
+            "package_id": inspected["manifest"]["package_id"],
+            "package_sha256": _sha256(package),
+            "package_size": len(package),
+            "components": [
+                {
+                    "path": item["path"],
+                    "size": item["size"],
+                    "sha256": item["sha256"],
+                }
+                for item in inspected["manifest"]["components"]
+            ],
+            "validations": sorted(inspected["validations"]),
+            "compatible": bool(inspected["compatibility"]["compatible"]),
+            "package_retained": False,
+            "password_retained": False,
+            "restore_staged": False,
+            "live_state_changed": False,
+        }
+        filename = f"{receipt['created_at'].replace(':', '-')}-{receipt['id']}.json"
+        _secure_write(self.rehearsals / filename, _canonical(receipt))
+        for path in sorted(self.rehearsals.glob("*.json"), reverse=True)[20:]:
+            path.unlink(missing_ok=True)
+        return receipt
 
     def create(self, password: str, actor: str) -> dict[str, Any]:
         payload = self._build_payload(actor=actor, package_type="operator-backup")

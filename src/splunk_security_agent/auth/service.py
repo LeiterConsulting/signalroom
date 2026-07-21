@@ -34,6 +34,7 @@ ADMIN_MUTATION_PREFIXES = (
     "/api/tenant-isolation/",
     "/api/recovery/",
     "/api/retention/",
+    "/api/operational-acceptance/",
 )
 ADMIN_MUTATION_PATHS = {
     "/api/auth/disable",

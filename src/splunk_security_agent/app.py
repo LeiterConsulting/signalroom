@@ -62,6 +62,7 @@ from .forecasting import (
 from .mcp_server import MCPServer
 from .model_setup import ModelSetupService
 from .model_trust import ModelTrustService, ModelTrustStore
+from .operational_acceptance import OperationalAcceptanceService
 from .providers import ModelProviderError, ModelRouter
 from .recovery import RecoveryPackageError, RecoveryPackageService, apply_pending_restore
 from .release_readiness import ReleaseReadinessService
@@ -215,6 +216,9 @@ class Services:
             DATA / "model_attestations",
         )
         self.recovery = RecoveryPackageService(DATA, APPLICATION_VERSION)
+        self.operational_acceptance = OperationalAcceptanceService(
+            DATA / "operational_acceptance", APPLICATION_VERSION
+        )
         self.retention_store = RetentionStore(DATA / "retention.db")
         self.retention = RetentionService(
             self.retention_store,
@@ -511,6 +515,69 @@ class Services:
                     if item.get("alias") in allowed_connection_ids
                 ]
         return result
+
+    def operational_acceptance_snapshot(self) -> dict[str, Any]:
+        connections = self.connection_overview(None, include_all_managed=True)
+        primary = dict(connections.get("primary") or {})
+        primary_diagnostic = self.connection_diagnostics_store.latest("primary")
+        primary["token_configured"] = bool(self.config.secret("splunk_token"))
+        primary["latest_diagnostic"] = (
+            {
+                **primary_diagnostic,
+                "current_revision": (
+                    primary_diagnostic.get("connection_fingerprint") == primary.get("fingerprint")
+                ),
+            }
+            if primary_diagnostic
+            else None
+        )
+        connections["primary"] = primary
+
+        runtime_host = os.getenv("SIGNALROOM_HOST", "").strip()
+        if not runtime_host:
+            try:
+                runtime = json.loads((ROOT / ".signalroom.runtime.json").read_text(encoding="utf-8"))
+                runtime_host = str(runtime.get("host") or "").strip()
+            except (OSError, json.JSONDecodeError):
+                runtime_host = ""
+
+        def worker(worker_id: str, label: str, value: dict[str, Any]) -> dict[str, Any]:
+            state = value.get("worker") or {}
+            return {
+                "id": worker_id,
+                "label": label,
+                "online": bool(state.get("online")),
+                "active_id": state.get("active_job_id")
+                or state.get("active_run_id")
+                or state.get("active_attempt_id")
+                or state.get("active_job"),
+                "restart_recovery": state.get("restart_recovery") or "durable-local-retry",
+            }
+
+        workers = [
+            worker("discovery", "Discovery", self.discovery_jobs.overview(limit=5)),
+            worker("assurance", "Continuous assurance", self.assurance.overview()),
+            worker("forecasting", "Shadow forecasting", self.time_series_schedules.overview(5)),
+            worker("delivery", "Assurance delivery", self.delivery.overview()),
+            worker("audit-export", "Audit export", self.audit_export.overview()),
+        ]
+        return {
+            "connections": connections,
+            "recovery": self.recovery.overview(),
+            "tenant_data": self.tenant_data_plane.overview(),
+            "auth": {
+                "policy": self.auth_store.policy(),
+                "identity_count": self.auth_store.user_count(),
+                "active_admins": self.auth_store.active_admin_count(),
+                "active_local_admins": self.auth_store.active_local_admin_count(),
+                "network_exposed": runtime_host in {"0.0.0.0", "::", "[::]"},
+                "runtime_host": runtime_host or "unknown",
+            },
+            "workers": workers,
+        }
+
+    def operational_acceptance_overview(self) -> dict[str, Any]:
+        return self.operational_acceptance.overview(self.operational_acceptance_snapshot())
 
     def managed_connection(self, alias: str) -> tuple[dict[str, Any], SplunkConnection, str]:
         value = self.connection_registry.configuration(alias)
@@ -1097,6 +1164,7 @@ async def sensitive_cache_control(request: Request, call_next: Any) -> Response:
             "/api/retention",
             "/api/release-readiness",
             "/api/upgrade-readiness",
+            "/api/operational-acceptance",
         )
     ):
         response.headers["Cache-Control"] = "no-store"
@@ -1348,6 +1416,78 @@ async def get_settings() -> dict[str, Any]:
 async def recovery_overview(request: Request) -> dict[str, Any]:
     _admin_actor(request)
     return services.recovery.overview()
+
+
+@app.get("/api/operational-acceptance")
+async def operational_acceptance_overview(request: Request) -> dict[str, Any]:
+    _admin_actor(request)
+    return services.operational_acceptance_overview()
+
+
+@app.post("/api/operational-acceptance/assess", status_code=201)
+async def capture_operational_acceptance(request: Request) -> dict[str, Any]:
+    actor = _admin_actor(request)
+    receipt = services.operational_acceptance.capture(
+        services.operational_acceptance_snapshot(), actor
+    )
+    services.audit.record(
+        "operational-acceptance.captured",
+        "assess",
+        target_type="operational-acceptance",
+        target_id=receipt["id"],
+        outcome="success" if receipt["decision"] == "ready" else "warning",
+        summary=(
+            f"Captured a payload-free operational acceptance assessment: {receipt['decision']}."
+        ),
+        metadata={
+            "decision": receipt["decision"],
+            "counts": receipt["counts"],
+            "state_sha256": receipt["state_sha256"],
+            "connection_revisions": receipt["connection_revisions"],
+        },
+        actor=actor,
+    )
+    return receipt
+
+
+@app.post("/api/operational-acceptance/recovery-rehearsal", status_code=201)
+async def rehearse_operational_recovery(request: Request) -> dict[str, Any]:
+    actor = _admin_actor(request)
+    services.model_trust.signing_key.key_id()
+    try:
+        rehearsal = services.recovery.rehearse(actor)
+    except RecoveryPackageError as exc:
+        services.audit.record(
+            "recovery.rehearsal.failed",
+            "rehearse",
+            target_type="recovery-rehearsal",
+            target_id="local-control-plane",
+            outcome="denied",
+            summary="The local encrypted recovery round trip did not pass.",
+            metadata={"reason": str(exc)[:500]},
+            actor=actor,
+        )
+        raise HTTPException(409, str(exc)) from exc
+    services.audit.record(
+        "recovery.rehearsal.passed",
+        "rehearse",
+        target_type="recovery-rehearsal",
+        target_id=rehearsal["id"],
+        summary=(
+            "Snapshot, encryption, decryption, digest, database, credential-pair, and model-trust "
+            "contracts passed; the package and password were discarded."
+        ),
+        metadata={
+            "component_count": len(rehearsal["components"]),
+            "package_sha256": rehearsal["package_sha256"],
+            "restore_staged": False,
+        },
+        actor=actor,
+    )
+    return {
+        "rehearsal": rehearsal,
+        "acceptance": services.operational_acceptance_overview(),
+    }
 
 
 @app.post("/api/recovery/packages", status_code=201)

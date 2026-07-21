@@ -47,9 +47,16 @@ class methods are reviewed through their owning service and tests rather than gu
 
 ## Remaining release-candidate slices
 
-1. **Operational recovery and multi-instance acceptance** — encrypted backup/restore drills, stale identity and
-   tenant-route failure cases, unavailable secondary Splunk behavior, authorization boundaries, and long-running
-   progress/cancellation UX.
+The in-product operational slice is complete: local cryptographic recovery rehearsal, unavailable/stale secondary
+state, current-revision diagnostics, tenant ownership, authorization exposure, durable-worker state, and
+payload-free acceptance receipts are implemented. Promotion still requires deployment-owned evidence that source
+code cannot safely manufacture:
+
+1. **Deployment-specific adversarial acceptance** — restore an exported package into an isolated sandbox, verify
+   the approved off-host backup/password custody path, exercise a secondary Splunk outage and certificate/token
+   rotation, and record the organization's recovery-time and recovery-point observations.
+2. **Production ingress hardening** — terminate trusted HTTPS, validate proxy headers and secure cookies, enable
+   named access before non-loopback exposure, and complete a deployment-specific threat model.
 
 Neither slice may weaken the source-bound UI gate. New orphan candidates or interface regressions appear as named
 blockers and are assigned to one of these slices or a newly documented successor.
