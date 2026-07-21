@@ -64,6 +64,7 @@ from .model_setup import ModelSetupService
 from .model_trust import ModelTrustService, ModelTrustStore
 from .providers import ModelProviderError, ModelRouter
 from .recovery import RecoveryPackageError, RecoveryPackageService, apply_pending_restore
+from .release_readiness import ReleaseReadinessService
 from .retention import RetentionService, RetentionStore
 from .schemas import (
     AnalystFeedbackCreate,
@@ -218,6 +219,12 @@ class Services:
             self.retention_store,
             self.tenant_data_registry,
             self.recovery,
+        )
+        self.release_readiness = ReleaseReadinessService(
+            ROOT,
+            STATIC,
+            DATA,
+            APPLICATION_VERSION,
         )
         self.evidence = RoutedEvidenceStore(self.tenant_data_registry)
         self.feedback = AnalystFeedbackStore(DATA / "feedback.db")
@@ -1082,6 +1089,7 @@ async def sensitive_cache_control(request: Request, call_next: Any) -> Response:
             "/api/audit-operations",
             "/api/connections",
             "/api/retention",
+            "/api/release-readiness",
         )
     ):
         response.headers["Cache-Control"] = "no-store"
@@ -1511,6 +1519,12 @@ async def cancel_pending_recovery_restore(request: Request) -> dict[str, Any]:
 async def retention_overview(request: Request) -> dict[str, Any]:
     _admin_actor(request)
     return services.retention.overview()
+
+
+@app.get("/api/release-readiness")
+async def release_readiness_overview(request: Request) -> dict[str, Any]:
+    _admin_actor(request)
+    return services.release_readiness.overview()
 
 
 @app.put("/api/retention/policy")

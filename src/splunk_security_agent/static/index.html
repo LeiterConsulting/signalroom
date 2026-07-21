@@ -26,7 +26,7 @@
       <div class="rail-footer">
         <div class="access-card" id="accessCard">
           <span class="access-avatar" id="accessAvatar" aria-hidden="true">L</span>
-          <div><strong id="accessIdentity">Local operator</strong><small id="accessMode">POC mode · RBAC off</small></div>
+          <div><strong id="accessIdentity">Local operator</strong><small id="accessMode">Local single-user · RBAC off</small></div>
           <button id="logoutButton" type="button" hidden>Sign out</button>
         </div>
         <div class="connection-card">
@@ -186,7 +186,7 @@
                       <label><span>Minimum severity</span><select id="deliverySeverity"><option value="critical">Critical</option><option value="high" selected>High</option><option value="medium">Medium</option><option value="low">Low</option></select></label>
                       <label><span>Destination label</span><input id="deliveryLabel" maxlength="160" value="Primary webhook"></label>
                       <label><span>Redaction</span><select id="deliveryRedaction"><option value="strict">Strict · counts only</option><option value="standard">Standard · bounded titles and subjects</option></select></label>
-                      <label class="full"><span id="deliveryUrlLabel">HTTPS webhook URL</span><input id="deliveryWebhookUrl" type="password" maxlength="4000" autocomplete="off" placeholder="Leave blank to keep the encrypted destination"><small id="deliveryUrlHelp">HTTPS required; loopback HTTP is accepted only for local testing.</small></label>
+                      <label class="full"><span id="deliveryUrlLabel">HTTPS webhook URL</span><input id="deliveryWebhookUrl" type="password" maxlength="4000" autocomplete="off" placeholder="Leave blank to keep the encrypted destination"><small id="deliveryUrlHelp">HTTPS is required; loopback HTTP is accepted only for an explicitly approved local destination.</small></label>
                       <label class="full secret-revoke"><input id="deliveryClearWebhookUrl" type="checkbox"><span>Remove the saved webhook URL when this policy is saved</span></label>
                       <label class="full" id="deliveryAuthorizationField"><span>Authorization header <em>optional</em></span><input id="deliveryAuthorization" type="password" maxlength="4000" autocomplete="off" placeholder="Leave blank to keep the encrypted value"><small>For example, <code>Bearer …</code>. Stored encrypted and never returned.</small></label>
                       <label class="full secret-revoke" id="deliveryClearAuthorizationField"><input id="deliveryClearAuthorization" type="checkbox"><span>Remove the saved authorization header when this policy is saved</span></label>
@@ -424,7 +424,7 @@
             <span id="modelTrustMode" class="subtle-pill">Loading policy</span>
           </header>
           <form id="modelTrustPolicyForm" class="model-trust-policy">
-            <label><span>Enforcement mode</span><select id="modelTrustPolicyMode"><option value="audit">Audit only</option><option value="enforce">Enforce approved artifacts</option></select><small>Audit mode reports drift without blocking the POC workflow.</small></label>
+            <label><span>Enforcement mode</span><select id="modelTrustPolicyMode"><option value="audit">Audit only</option><option value="enforce">Enforce approved artifacts</option></select><small>Audit mode reports drift without blocking local single-user workflows.</small></label>
             <label><span>Allowed publishers</span><input id="modelTrustPublishers" autocomplete="off" spellcheck="false" aria-describedby="modelTrustPublisherHelp"><small id="modelTrustPublisherHelp">Comma-separated exact organization names.</small></label>
             <button class="button primary" type="submit">Save trust policy</button>
           </form>
@@ -510,23 +510,33 @@
 
   <div class="modal-backdrop" id="settingsModal" hidden>
     <section class="modal" role="dialog" aria-modal="true" aria-labelledby="settingsTitle">
-      <header><div><p class="eyebrow">LOCAL-FIRST SETUP</p><h2 id="settingsTitle">Connect the workspace</h2></div><button class="icon-button" id="closeSettings" aria-label="Close">×</button></header>
-      <div class="setup-progress"><span class="active">1</span><i></i><span>2</span><i></i><span>3</span><div><b>Splunk</b><b>Models</b><b>Policy</b></div></div>
+      <header><div><p class="eyebrow" id="settingsEyebrow">SETTINGS · CONNECTIONS</p><h2 id="settingsTitle">Splunk MCP</h2><small id="settingsPosition">Section 1 of 9 · connection and trust boundary</small></div><button class="icon-button" id="closeSettings" aria-label="Close settings">×</button></header>
+      <nav class="settings-navigator" id="settingsNavigator" aria-label="Settings sections">
+        <button type="button" class="active" data-settings-target="settingsSplunk" aria-current="true"><span>01</span>Splunk</button>
+        <button type="button" data-settings-target="settingsConnections"><span>02</span>Instances</button>
+        <button type="button" data-settings-target="settingsModels"><span>03</span>Models</button>
+        <button type="button" data-settings-target="settingsRepository"><span>04</span>Repository</button>
+        <button type="button" data-settings-target="accessControlSection"><span>05</span>Access</button>
+        <button type="button" data-settings-target="recoverySection"><span>06</span>Recovery</button>
+        <button type="button" data-settings-target="workloadPolicySection"><span>07</span>Workload</button>
+        <button type="button" data-settings-target="settingsAgent"><span>08</span>Agent</button>
+        <button type="button" data-settings-target="settingsRelease"><span>09</span>Release</button>
+      </nav>
       <form id="settingsForm">
-        <div class="form-section"><h3>Splunk MCP</h3><p>Connect a compatible Splunk MCP endpoint. The optional guided demo uses isolated sample responses and never searches Splunk.</p>
+        <div class="form-section" id="settingsSplunk" data-settings-section="settingsSplunk" data-settings-title="Splunk MCP" data-settings-eyebrow="SETTINGS · CONNECTIONS" data-settings-description="connection and trust boundary"><h3>Splunk MCP</h3><p>Connect a compatible Splunk MCP endpoint. The optional guided demo uses isolated sample responses and never searches Splunk.</p>
           <label class="switch-line"><span><b>Enable guided demo workspace</b><small>Opt in to sample inventory plus an interactive product tour; searches are never executed</small></span><input type="checkbox" id="demoMode"><span class="switch-control" aria-hidden="true"></span></label>
           <div class="form-grid">
             <label><span>Connection name</span><input id="splunkName" placeholder="Production search head"></label>
             <label class="full"><span>MCP endpoint URL</span><input id="splunkUrl" type="url" placeholder="https://splunk.example:8089/services/mcp"><small class="field-help">Copy this from the Splunk MCP Server app. The standard path is <code>/services/mcp</code> (plural).</small></label>
             <label class="full"><span>Encrypted MCP token</span><input id="splunkToken" type="password" placeholder="Leave blank to keep existing token"><small class="field-help">Use the encrypted token created in the Splunk MCP Server app—not a normal Splunk REST token.</small></label>
-            <label class="full switch-line nested-switch"><span><b>Verify TLS certificates</b><small>Recommended. Disable only for a trusted self-signed development endpoint.</small></span><input type="checkbox" id="verifySplunkTls" checked><span class="switch-control" aria-hidden="true"></span></label>
+            <label class="full switch-line nested-switch"><span><b>Verify TLS certificates</b><small>Recommended. Disable only for a trusted, internally managed self-signed endpoint.</small></span><input type="checkbox" id="verifySplunkTls" checked><span class="switch-control" aria-hidden="true"></span></label>
             <div class="tls-warning full" id="tlsWarning" hidden><b>TLS verification is disabled</b><span>The connection remains encrypted, but SignalRoom will not validate the server certificate or identity.</span></div>
             <label class="full" id="caBundleLabel"><span>Private CA bundle path <em>optional</em></span><input id="splunkCaBundle" placeholder="C:\certs\organization-ca.pem or /etc/ssl/org-ca.pem"></label>
           </div>
           <div class="connection-test-row"><button class="button ghost small" type="button" id="testSplunk">Run connection diagnostics</button><span class="test-result" id="splunkTestResult"></span></div>
           <section class="connection-diagnostics setup-diagnostics" id="setupConnectionDiagnostics" hidden aria-live="polite"><header><b>Connection contract</b><span></span></header><div class="diagnostic-stages"></div></section>
         </div>
-        <div class="form-section connection-architecture-section">
+        <div class="form-section connection-architecture-section" id="settingsConnections" data-settings-section="settingsConnections" data-settings-title="Connections and tenant scope" data-settings-eyebrow="SETTINGS · SPLUNK ESTATES" data-settings-description="instances, identities, and data boundaries">
           <h3>Connection identity and tenant scope</h3>
           <p>SignalRoom binds durable work to the exact Splunk revision it was approved against. Changing the endpoint, TLS trust, demo/live mode, or tenant boundary creates a new immutable identity; saved work will not silently follow it.</p>
           <div class="connection-identity-card" id="connectionIdentityCard" aria-live="polite"><span>LOADING</span><div><b>Reading the Primary connection identity…</b><small>Tokens are never included in an identity fingerprint.</small></div></div>
@@ -567,7 +577,7 @@
             <div class="future-mcp-admission" id="futureMcpAdmission"></div>
           </details>
         </div>
-        <div class="form-section"><h3>Model services</h3><p>Run chat and security reasoning through Ollama. SecureBERT specialists default to local Transformers after a one-time Hugging Face download; cloud inference remains optional.</p>
+        <div class="form-section" id="settingsModels" data-settings-section="settingsModels" data-settings-title="Model services" data-settings-eyebrow="SETTINGS · LOCAL INFERENCE" data-settings-description="model runtime and routing"><h3>Model services</h3><p>Run chat and security reasoning through Ollama. SecureBERT specialists default to local Transformers after a one-time Hugging Face download; cloud inference remains optional.</p>
           <div class="model-onboarding">
             <article class="setup-provider-card">
               <header><div><span class="provider-mark local">O</span><b>Local Ollama</b></div><span class="readiness-badge" id="ollamaReadiness">Checking…</span></header>
@@ -601,7 +611,7 @@
             <label class="full"><span>Hugging Face cloud usage policy</span><select id="hfPolicy"><option value="disabled">Disabled · never send evidence to hosted inference</option><option value="ask">Ask · require approval for every cloud question</option><option value="allow">Allowed · use hosted specialists automatically</option></select><small class="field-help">This policy applies only when the cloud runtime is selected. Local SecureBERT inference does not require cloud approval.</small></label>
           </div>
         </div>
-        <div class="form-section"><h3>Detection repository handoff</h3><p>Optionally move approved detections into a local Git repository through an exact diff preview. Repository writes, remote pushes, and draft pull requests each require a separate analyst action.</p>
+        <div class="form-section" id="settingsRepository" data-settings-section="settingsRepository" data-settings-title="Detection repository" data-settings-eyebrow="SETTINGS · CHANGE HANDOFF" data-settings-description="reviewed local Git workflow"><h3>Detection repository handoff</h3><p>Optionally move approved detections into a local Git repository through an exact diff preview. Repository writes, remote pushes, and draft pull requests each require a separate analyst action.</p>
           <label class="switch-line"><span><b>Enable local repository handoff</b><small>Creates an isolated branch and commit only after approval; the primary checkout remains untouched</small></span><input type="checkbox" id="repositoryEnabled"><span class="switch-control" aria-hidden="true"></span></label>
           <div class="form-grid" id="repositorySettings">
             <label class="full"><span>Absolute repository root</span><input id="repositoryPath" placeholder="C:\security\detections or /srv/security/detections"><small class="field-help">SignalRoom requires the Git repository root—not a parent or nested directory.</small></label>
@@ -615,9 +625,9 @@
           </div>
           <div class="connection-test-row"><button class="button ghost small" type="button" id="testRepository">Inspect repository</button><span class="test-result" id="repositoryTestResult"></span></div>
         </div>
-        <div class="form-section access-control-section" id="accessControlSection">
+        <div class="form-section access-control-section" id="accessControlSection" data-settings-section="accessControlSection" data-settings-title="Access control" data-settings-eyebrow="SETTINGS · IDENTITY" data-settings-description="optional named access and enterprise identity">
           <h3>Access control · optional</h3>
-          <p id="accessControlSummary">SignalRoom is in local single-user mode. This keeps POC and guided-demo setup frictionless; keep the service bound to localhost until named access is enabled.</p>
+          <p id="accessControlSummary">SignalRoom is in local single-user mode. This keeps evaluation and guided-demo setup frictionless; keep the service bound to localhost until named access is enabled.</p>
           <div class="access-mode-banner" id="accessModeBanner"><span>LOCAL OPERATOR</span><div><b>No login required on this host</b><small>Local mode has administrator authority. Enable RBAC before sharing the service.</small></div></div>
           <div id="rbacLocalSetup">
             <div class="form-grid">
@@ -679,14 +689,14 @@
               <div class="access-actions"><button class="button ghost small" id="createAuthUser" type="button">Create user</button><span id="createAuthUserResult" role="status" aria-live="polite"></span></div>
             </div>
             <div class="access-disable" id="accessDisable">
-              <div><b>Return to local POC mode</b><small>Disabling RBAC revokes every session but preserves named identities for later re-enablement.</small></div>
-              <input id="disableRbacPassword" type="password" autocomplete="current-password" placeholder="Current admin password">
+              <div><b>Return to local single-user mode</b><small>Disabling RBAC revokes every session but preserves named identities for later re-enablement.</small></div>
+              <label><span>Current administrator password</span><input id="disableRbacPassword" type="password" autocomplete="current-password"></label>
               <button class="button danger small" id="disableRbac" type="button">Disable RBAC</button>
             </div>
           </div>
           <p class="access-read-only-note" id="accessReadOnlyNote" hidden>Only a SignalRoom administrator can change workspace or access policy. These settings are shown read-only.</p>
         </div>
-        <div class="form-section recovery-section" id="recoverySection">
+        <div class="form-section recovery-section" id="recoverySection" data-settings-section="recoverySection" data-settings-title="Recovery and retention" data-settings-eyebrow="SETTINGS · RESILIENCE" data-settings-description="encrypted recovery and governed cleanup">
           <div class="recovery-heading"><div><h3>Encrypted control-plane recovery</h3><p>Back up SignalRoom settings, encrypted credentials, Splunk connection identities, access policy, and paired model-trust authority without copying investigation data.</p></div><span class="subtle-pill">ADMIN · LOCAL FILE</span></div>
           <div class="recovery-contract" role="note"><b>Inspect first. Restore on restart.</b><span>Every package is password-derived AES-256-GCM encrypted and integrity checked. Inspection is read only. A compatible restore creates an encrypted rollback checkpoint, freezes configuration changes, and applies before services open on the next process start.</span></div>
           <div class="recovery-pending" id="recoveryPending" hidden aria-live="assertive"></div>
@@ -721,9 +731,9 @@
             <div class="retention-preview" id="retentionPreview" aria-live="polite"><div class="empty-inline compact-empty">Loading the local cleanup inventory…</div></div>
           </section>
         </div>
-        <div class="form-section" id="workloadPolicySection">
+        <div class="form-section" id="workloadPolicySection" data-settings-section="workloadPolicySection" data-settings-title="Workload protection" data-settings-eyebrow="SETTINGS · SPLUNK SAFETY" data-settings-description="admission, concurrency, and budgets">
           <h3>Splunk workload protection</h3>
-          <p>One admission controller protects the configured Splunk instance across Investigate, Discovery, Validation, Assurance, and MLTK inventory. Audit mode is the POC-safe default; concurrency limits still prevent local request bursts.</p>
+          <p>One admission controller protects the configured Splunk instance across Investigate, Discovery, Validation, Assurance, and MLTK inventory. Audit mode is the evaluation-safe default; concurrency limits still prevent local request bursts.</p>
           <div class="workload-mode-banner audit" id="workloadModeBanner" aria-live="polite"><span>AUDIT</span><div><b>Thresholds are visible, not blocking</b><small>Read-only guardrails and concurrency limits remain active.</small></div></div>
           <div class="form-grid">
             <label class="full"><span>Policy mode</span><select id="workloadMode"><option value="audit">Audit only · report threshold crossings</option><option value="enforce">Enforce · block threshold crossings</option></select><small class="field-help">Enforcement applies to SignalRoom callers. Splunk workload pools, roles, quotas, and search limits remain authoritative.</small></label>
@@ -737,7 +747,11 @@
           <section class="workload-live" id="workloadLive"><div><b>Live admission state</b><span>Loading…</span></div><div class="workload-meter"><i></i></div><small>SignalRoom units are a deterministic preflight comparison—not predicted scan bytes or Splunk scheduler cost.</small></section>
           <details class="workload-history"><summary>Recent admission decisions</summary><div id="workloadEvents"><div class="empty-inline compact-empty">No workload events have been recorded.</div></div></details>
         </div>
-        <div class="form-section"><h3>Agent execution policy</h3><label class="switch-line"><span><b>Allow write-capable Splunk tools</b><small>Keep disabled for analyst workspaces; repository handoff has its own narrower controls above</small></span><input type="checkbox" id="allowWrites" disabled><span class="switch-control" aria-hidden="true"></span></label></div>
+        <div class="form-section" id="settingsAgent" data-settings-section="settingsAgent" data-settings-title="Agent execution" data-settings-eyebrow="SETTINGS · TOOL AUTHORITY" data-settings-description="read-only and write-capable boundaries"><h3>Agent execution policy</h3><label class="switch-line"><span><b>Allow write-capable Splunk tools</b><small>Keep disabled for analyst workspaces; repository handoff has its own narrower controls above.</small></span><input type="checkbox" id="allowWrites" disabled><span class="switch-control" aria-hidden="true"></span></label></div>
+        <div class="form-section release-readiness-section" id="settingsRelease" data-settings-section="settingsRelease" data-settings-title="Release readiness" data-settings-eyebrow="SETTINGS · ACCEPTANCE GATE" data-settings-description="source-bound quality evidence">
+          <div class="release-readiness-heading"><div><h3>Release-candidate gate</h3><p>Measure the shipped interface, function ownership, and exact-source verification receipt before promoting a build.</p></div><button class="button ghost small" type="button" id="refreshReleaseReadiness">Run static checks</button></div>
+          <div class="release-readiness" id="releaseReadiness" aria-live="polite"><div class="empty-inline compact-empty">Evaluating the current source-bound release checks…</div></div>
+        </div>
         <footer><span><i class="lock-icon">◆</i> Tokens are encrypted at rest and never returned by the API.</span><button class="button primary" id="saveWorkspace" type="submit">Save workspace</button></footer>
       </form>
     </section>

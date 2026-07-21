@@ -40,6 +40,7 @@ This is a focused reimplementation inspired by [LeiterConsulting/splunk-discover
 - Conditional specialist inference, short-lived inventory caches, and warm Ollama model retention
 - Encrypted Splunk and Hugging Face tokens at rest
 - Password-encrypted control-plane recovery packages with read-only inspection, release compatibility checks, restart-gated restore, and an automatic encrypted rollback checkpoint
+- A source-bound release-candidate gate for Settings density, navigation, labels, disclosure cues, typography, WCAG AA semantic contrast, production language, function ownership, lint, JavaScript syntax, tests, and named viewport review
 - A safe demo workspace that runs without Splunk, Ollama, or Hugging Face
 - An outward MCP Streamable HTTP-compatible JSON-RPC endpoint at `POST /mcp`
 
@@ -799,6 +800,25 @@ tenant-filtered, read-only reconciliation history. Administrators now have previ
 retention controls for superseded tenant generations, terminal reverse snapshots, and encrypted recovery artifacts.
 The next production increment is release-candidate upgrade, installer, recovery, multi-instance, retention, and
 security acceptance testing.
+
+### Release-candidate quality gate
+
+Setup → **Release readiness** evaluates the exact shipped interface and reports promotion blockers in place. The
+Settings modal has nine keyboard-operable section targets; its fixed header updates to name the visible section as
+the independently scrolling content moves. Each settings area is visually bounded, wide layouts no longer squeeze
+multi-column controls into a narrow modal, and every disclosure has an explicit plus/minus state and focus ring.
+
+The automated gate measures section density, accessible control names, unique IDs, disclosure structure, type
+scale, responsive behavior, critical WCAG AA color pairs, production-ready help language, and function ownership.
+Final promotion additionally requires a receipt bound to the exact source digest:
+
+```powershell
+signalroom-release-check --full --reviewer "Reviewer name" --ui-review "Desktop and compact workflows reviewed"
+```
+
+That command runs Ruff, JavaScript syntax validation, and the complete pytest suite before writing the ignored local
+receipt. Any subsequent source, test, documentation, installer, or deployment-file change invalidates it. See
+[Release-candidate acceptance](docs/RELEASE_CANDIDATE.md) for the review contract and accountable follow-up slices.
 
 ### Operator-authored evaluation suites
 

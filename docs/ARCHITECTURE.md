@@ -459,8 +459,21 @@ there is deliberately no remote recovery route.
 
 ## Next production increments
 
-1. Complete release-candidate upgrade, installer, recovery, multi-instance, retention, and security acceptance
-   testing
+1. Complete the upgrade and installer acceptance matrix
+2. Complete operational recovery and multi-instance acceptance
+
+## Release readiness is bound to exact source
+
+`ReleaseReadinessService` parses the shipped interface rather than relying on an informal release checklist. It
+checks ordered Settings navigation, per-section control density, accessible control names, unique IDs, disclosure
+semantics, type scale, responsive coverage, critical WCAG AA palette pairs, production-facing language, and
+explicit references for declared interface and source-level backend functions. The in-product view exposes blockers
+and assigns unresolved candidates to named follow-up slices.
+
+Static checks cannot prove visual composition. Final promotion therefore requires `signalroom-release-check --full`
+with a named viewport-review note. The command runs lint, JavaScript syntax validation, and the complete test suite,
+then writes a local receipt bound to a canonical digest of source, tests, documentation, installers, and deployment
+files. A later change invalidates the receipt and blocks promotion until acceptance is repeated.
 
 ## Recovery is a restart-gated control-plane transaction
 

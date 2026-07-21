@@ -93,7 +93,7 @@ def test_optional_rbac_is_visible_and_keyboard_operable() -> None:
     assert 'id="loginForm"' in INDEX_HTML
     assert 'id="accessControlSection"' in INDEX_HTML
     assert "Access control · optional" in INDEX_HTML
-    assert "POC mode · RBAC off" in INDEX_HTML
+    assert "Local single-user · RBAC off" in INDEX_HTML
     assert 'value="viewer"' in INDEX_HTML
     assert 'value="analyst"' in INDEX_HTML
     assert 'value="admin"' in INDEX_HTML
@@ -122,6 +122,24 @@ def test_control_plane_recovery_exposes_inspection_and_restart_boundary() -> Non
     assert "CONFIGURATION FROZEN" in APP_JS
     assert ".recovery-action-card input" in STYLES_CSS
     assert ".recovery-pending" in STYLES_CSS
+
+
+def test_settings_navigation_and_release_quality_gate_are_explicit() -> None:
+    assert 'id="settingsNavigator"' in INDEX_HTML
+    assert INDEX_HTML.count("data-settings-target=") == 9
+    assert INDEX_HTML.count("data-settings-section=") == 9
+    assert 'id="settingsPosition"' in INDEX_HTML
+    assert 'id="settingsRelease"' in INDEX_HTML
+    assert 'id="releaseReadiness"' in INDEX_HTML
+    assert "function syncSettingsSection()" in APP_JS
+    assert "function navigateSettingsSection(sectionId" in APP_JS
+    assert "async function loadReleaseReadiness()" in APP_JS
+    assert "details>summary::before" in STYLES_CSS
+    assert "details[open]>summary::before" in STYLES_CSS
+    assert "details>summary:focus-visible" in STYLES_CSS
+    assert ".settings-navigator button.active" in STYLES_CSS
+    assert ".setup-progress" not in STYLES_CSS
+    assert "self-signed development endpoint" not in INDEX_HTML
 
 
 def test_model_artifact_trust_is_explicit_and_audit_first() -> None:

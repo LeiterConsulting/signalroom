@@ -39,6 +39,7 @@ signalroom-eval = "splunk_security_agent.evaluation:run"
 signalroom-verify-detection = "splunk_security_agent.detections.gitops_verifier:run"
 signalroom-access = "splunk_security_agent.auth.recovery:run"
 signalroom-recovery = "splunk_security_agent.recovery.cli:run"
+signalroom-release-check = "splunk_security_agent.release_readiness:run"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/splunk_security_agent"]

@@ -13,7 +13,7 @@ const state = {
   evaluationDraft: null, evaluationScenarioIndex: 0,
   deliveryPreview: null, detections: [], activeDetection: null, detectionGitExport: null,
   repositoryStatus: null, repositoryHandoff: null, auth: null, authUsers: [],
-  recovery: null, recoveryInspection: null, retention: null,
+  recovery: null, recoveryInspection: null, retention: null, releaseReadiness: null,
   codeScreenResult: null, timeSeriesStatus: null, timeSeriesResult: null,
   timeSeriesExperiments: null, timeSeriesSchedules: null, timeSeriesScheduleTimer: null,
   workspaceLoaded: false, assuranceTimer: null, discoveryJobs: null,
@@ -325,7 +325,7 @@ function renderAuth() {
   $('#accessAvatar').textContent = (principal?.display_name || '?').trim().charAt(0).toUpperCase();
   $('#accessMode').textContent = auth.enabled
     ? `${principal?.role || 'locked'} · ${(principal?.connection_ids || []).length ? `${principal.connection_ids.length} Splunk scope${principal.connection_ids.length === 1 ? '' : 's'}` : 'no Splunk assignment'}`
-    : 'POC mode · RBAC off';
+    : 'Local single-user · RBAC off';
   $('#logoutButton').hidden = !auth.enabled || !auth.authenticated;
   $('#enterpriseLogin').hidden = !auth.oidc?.enabled;
   $('#enterpriseLoginLabel').textContent = auth.oidc?.provider_label || 'enterprise identity';
@@ -345,7 +345,7 @@ function renderAuth() {
   $('#enableRbac').textContent = reenable ? 'Re-enable named access' : 'Enable named access';
   $('#accessControlSummary').textContent = auth.enabled
     ? `Named users, roles, protected sessions, and per-user Splunk connection assignment are active.${auth.oidc?.enabled ? ` Enterprise sign-in is available through ${auth.oidc.provider_label}.` : ''}`
-    : 'SignalRoom is in local single-user mode. This keeps POC and guided-demo setup frictionless; keep the service bound to localhost until named access is enabled.';
+    : 'SignalRoom is in local single-user mode. This keeps evaluation and guided-demo setup frictionless; keep the service bound to localhost until named access is enabled.';
   renderOidcPolicy();
   const connectionOptions = auth.available_connections || [{id:'primary',label:'Primary Splunk'}];
   $('#newAuthConnections').innerHTML = connectionOptions.map((item, index) => `<label class="access-connection-check"><input data-new-auth-connection="${escapeHtml(item.id)}" type="checkbox" ${index === 0 ? 'checked' : ''}><span>Assign ${escapeHtml(item.label)}</span></label>`).join('');
@@ -686,7 +686,7 @@ function showDemoTourStep(index) {
 
 function startDemoTour() {
   if (!state.settings?.demo_mode) {
-    $('#settingsModal').hidden = false;
+    openSettings('settingsSplunk');
     toast('Enable the guided demo workspace, then save');
     return;
   }
@@ -700,6 +700,49 @@ function finishDemoTour() {
   localStorage.setItem('signalroom-demo-tour-complete', 'true');
   navigateView('chat');
   toast('Guided demo complete · explore freely or connect live Splunk');
+}
+
+const SETTINGS_SECTIONS = [
+  'settingsSplunk', 'settingsConnections', 'settingsModels', 'settingsRepository',
+  'accessControlSection', 'recoverySection', 'workloadPolicySection', 'settingsAgent', 'settingsRelease'
+];
+
+function setSettingsSection(section) {
+  if (!section) return;
+  const index = SETTINGS_SECTIONS.indexOf(section.id);
+  if (index < 0) return;
+  $('#settingsEyebrow').textContent = section.dataset.settingsEyebrow || 'SETTINGS';
+  $('#settingsTitle').textContent = section.dataset.settingsTitle || 'SignalRoom settings';
+  $('#settingsPosition').textContent = `Section ${index + 1} of ${SETTINGS_SECTIONS.length} · ${section.dataset.settingsDescription || 'workspace controls'}`;
+  $$('#settingsNavigator [data-settings-target]').forEach(button => {
+    const active = button.dataset.settingsTarget === section.id;
+    button.classList.toggle('active', active);
+    if (active) button.setAttribute('aria-current', 'true'); else button.removeAttribute('aria-current');
+  });
+}
+
+function syncSettingsSection() {
+  const form = $('#settingsForm');
+  const sections = SETTINGS_SECTIONS.map(id => $(`#${id}`)).filter(Boolean);
+  if (!sections.length) return;
+  const top = form.getBoundingClientRect().top + 36;
+  let active = sections[0];
+  sections.forEach(section => { if (section.getBoundingClientRect().top <= top) active = section; });
+  if (form.scrollHeight - form.scrollTop - form.clientHeight <= 24) active = sections.at(-1);
+  setSettingsSection(active);
+}
+
+function navigateSettingsSection(sectionId, behavior = 'smooth') {
+  const section = $(`#${CSS.escape(sectionId)}`); if (!section) return;
+  setSettingsSection(section);
+  section.scrollIntoView({behavior, block:'start'});
+}
+
+function openSettings(sectionId = '') {
+  $('#settingsModal').hidden = false;
+  requestAnimationFrame(() => {
+    if (sectionId) navigateSettingsSection(sectionId, 'auto'); else syncSettingsSection();
+  });
 }
 
 function hydrateSettings() {
@@ -754,7 +797,7 @@ async function loadSettings() {
   state.settings = await api('/api/settings'); hydrateSettings();
   await loadConnections();
   await loadTenantIsolation();
-  if (!state.settings.configured) $('#settingsModal').hidden = false;
+  if (!state.settings.configured) openSettings('settingsSplunk');
   else if (state.settings.demo_mode && !localStorage.getItem('signalroom-demo-tour-complete')) {
     setTimeout(startDemoTour, 250);
   }
@@ -963,6 +1006,36 @@ async function executeRetentionCleanup() {
     await loadRetention();
     toast(`Retention cleanup ${result.run.status} · ${result.run.item_count} exact item${result.run.item_count === 1 ? '' : 's'} deleted`);
   } catch (error) { output.textContent = error.message; button.disabled = false; }
+}
+
+function renderReleaseReadiness() {
+  const value = state.releaseReadiness; if (!value || !$('#releaseReadiness')) return;
+  const keepReleaseInView = !$('#settingsModal').hidden && $('#settingsNavigator .active')?.dataset.settingsTarget === 'settingsRelease';
+  const ready = value.decision === 'ready';
+  const checks = (value.checks || []).map(item => `
+    <article class="release-check ${item.status}"><i aria-hidden="true"></i><div><b>${escapeHtml(item.title)}</b><span>${escapeHtml(item.summary)}</span></div><small>${item.status === 'pass' ? 'Passed' : 'Blocks promotion'} · ${escapeHtml(item.id)}</small></article>`).join('');
+  const followups = (value.follow_up_slices || []).length ? `<details class="release-followups" open><summary>Accountable follow-up slices · ${value.follow_up_slices.length}</summary><ul>${value.follow_up_slices.map(item => `<li><b>${escapeHtml(item.title)}</b> · ${escapeHtml((item.items || []).join(', '))}</li>`).join('')}</ul></details>` : '';
+  const receipt = value.receipt;
+  const receiptNote = receipt?.ui_review?.note || 'No viewport review note';
+  const receiptPunctuation = /[.!?]$/.test(receiptNote) ? '' : '.';
+  const receiptMarkup = receipt ? `<p class="release-receipt"><b>Latest full run:</b> ${escapeHtml(new Date(receipt.created_at).toLocaleString())} by ${escapeHtml(receipt.ui_review?.reviewer || 'unrecorded reviewer')} · ${escapeHtml(receiptNote)}${receiptPunctuation}</p>` : '<p class="release-receipt"><b>No full acceptance receipt exists yet.</b> Static checks do not replace lint, syntax, test-suite, and viewport review evidence.</p>';
+  $('#releaseReadiness').innerHTML = `
+    <div class="release-decision ${ready ? 'ready' : ''}"><div><span>${ready ? 'READY FOR PROMOTION' : 'PROMOTION BLOCKED'}</span><b>${Number(value.counts?.passed || 0)} of ${Number(value.counts?.total || 0)} gates pass</b><small>${ready ? 'The full acceptance receipt matches this exact source.' : `${Number(value.counts?.blocked || 0)} gate${value.counts?.blocked === 1 ? ' requires' : 's require'} evidence or remediation.`}</small></div><code>${escapeHtml(shortDigest(value.source_sha256))}</code></div>
+    <div class="release-check-list">${checks}</div>${followups}${receiptMarkup}
+    <div class="release-command"><b>Final source-bound command</b><code>${escapeHtml(value.command || '')}</code></div>`;
+  if (keepReleaseInView) requestAnimationFrame(() => navigateSettingsSection('settingsRelease', 'auto'));
+}
+
+async function loadReleaseReadiness() {
+  if (!state.auth?.permissions?.can_administer) return;
+  const holder = $('#releaseReadiness');
+  holder.innerHTML = '<div class="empty-inline compact-empty">Evaluating navigation, density, labels, disclosures, typography, contrast, language, and function ownership…</div>';
+  try {
+    state.releaseReadiness = await api('/api/release-readiness');
+    renderReleaseReadiness();
+  } catch (error) {
+    holder.innerHTML = `<div class="empty-inline compact-empty error">${escapeHtml(error.message)}</div>`;
+  }
 }
 
 async function loadConnections() {
@@ -3757,7 +3830,7 @@ function updateDeliveryAdapter(destination = state.assurance?.delivery?.destinat
       ? 'Use the complete encrypted hooks.slack.com or hooks.slack-gov.com /services/ URL. SignalRoom never returns the secret path.'
       : isSoar
         ? 'Use the HTTPS site origin only, such as https://soar.internal:8443. SignalRoom appends the REST container path.'
-        : 'HTTPS required; loopback HTTP is accepted only for local testing.';
+        : 'HTTPS is required; loopback HTTP is accepted only for an explicitly approved local destination.';
   $('#deliveryAdapterHelp').textContent = isJira
     ? 'Jira receives one redacted create-issue request after approval. SignalRoom can explicitly refresh a correlated issue’s minimal workflow fields, but cannot update, transition, comment on, assign, attach to, or delete it. Unknown create outcomes stop for analyst review.'
     : isSlack
@@ -5933,14 +6006,14 @@ document.addEventListener('click', async event => {
     const item = state.modelRecommendations[modelRecommendation.dataset.useModelRecommendation];
     if (!item) return;
     if (item.availability === 'install-required') {
-      $('#settingsModal').hidden = false;
+      openSettings('settingsModels');
       const localRow = $(`[data-local-profile="${CSS.escape(item.profile_id)}"]`);
       if (localRow) localRow.scrollIntoView({ behavior:'smooth', block:'center' });
       toast('Local-first selected. Install this specialist once; future inference stays on this host.');
       return;
     }
     if (item.availability === 'disabled' || item.availability === 'unavailable') {
-      $('#settingsModal').hidden = false;
+      openSettings('settingsModels');
       $('#hfPolicy').scrollIntoView({ behavior:'smooth', block:'center' });
       setTimeout(() => $('#hfPolicy').focus(), 250);
       toast(item.availability === 'disabled' ? 'Local-only policy respected. Review HF only if this specialist pass is worth an external call.' : 'Configure Hugging Face access to use this specialist.');
@@ -6037,7 +6110,7 @@ document.addEventListener('click', async event => {
   }
   const change = event.target.closest('[data-change-investigate]');
   if (change) openInvestigation('discovery', `Explain and validate this change since the previous discovery: ${change.dataset.changeCategory} ${change.dataset.changeInvestigate}. Determine whether it is a real posture change or a collection issue.`, false);
-  if (event.target.closest('#openSettings,#configureModels,[data-open-settings]')) { $('#settingsModal').hidden = false; loadWorkload(); await loadConnections(); await loadTenantIsolation(); await loadRecovery(); }
+  if (event.target.closest('#openSettings,#configureModels,[data-open-settings]')) { openSettings(); loadWorkload(); await loadConnections(); await loadTenantIsolation(); await loadRecovery(); await loadRetention(); await loadReleaseReadiness(); }
   if (event.target.closest('#closeSettings')) $('#settingsModal').hidden = true;
   if (event.target.closest('#stageTenantMigration')) await stageTenantMigration();
   if (event.target.closest('#stageTenantReverse')) await stageTenantReverseMigration();
@@ -6269,6 +6342,12 @@ $('#settingsForm').addEventListener('submit', saveSettings);
 $('#createRecoveryPackage').addEventListener('click', createRecoveryPackage);
 $('#inspectRecoveryPackage').addEventListener('click', inspectRecoveryPackage);
 $('#saveRetentionPolicy').addEventListener('click', saveRetentionPolicy);
+$('#refreshReleaseReadiness').addEventListener('click', loadReleaseReadiness);
+$('#settingsNavigator').addEventListener('click', event => {
+  const button = event.target.closest('[data-settings-target]');
+  if (button) navigateSettingsSection(button.dataset.settingsTarget);
+});
+$('#settingsForm').addEventListener('scroll', syncSettingsSection, {passive:true});
 $('#retentionPreview').addEventListener('click', event => {
   if (event.target.closest('#executeRetentionCleanup')) executeRetentionCleanup();
 });
@@ -6363,7 +6442,7 @@ const accessObserver = new MutationObserver(() => {
 accessObserver.observe(document.body, { childList:true, subtree:true });
 
 async function loadWorkspace() {
-  await Promise.all([loadSettings(), loadWorkload(), loadArtifacts(), loadCases(), loadLatestDiscovery(), loadDiscoveryJobs(), loadEstateReviewPackets(), loadValidations(), loadDetections(), loadModelCatalog(), loadTimeSeriesStatus(), loadModelTrust(), loadSplunkModels(), loadAssurance(), loadConnectionDiagnostics(), loadFeedbackBenchmarks(), loadGoldenBenchmarks(), loadRecovery(), loadRetention()]);
+  await Promise.all([loadSettings(), loadWorkload(), loadArtifacts(), loadCases(), loadLatestDiscovery(), loadDiscoveryJobs(), loadEstateReviewPackets(), loadValidations(), loadDetections(), loadModelCatalog(), loadTimeSeriesStatus(), loadModelTrust(), loadSplunkModels(), loadAssurance(), loadConnectionDiagnostics(), loadFeedbackBenchmarks(), loadGoldenBenchmarks(), loadRecovery(), loadRetention(), loadReleaseReadiness()]);
   renderPromptTree(); renderValidations(); renderDetections(); handleDeepLink(); renderAuth();
   state.workspaceLoaded = true;
   if (!state.assuranceTimer) state.assuranceTimer = setInterval(() => {
