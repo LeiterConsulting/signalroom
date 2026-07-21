@@ -20,6 +20,7 @@ data/detection_exports/*
 data/model_attestations/*
 data/models/*
 !data/models/.gitkeep
+data/recovery/*
 .env
 .install_manifest.json
 .signalroom.pid

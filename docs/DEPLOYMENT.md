@@ -270,6 +270,11 @@ All lifecycle files stay inside the repository:
 | `data/time_series_schedules.db` | Shadow schedules, hard-budget attempt history, progress events, restart recovery, and analyst dispositions |
 | `data/model_trust_signing.key` | Local Ed25519 private key for operator artifact attestations |
 | `data/model_attestations/` | Portable canonical approval payloads, signatures, and public key |
+| `data/recovery/exports/` | Administrator-created password-encrypted control-plane packages |
+| `data/recovery/inspections/` | Short-lived encrypted uploads and non-secret inspection metadata |
+| `data/recovery/pending/` | Validated restart stage and mutation-freeze marker |
+| `data/recovery/rollbacks/` | Automatic password-encrypted pre-restore checkpoints |
+| `data/recovery/receipts/` | Non-secret applied-restore receipts |
 
 The lifecycle manager validates that a PID belongs to SignalRoom before stopping it. A stale PID will never be used to terminate an unrelated process.
 
@@ -277,6 +282,47 @@ Stopping or restarting SignalRoom does not discard a queued manual discovery. An
 starts a fresh read-only collection when the worker returns; it does not resume in the middle of an MCP plan.
 An operator cancellation remains terminal. Normal uninstall preserves this state with the rest of `data/`;
 purging data removes the job history and retained results.
+
+## Encrypted control-plane recovery
+
+Use Setup → **Encrypted control-plane recovery** while signed in as an administrator. Create a unique 16-character
+or longer package password, download the resulting `.signalroom-recovery` file, move it to an approved backup
+store, and delete the extra local export. Store the password through a separate approved channel.
+
+An inspection is always read only and expires after 30 minutes. A compatible package may then be staged with its
+exact package-ID confirmation. Staging creates `data/recovery/rollbacks/pre-restore-<id>.signalroom-recovery` using
+the same password and freezes configuration mutations. Download that checkpoint before restart when operational
+policy requires an off-host recovery copy.
+
+Apply or cancel with the normal lifecycle manager:
+
+```powershell
+.\install.ps1 -Restart
+```
+
+```bash
+./install.sh --restart
+```
+
+At the next start, restore runs before application stores open. Staged component digests and contracts are checked
+again; auth sessions and OIDC transactions are cleared. An invalid stage stops startup rather than partially
+opening a foreign control plane. If web startup is unavailable, use the host-only tool:
+
+```powershell
+signalroom-recovery --data-dir .\data status
+signalroom-recovery --data-dir .\data inspect <package>
+signalroom-recovery --data-dir .\data restore <package> --host-authorized
+signalroom-recovery --data-dir .\data cancel --host-authorized
+```
+
+Use `python -m splunk_security_agent.recovery.cli` if the installed console-script entry point has not yet been
+refreshed. The tool prompts for the password and exact confirmation; it never accepts a password on the command
+line. Do not run host restore concurrently with filesystem backup tools or another SignalRoom process.
+
+The package restores settings, the local credential vault/key, Splunk connection registry, optional RBAC/OIDC
+state, and paired model-trust state. It does not restore investigation data, queues, schedules, audit history,
+models, generated artifacts, environment variables, external service state, or private CA files. A restored CA
+path must exist and be independently trusted on the destination host.
 
 ## Port fallback
 

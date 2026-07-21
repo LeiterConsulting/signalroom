@@ -671,6 +671,30 @@
           </div>
           <p class="access-read-only-note" id="accessReadOnlyNote" hidden>Only a SignalRoom administrator can change workspace or access policy. These settings are shown read-only.</p>
         </div>
+        <div class="form-section recovery-section" id="recoverySection">
+          <div class="recovery-heading"><div><h3>Encrypted control-plane recovery</h3><p>Back up SignalRoom settings, encrypted credentials, Splunk connection identities, access policy, and paired model-trust authority without copying investigation data.</p></div><span class="subtle-pill">ADMIN · LOCAL FILE</span></div>
+          <div class="recovery-contract" role="note"><b>Inspect first. Restore on restart.</b><span>Every package is password-derived AES-256-GCM encrypted and integrity checked. Inspection is read only. A compatible restore creates an encrypted rollback checkpoint, freezes configuration changes, and applies before services open on the next process start.</span></div>
+          <div class="recovery-pending" id="recoveryPending" hidden aria-live="assertive"></div>
+          <div class="recovery-grid">
+            <section class="recovery-action-card" aria-labelledby="recoveryBackupTitle">
+              <header><span>1 · PROTECT</span><h4 id="recoveryBackupTitle">Create a recovery package</h4><p>Use a unique password of at least 16 characters and store it separately. SignalRoom cannot recover it.</p></header>
+              <label><span>Package password</span><input id="recoveryExportPassword" type="password" autocomplete="new-password" minlength="16" maxlength="1024"></label>
+              <label><span>Confirm password</span><input id="recoveryExportConfirm" type="password" autocomplete="new-password" minlength="16" maxlength="1024"></label>
+              <button class="button primary small" type="button" id="createRecoveryPackage">Create and download</button>
+              <span class="test-result" id="recoveryExportResult" role="status" aria-live="polite"></span>
+            </section>
+            <section class="recovery-action-card" aria-labelledby="recoveryInspectTitle">
+              <header><span>2 · VERIFY</span><h4 id="recoveryInspectTitle">Inspect an existing package</h4><p>Decrypt into short-lived local staging, validate every digest and database contract, and make no live changes.</p></header>
+              <label><span>Recovery package</span><input id="recoveryInspectFile" type="file" accept=".signalroom-recovery,application/json"></label>
+              <label><span>Package password</span><input id="recoveryInspectPassword" type="password" autocomplete="current-password" minlength="16" maxlength="1024"></label>
+              <button class="button ghost small" type="button" id="inspectRecoveryPackage">Run read-only inspection</button>
+              <span class="test-result" id="recoveryInspectResult" role="status" aria-live="polite"></span>
+            </section>
+          </div>
+          <section class="recovery-inspection" id="recoveryInspection" hidden aria-live="polite"></section>
+          <details class="recovery-inventory"><summary>What is—and is not—in this package</summary><div id="recoveryInventory"></div></details>
+          <section class="recovery-history" aria-labelledby="recoveryHistoryTitle"><header><div><b id="recoveryHistoryTitle">Locally retained encrypted files</b><small>Delete downloaded exports from SignalRoom after moving them to your approved backup store. Automatic checkpoints use the same password as the package being restored.</small></div></header><div id="recoveryHistory"><div class="empty-inline compact-empty">No recovery files have been created.</div></div></section>
+        </div>
         <div class="form-section" id="workloadPolicySection">
           <h3>Splunk workload protection</h3>
           <p>One admission controller protects the configured Splunk instance across Investigate, Discovery, Validation, Assurance, and MLTK inventory. Audit mode is the POC-safe default; concurrency limits still prevent local request bursts.</p>

@@ -163,8 +163,9 @@ case item.
 Tenant-aware stores now support staged copy, digest verification, isolated routing, zero-write rollback, verified
 reverse migration, and explicit shared-source finalization for all ten routed components. OIDC policy can map exact
 provider groups to any current Splunk alias independently of role; changed policy revokes external sessions and an
-archived alias is filtered from the next sign-in. Encrypted backup and migration tooling for connection credentials,
-plus time-aligned durable multi-estate review packets, remain future work.
+archived alias is filtered from the next sign-in. The encrypted control-plane recovery package now preserves the
+connection registry and paired vault credentials without importing tenant evidence or environment-managed secrets.
+Time-aligned durable multi-estate review packets remain future work.
 
 ## Why additional MCP connections belong in SignalRoom
 

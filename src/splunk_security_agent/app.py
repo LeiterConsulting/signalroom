@@ -11,7 +11,7 @@ from contextvars import ContextVar
 from pathlib import Path
 from typing import Annotated, Any
 
-from fastapi import FastAPI, File, HTTPException, Request, Response, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Request, Response, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -60,6 +60,7 @@ from .mcp_server import MCPServer
 from .model_setup import ModelSetupService
 from .model_trust import ModelTrustService, ModelTrustStore
 from .providers import ModelProviderError, ModelRouter
+from .recovery import RecoveryPackageError, RecoveryPackageService, apply_pending_restore
 from .schemas import (
     AnalystFeedbackCreate,
     ArtifactCreate,
@@ -122,6 +123,8 @@ from .schemas import (
     ModelTournamentRunCreate,
     ModelTrustPolicyUpdate,
     QueryIntelligenceRequest,
+    RecoveryPackageCreate,
+    RecoveryRestoreStage,
     SettingsUpdate,
     SplunkConnection,
     TenantDataMigrationActionRequest,
@@ -171,6 +174,8 @@ from .workload import (
 ROOT = Path(os.getenv("SIGNALROOM_ROOT", Path.cwd())).resolve()
 STATIC = Path(__file__).resolve().parent / "static"
 DATA = Path(os.getenv("SIGNALROOM_DATA_DIR", ROOT / "data")).resolve()
+APPLICATION_VERSION = "0.1.0"
+STARTUP_RECOVERY_RECEIPT = apply_pending_restore(DATA)
 _request_principal: ContextVar[dict[str, Any] | None] = ContextVar(
     "signalroom_request_principal", default=None
 )
@@ -198,6 +203,7 @@ class Services:
             DATA / "model_trust_signing.key",
             DATA / "model_attestations",
         )
+        self.recovery = RecoveryPackageService(DATA, APPLICATION_VERSION)
         self.evidence = RoutedEvidenceStore(self.tenant_data_registry)
         self.feedback = AnalystFeedbackStore(DATA / "feedback.db")
         self.evaluation_suite_store = EvaluationSuiteStore(DATA / "evaluation_suites.db")
@@ -752,7 +758,7 @@ def _allowed_connection_ids() -> set[str] | None:
 def _admin_actor(request: Request) -> str:
     principal = getattr(request.state, "principal", {}) or {}
     if principal.get("role") != "admin":
-        raise HTTPException(403, "Admin access is required for tenant isolation planning.")
+        raise HTTPException(403, "Admin access is required for this operation.")
     return str(principal.get("username") or "local-operator")
 
 
@@ -862,7 +868,28 @@ def _scoped_delivery_job(job_id: str, scope: dict[str, Any]) -> dict[str, Any]:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global STARTUP_RECOVERY_RECEIPT
     services.refresh(force=True)
+    if STARTUP_RECOVERY_RECEIPT:
+        receipt = STARTUP_RECOVERY_RECEIPT
+        services.audit.record(
+            "recovery.restore.applied",
+            "restore",
+            target_type="recovery-package",
+            target_id=str(receipt["package_id"]),
+            outcome="warning",
+            summary=(
+                "A validated control-plane recovery package was applied before SignalRoom "
+                "services started. Browser sessions and OIDC transactions were revoked."
+            ),
+            metadata={
+                "components": receipt["components"],
+                "checkpoint": receipt.get("checkpoint"),
+                "sessions_revoked": True,
+            },
+            actor=str(receipt.get("staged_by") or "host-recovery"),
+        )
+        STARTUP_RECOVERY_RECEIPT = None
     if not services.evidence.list(limit=1):
         services.evidence.add(
             ArtifactCreate(
@@ -896,7 +923,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Splunk Security Agent",
-    version="0.1.0",
+    version=APPLICATION_VERSION,
     description="Model-routed security chat, discovery, RAG, and MCP for Splunk.",
     lifespan=lifespan,
 )
@@ -928,6 +955,8 @@ async def access_control(request: Request, call_next: Any) -> Response:
         request.state.auth_session = None
         principal_token = _request_principal.set(request.state.principal)
         try:
+            if _recovery_mutation_frozen(request):
+                return _recovery_frozen_response()
             return await call_next(request)
         finally:
             _request_principal.reset(principal_token)
@@ -968,6 +997,8 @@ async def access_control(request: Request, call_next: Any) -> Response:
             actor=user["username"],
         )
         return JSONResponse({"detail": reason}, status_code=403)
+    if _recovery_mutation_frozen(request):
+        return _recovery_frozen_response()
     request.state.principal = user
     request.state.auth_session = session
     principal_token = _request_principal.set(user)
@@ -977,6 +1008,36 @@ async def access_control(request: Request, call_next: Any) -> Response:
     finally:
         reset_audit_actor(audit_actor)
         _request_principal.reset(principal_token)
+
+
+def _recovery_mutation_frozen(request: Request) -> bool:
+    return bool(
+        request.method in {"POST", "PUT", "PATCH", "DELETE"}
+        and services.recovery.pending_marker.exists()
+        and not request.url.path.startswith("/api/recovery/")
+        and request.url.path != "/api/auth/logout"
+    )
+
+
+def _recovery_frozen_response() -> JSONResponse:
+    return JSONResponse(
+        {
+            "detail": (
+                "A validated control-plane restore is pending. Restart SignalRoom to apply it "
+                "or cancel it in Setup before making other changes."
+            )
+        },
+        status_code=423,
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.middleware("http")
+async def recovery_cache_control(request: Request, call_next: Any) -> Response:
+    response = await call_next(request)
+    if request.url.path.startswith("/api/recovery"):
+        response.headers["Cache-Control"] = "no-store"
+    return response
 
 
 def _set_auth_cookies(response: Response, request: Request, session: dict[str, Any]) -> None:
@@ -1218,6 +1279,184 @@ async def auth_update_user(user_id: str, value: AuthUserUpdate, request: Request
 @app.get("/api/settings")
 async def get_settings() -> dict[str, Any]:
     return services.config.public_payload()
+
+
+@app.get("/api/recovery")
+async def recovery_overview(request: Request) -> dict[str, Any]:
+    _admin_actor(request)
+    return services.recovery.overview()
+
+
+@app.post("/api/recovery/packages", status_code=201)
+async def create_recovery_package(
+    value: RecoveryPackageCreate,
+    request: Request,
+) -> dict[str, Any]:
+    actor = _admin_actor(request)
+    # Ensure the approval store and the signer in the package are always a complete pair.
+    services.model_trust.signing_key.key_id()
+    try:
+        result = services.recovery.create(value.password, actor)
+    except RecoveryPackageError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    services.audit.record(
+        "recovery.package.created",
+        "export",
+        target_type="recovery-package",
+        target_id=result["package_id"],
+        summary=(
+            "Created a password-encrypted control-plane recovery package. Investigation data "
+            "and environment-managed secrets were excluded."
+        ),
+        metadata={
+            "sha256": result["sha256"],
+            "size": result["size"],
+            "components": [item["path"] for item in result["manifest"]["components"]],
+        },
+        actor=actor,
+    )
+    return result
+
+
+@app.get("/api/recovery/packages/{package_id}/download")
+async def download_recovery_package(package_id: str, request: Request) -> FileResponse:
+    _admin_actor(request)
+    try:
+        path = services.recovery.export_path(package_id)
+    except KeyError as exc:
+        raise HTTPException(404, "Recovery package not found") from exc
+    return FileResponse(
+        path,
+        filename=path.name,
+        media_type="application/vnd.signalroom.recovery+json",
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.get("/api/recovery/rollbacks/{package_id}/download")
+async def download_recovery_checkpoint(package_id: str, request: Request) -> FileResponse:
+    _admin_actor(request)
+    try:
+        path = services.recovery.export_path(package_id, rollback=True)
+    except KeyError as exc:
+        raise HTTPException(404, "Recovery checkpoint not found") from exc
+    return FileResponse(
+        path,
+        filename=path.name,
+        media_type="application/vnd.signalroom.recovery+json",
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.delete("/api/recovery/packages/{package_id}", status_code=204)
+async def delete_recovery_package(package_id: str, request: Request) -> Response:
+    actor = _admin_actor(request)
+    try:
+        services.recovery.delete_export(package_id)
+    except KeyError as exc:
+        raise HTTPException(404, "Recovery package not found") from exc
+    services.audit.record(
+        "recovery.package.deleted",
+        "delete",
+        target_type="recovery-package",
+        target_id=package_id,
+        summary="Deleted a locally retained encrypted recovery export.",
+        actor=actor,
+    )
+    return Response(status_code=204)
+
+
+@app.post("/api/recovery/packages/inspect")
+async def inspect_recovery_package(
+    request: Request,
+    file: Annotated[UploadFile, File()],
+    password: Annotated[str, Form(min_length=16, max_length=1024)],
+) -> dict[str, Any]:
+    actor = _admin_actor(request)
+    package = await file.read(25 * 1024 * 1024 + 1)
+    try:
+        result = services.recovery.inspect(package, password)
+    except RecoveryPackageError as exc:
+        services.audit.record(
+            "recovery.package.inspection.failed",
+            "inspect",
+            target_type="recovery-package",
+            target_id="unverified-upload",
+            outcome="denied",
+            summary="A recovery package failed password, integrity, contract, or compatibility inspection.",
+            metadata={"reason": str(exc)[:500], "upload_size": len(package)},
+            actor=actor,
+        )
+        raise HTTPException(400, str(exc)) from exc
+    services.audit.record(
+        "recovery.package.inspected",
+        "inspect",
+        target_type="recovery-package",
+        target_id=result["package_id"],
+        summary="Validated an encrypted recovery package without changing live configuration.",
+        metadata={
+            "inspection_id": result["inspection_id"],
+            "compatible": result["compatibility"]["compatible"],
+            "package_sha256": result["package_sha256"],
+        },
+        actor=actor,
+    )
+    return result
+
+
+@app.post("/api/recovery/restores", status_code=202)
+async def stage_recovery_restore(
+    value: RecoveryRestoreStage,
+    request: Request,
+) -> dict[str, Any]:
+    actor = _admin_actor(request)
+    try:
+        result = services.recovery.stage_restore(
+            value.inspection_id,
+            value.password,
+            value.confirmation,
+            actor,
+        )
+    except RecoveryPackageError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    services.audit.record(
+        "recovery.restore.staged",
+        "stage",
+        target_type="recovery-package",
+        target_id=result["package_id"],
+        outcome="warning",
+        summary=(
+            "Staged a validated control-plane restore for the next process start and froze "
+            "configuration mutations."
+        ),
+        metadata={
+            "checkpoint": result["checkpoint"],
+            "components": [item["path"] for item in result["components"]],
+            "restart_required": True,
+        },
+        actor=actor,
+    )
+    return result
+
+
+@app.delete("/api/recovery/restores/pending")
+async def cancel_pending_recovery_restore(request: Request) -> dict[str, Any]:
+    actor = _admin_actor(request)
+    try:
+        result = services.recovery.cancel_pending(actor)
+    except RecoveryPackageError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    services.audit.record(
+        "recovery.restore.cancelled",
+        "cancel",
+        target_type="recovery-package",
+        target_id=str(result["package_id"]),
+        outcome="warning",
+        summary="Cancelled a pending control-plane restore before restart; its checkpoint was retained.",
+        metadata={"checkpoint": result.get("checkpoint_retained")},
+        actor=actor,
+    )
+    return result
 
 
 @app.get("/api/connections")

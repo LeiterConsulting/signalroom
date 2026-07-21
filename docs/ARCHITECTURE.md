@@ -432,12 +432,38 @@ there is deliberately no remote recovery route.
 
 ## Next production increments
 
-1. Add encrypted configuration and credential backup/restore with compatibility and recovery validation
-2. Add time-aligned durable multi-estate review packets without cross-tenant fact copying
-3. Add read-only deployment reconciliation for the audit operations pack when the Splunk MCP contract exposes the
+1. Add time-aligned durable multi-estate review packets without cross-tenant fact copying
+2. Add read-only deployment reconciliation for the audit operations pack when the Splunk MCP contract exposes the
    required index and knowledge-object configuration fields
-4. Add retention and administrator cleanup policy for superseded tenant generations and reverse snapshots
-5. Complete release-candidate upgrade, installer, recovery, multi-instance, and security acceptance testing
+3. Add retention and administrator cleanup policy for superseded tenant generations, reverse snapshots, and
+   encrypted recovery exports/checkpoints
+4. Complete release-candidate upgrade, installer, recovery, multi-instance, and security acceptance testing
+
+## Recovery is a restart-gated control-plane transaction
+
+`RecoveryPackageService` snapshots live SQLite components through the SQLite backup API, removes sessions, login
+attempts, and OIDC transactions from the auth copy, then encrypts one canonical manifest and base64 component map
+with AES-256-GCM. Scrypt parameters, salt, nonce, format version, ciphertext digest, component paths, sizes, and
+SHA-256 digests are explicit. Only a fixed single-segment allowlist can be decoded; unknown, absolute, nested, or
+traversal paths fail inspection.
+
+The recovery boundary includes workspace settings, the paired Fernet vault/key, Splunk connection identities,
+RBAC/OIDC identities and policy, and paired model-trust approval/signing authority. It excludes tenant data,
+retained work, audit history, model weights, exports, artifacts, environment secrets, and CA file contents. This is
+control-plane recovery, not workspace cloning or tenant migration.
+
+Inspection is non-mutating and short-lived. It validates the settings contract, vault/key pairing, SQLite
+integrity and required tables, an active local administrator when restored RBAC is enabled, the model-trust signer
+against every active attestation, and same-major/minor application compatibility. Exact typed confirmation stages
+the decrypted allowlisted files, creates a separately encrypted checkpoint of the current control plane using the
+same operator password, and writes a pending marker. Middleware then returns `423 Locked` for every other unsafe
+mutation until the operator cancels or restarts.
+
+`apply_pending_restore` runs before `Services` construction. It verifies every staged digest and full component
+contract again, retains temporary originals for automatic in-process rollback if replacement fails, writes each
+component atomically, removes all restored sessions and OIDC transactions again, and records an applied receipt.
+The host-only `signalroom-recovery` command can inspect or stage a retained checkpoint when the web process is not
+available; it does not bypass password, compatibility, digest, or exact-confirmation checks.
 
 ### Physical isolation begins with a non-mutating plan
 

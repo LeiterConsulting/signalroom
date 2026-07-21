@@ -186,6 +186,8 @@ def test_roles_and_connection_assignment_are_independent(tmp_path) -> None:
     assert service.authorize(admin, "POST", "/api/tenant-isolation/plans") == (True, "")
     assert service.authorize(analyst, "POST", "/api/tenant-isolation/migrations")[0] is False
     assert service.authorize(admin, "POST", "/api/tenant-isolation/migrations") == (True, "")
+    assert service.authorize(analyst, "POST", "/api/recovery/packages")[0] is False
+    assert service.authorize(admin, "POST", "/api/recovery/packages") == (True, "")
 
 
 def test_user_changes_revoke_sessions_and_preserve_last_admin(tmp_path) -> None:

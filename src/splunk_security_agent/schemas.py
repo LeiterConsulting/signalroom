@@ -80,6 +80,16 @@ class SettingsUpdate(BaseModel):
     cisco_tsm_token: str | None = None
 
 
+class RecoveryPackageCreate(BaseModel):
+    password: str = Field(min_length=16, max_length=1024)
+
+
+class RecoveryRestoreStage(BaseModel):
+    inspection_id: str = Field(min_length=36, max_length=36)
+    password: str = Field(min_length=16, max_length=1024)
+    confirmation: str = Field(min_length=44, max_length=80)
+
+
 class TimeSeriesRuntimeUpdate(BaseModel):
     endpoint: str = Field(min_length=8, max_length=2048)
     verify_ssl: bool = True

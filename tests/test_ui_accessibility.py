@@ -109,6 +109,21 @@ def test_optional_rbac_is_visible_and_keyboard_operable() -> None:
     assert ".oidc-connection-map" in STYLES_CSS
 
 
+def test_control_plane_recovery_exposes_inspection_and_restart_boundary() -> None:
+    assert 'id="recoverySection"' in INDEX_HTML
+    assert 'id="createRecoveryPackage"' in INDEX_HTML
+    assert 'id="recoveryInspectFile"' in INDEX_HTML
+    assert 'id="inspectRecoveryPackage"' in INDEX_HTML
+    assert "Inspect first. Restore on restart." in INDEX_HTML
+    assert "SignalRoom cannot recover it" in INDEX_HTML
+    assert "function renderRecoveryInspection(value)" in APP_JS
+    assert "Run read-only inspection" in INDEX_HTML
+    assert "Stage restore for restart" in APP_JS
+    assert "CONFIGURATION FROZEN" in APP_JS
+    assert ".recovery-action-card input" in STYLES_CSS
+    assert ".recovery-pending" in STYLES_CSS
+
+
 def test_model_artifact_trust_is_explicit_and_audit_first() -> None:
     assert 'id="modelTrustPanel"' in INDEX_HTML
     assert 'id="modelTrustPolicyForm"' in INDEX_HTML

@@ -13,6 +13,7 @@ const state = {
   evaluationDraft: null, evaluationScenarioIndex: 0,
   deliveryPreview: null, detections: [], activeDetection: null, detectionGitExport: null,
   repositoryStatus: null, repositoryHandoff: null, auth: null, authUsers: [],
+  recovery: null, recoveryInspection: null,
   codeScreenResult: null, timeSeriesStatus: null, timeSeriesResult: null,
   timeSeriesExperiments: null, timeSeriesSchedules: null, timeSeriesScheduleTimer: null,
   workspaceLoaded: false, assuranceTimer: null, discoveryJobs: null,
@@ -759,6 +760,121 @@ async function loadSettings() {
   }
   loadModelReadiness();
   await loadDetectionRepositoryStatus();
+}
+
+function renderRecovery() {
+  const recovery = state.recovery;
+  if (!recovery) return;
+  const pending = recovery.pending_restore;
+  const pendingPanel = $('#recoveryPending');
+  pendingPanel.hidden = !pending;
+  pendingPanel.innerHTML = pending ? `
+    <div><span>RESTORE PENDING · CONFIGURATION FROZEN</span><b>Restart SignalRoom to apply package ${escapeHtml(pending.package_id)}</b><p>Staged ${escapeHtml(new Date(pending.staged_at).toLocaleString())} by ${escapeHtml(pending.staged_by)}. All component digests will be checked again before any service opens. Browser sessions will be revoked.</p><code>${escapeHtml(pending.checkpoint?.package_id || '')}</code></div>
+    <div class="recovery-pending-actions"><a class="button ghost small" href="/api/recovery/rollbacks/${encodeURIComponent(pending.checkpoint?.package_id || '')}/download" download>Download rollback checkpoint</a><button class="button danger small" type="button" id="cancelRecoveryRestore">Cancel pending restore</button></div>` : '';
+
+  $('#recoveryInventory').innerHTML = `
+    <div class="recovery-included"><b>Included control-plane components</b>${(recovery.included || []).map(item => `<span><code>${escapeHtml(item.path)}</code><small>${escapeHtml(item.description)}</small></span>`).join('')}</div>
+    <div class="recovery-excluded"><b>Explicitly excluded</b><ul>${(recovery.excluded || []).map(item => `<li>${escapeHtml(item)}</li>`).join('')}</ul></div>`;
+  const exports = (recovery.exports || []).map(item => ({...item, kind:'export'}));
+  const checkpoints = (recovery.rollbacks || []).map(item => ({...item, kind:'checkpoint'}));
+  const files = [...exports, ...checkpoints].sort((left,right) => String(right.created_at).localeCompare(String(left.created_at)));
+  $('#recoveryHistory').innerHTML = files.length ? files.map(item => {
+    const url = item.kind === 'checkpoint'
+      ? `/api/recovery/rollbacks/${encodeURIComponent(item.package_id)}/download`
+      : `/api/recovery/packages/${encodeURIComponent(item.package_id)}/download`;
+    return `<article><div><span>${item.kind === 'checkpoint' ? 'ROLLBACK CHECKPOINT' : 'OPERATOR BACKUP'}</span><b>${escapeHtml(item.filename)}</b><small>${escapeHtml(new Date(item.created_at).toLocaleString())} · ${escapeHtml(formatBytes(item.size))} · SHA-256 ${escapeHtml(item.sha256.slice(0,12))}…</small></div><div><a class="button ghost small" href="${url}" download>Download</a>${item.kind === 'export' ? `<button class="button danger small" type="button" data-delete-recovery="${escapeHtml(item.package_id)}">Delete local copy</button>` : ''}</div></article>`;
+  }).join('') : '<div class="empty-inline compact-empty">No recovery files have been created.</div>';
+}
+
+async function loadRecovery() {
+  if (!state.auth?.permissions?.can_administer) return;
+  try {
+    state.recovery = await api('/api/recovery');
+    renderRecovery();
+  } catch (error) {
+    $('#recoveryHistory').innerHTML = `<div class="empty-inline compact-empty error">${escapeHtml(error.message)}</div>`;
+  }
+}
+
+function downloadRecovery(url, filename = '') {
+  const link = document.createElement('a'); link.href = url; link.download = filename;
+  document.body.appendChild(link); link.click(); link.remove();
+}
+
+async function createRecoveryPackage() {
+  const output = $('#recoveryExportResult');
+  const password = $('#recoveryExportPassword').value;
+  if (password.length < 16) { output.textContent = 'Use at least 16 characters.'; return; }
+  if (password !== $('#recoveryExportConfirm').value) { output.textContent = 'The password confirmation does not match.'; return; }
+  output.textContent = 'Snapshotting and encrypting the control plane…';
+  try {
+    const result = await api('/api/recovery/packages', {method:'POST',body:JSON.stringify({password})});
+    downloadRecovery(result.download_url, result.filename);
+    $('#recoveryExportPassword').value = ''; $('#recoveryExportConfirm').value = '';
+    output.textContent = `Encrypted package ready · ${result.package_id}`;
+    await loadRecovery();
+  } catch (error) { output.textContent = error.message; }
+}
+
+function renderRecoveryInspection(value) {
+  const panel = $('#recoveryInspection');
+  panel.hidden = !value;
+  if (!value) { panel.innerHTML = ''; return; }
+  const compatibility = value.compatibility || {};
+  const components = value.manifest?.components || [];
+  const validations = Object.entries(value.validations || {});
+  panel.className = `recovery-inspection ${compatibility.compatible ? 'ready' : 'blocked'}`;
+  panel.innerHTML = `
+    <header><div><span>READ-ONLY INSPECTION · ${compatibility.compatible ? 'COMPATIBLE' : 'BLOCKED'}</span><h4>${escapeHtml(value.manifest?.package_type?.replaceAll('-', ' ') || 'Recovery package')}</h4><p>${escapeHtml(value.package_id)} · created ${escapeHtml(new Date(value.manifest?.created_at).toLocaleString())} by ${escapeHtml(value.manifest?.created_by || 'unknown')}</p></div><b>${escapeHtml(compatibility.package_version)} → ${escapeHtml(compatibility.current_version)}</b></header>
+    <div class="recovery-inspection-metrics"><span><b>${components.length}</b> components</span><span><b>${validations.length}</b> validation contracts</span><span><b>${escapeHtml(value.validations?.['credential-vault']?.secret_entries ?? 0)}</b> encrypted secret entries</span><span><b>${escapeHtml(value.validations?.['auth.db']?.active_local_admins ?? 0)}</b> local break-glass admins</span></div>
+    <div class="recovery-validation-list">${components.map(item => `<span><i></i><b>${escapeHtml(item.path)}</b><small>${escapeHtml(formatBytes(item.size))} · ${escapeHtml(item.sha256.slice(0,12))}…</small></span>`).join('')}</div>
+    ${(compatibility.warnings || []).map(item => `<p class="recovery-compatibility-warning">${escapeHtml(item)}</p>`).join('')}
+    ${compatibility.compatible ? `<div class="recovery-restore-gate"><div><b>Stage this exact package for restart</b><span>This creates a pre-restore encrypted checkpoint using the same password, then freezes every other configuration mutation.</span><code>${escapeHtml(value.confirmation)}</code></div><label><span>Re-enter package password</span><input id="recoveryRestorePassword" type="password" autocomplete="current-password" minlength="16" maxlength="1024"></label><label><span>Type the exact confirmation</span><input id="recoveryRestoreConfirmation" autocomplete="off" maxlength="80" placeholder="${escapeHtml(value.confirmation)}"></label><button class="button danger small" type="button" id="stageRecoveryRestore">Stage restore for restart</button><span id="recoveryRestoreResult" role="status" aria-live="polite"></span></div>` : ''}`;
+}
+
+async function inspectRecoveryPackage() {
+  const output = $('#recoveryInspectResult');
+  const file = $('#recoveryInspectFile').files[0];
+  const password = $('#recoveryInspectPassword').value;
+  if (!file) { output.textContent = 'Choose a recovery package first.'; return; }
+  if (password.length < 16) { output.textContent = 'Enter the package password.'; return; }
+  output.textContent = 'Decrypting and validating without applying changes…';
+  const form = new FormData(); form.append('file', file); form.append('password', password);
+  try {
+    state.recoveryInspection = await api('/api/recovery/packages/inspect', {method:'POST',body:form});
+    $('#recoveryInspectPassword').value = '';
+    output.textContent = state.recoveryInspection.compatibility.compatible
+      ? 'Integrity and compatibility checks passed.' : 'Integrity passed; this release cannot restore the package.';
+    renderRecoveryInspection(state.recoveryInspection);
+  } catch (error) { state.recoveryInspection = null; renderRecoveryInspection(null); output.textContent = error.message; }
+}
+
+async function stageRecoveryRestore() {
+  const value = state.recoveryInspection; if (!value) return;
+  const output = $('#recoveryRestoreResult'); output.textContent = 'Revalidating and building the rollback checkpoint…';
+  try {
+    await api('/api/recovery/restores', {method:'POST',body:JSON.stringify({
+      inspection_id:value.inspection_id,
+      password:$('#recoveryRestorePassword').value,
+      confirmation:$('#recoveryRestoreConfirmation').value
+    })});
+    state.recoveryInspection = null; renderRecoveryInspection(null); await loadRecovery();
+    toast('Restore staged · restart SignalRoom to apply it');
+  } catch (error) { output.textContent = error.message; }
+}
+
+async function cancelRecoveryRestore() {
+  try {
+    await api('/api/recovery/restores/pending', {method:'DELETE'});
+    await loadRecovery(); toast('Pending restore cancelled · checkpoint retained');
+  } catch (error) { toast(error.message); }
+}
+
+async function deleteRecoveryPackage(packageId) {
+  try {
+    await api(`/api/recovery/packages/${encodeURIComponent(packageId)}`, {method:'DELETE'});
+    await loadRecovery(); toast('Local encrypted export deleted');
+  } catch (error) { toast(error.message); }
 }
 
 async function loadConnections() {
@@ -5433,6 +5549,10 @@ function navigateView(name) {
 }
 
 document.addEventListener('click', async event => {
+  if (event.target.closest('#stageRecoveryRestore')) { await stageRecoveryRestore(); return; }
+  if (event.target.closest('#cancelRecoveryRestore')) { await cancelRecoveryRestore(); return; }
+  const deleteRecovery = event.target.closest('[data-delete-recovery]');
+  if (deleteRecovery) { await deleteRecoveryPackage(deleteRecovery.dataset.deleteRecovery); return; }
   const diagnoseManaged = event.target.closest('[data-diagnose-managed-splunk]');
   if (diagnoseManaged) { await diagnoseManagedSplunk(diagnoseManaged.dataset.diagnoseManagedSplunk, diagnoseManaged); return; }
   const admitManaged = event.target.closest('[data-admit-managed-splunk]');
@@ -5682,7 +5802,7 @@ document.addEventListener('click', async event => {
   }
   const change = event.target.closest('[data-change-investigate]');
   if (change) openInvestigation('discovery', `Explain and validate this change since the previous discovery: ${change.dataset.changeCategory} ${change.dataset.changeInvestigate}. Determine whether it is a real posture change or a collection issue.`, false);
-  if (event.target.closest('#openSettings,#configureModels,[data-open-settings]')) { $('#settingsModal').hidden = false; loadWorkload(); await loadConnections(); await loadTenantIsolation(); }
+  if (event.target.closest('#openSettings,#configureModels,[data-open-settings]')) { $('#settingsModal').hidden = false; loadWorkload(); await loadConnections(); await loadTenantIsolation(); await loadRecovery(); }
   if (event.target.closest('#closeSettings')) $('#settingsModal').hidden = true;
   if (event.target.closest('#stageTenantMigration')) await stageTenantMigration();
   if (event.target.closest('#stageTenantReverse')) await stageTenantReverseMigration();
@@ -5900,6 +6020,8 @@ $('#goldenSuite').addEventListener('change', renderGoldenBenchmarks);
 $('#contextPrevious').addEventListener('click', () => { state.contextPage -= 1; renderArtifacts(state.contextItems); $('#contextView').scrollIntoView({ behavior:'smooth', block:'start' }); });
 $('#contextNext').addEventListener('click', () => { state.contextPage += 1; renderArtifacts(state.contextItems); $('#contextView').scrollIntoView({ behavior:'smooth', block:'start' }); });
 $('#settingsForm').addEventListener('submit', saveSettings);
+$('#createRecoveryPackage').addEventListener('click', createRecoveryPackage);
+$('#inspectRecoveryPackage').addEventListener('click', inspectRecoveryPackage);
 $('#saveSplunkConnection').addEventListener('click', saveManagedSplunkConnection);
 $('#addSplunkConnection').addEventListener('click', () => openManagedSplunkForm());
 $('#buildTenantIsolationPlan').addEventListener('click', buildTenantIsolationPlan);
@@ -5991,7 +6113,7 @@ const accessObserver = new MutationObserver(() => {
 accessObserver.observe(document.body, { childList:true, subtree:true });
 
 async function loadWorkspace() {
-  await Promise.all([loadSettings(), loadWorkload(), loadArtifacts(), loadCases(), loadLatestDiscovery(), loadDiscoveryJobs(), loadValidations(), loadDetections(), loadModelCatalog(), loadTimeSeriesStatus(), loadModelTrust(), loadSplunkModels(), loadAssurance(), loadConnectionDiagnostics(), loadFeedbackBenchmarks(), loadGoldenBenchmarks()]);
+  await Promise.all([loadSettings(), loadWorkload(), loadArtifacts(), loadCases(), loadLatestDiscovery(), loadDiscoveryJobs(), loadValidations(), loadDetections(), loadModelCatalog(), loadTimeSeriesStatus(), loadModelTrust(), loadSplunkModels(), loadAssurance(), loadConnectionDiagnostics(), loadFeedbackBenchmarks(), loadGoldenBenchmarks(), loadRecovery()]);
   renderPromptTree(); renderValidations(); renderDetections(); handleDeepLink(); renderAuth();
   state.workspaceLoaded = true;
   if (!state.assuranceTimer) state.assuranceTimer = setInterval(() => {

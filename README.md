@@ -39,6 +39,7 @@ This is a focused reimplementation inspired by [LeiterConsulting/splunk-discover
 - Hybrid SQLite FTS5, SecureBERT bi-encoder retrieval, and optional cross-encoder reranking with stable artifact/chunk references
 - Conditional specialist inference, short-lived inventory caches, and warm Ollama model retention
 - Encrypted Splunk and Hugging Face tokens at rest
+- Password-encrypted control-plane recovery packages with read-only inspection, release compatibility checks, restart-gated restore, and an automatic encrypted rollback checkpoint
 - A safe demo workspace that runs without Splunk, Ollama, or Hugging Face
 - An outward MCP Streamable HTTP-compatible JSON-RPC endpoint at `POST /mcp`
 
@@ -771,8 +772,10 @@ effective-access previews, and host-only local-account recovery.
 Deployment-specific audit operations now add a destination-bound, disabled-by-default Splunk content pack and a
 local export-lag contract. Tenant-scoped evidence, cases, discovery history, and explicit instance selection now
 form the shared application boundary. Additional Splunk aliases now have per-alias encrypted credentials, health,
-authorization, clients, durable identity, and tenant-aware routing. The next production increment is encrypted,
-operator-controlled configuration and credential backup/restore with compatibility and recovery validation.
+authorization, clients, durable identity, and tenant-aware routing. Administrators can now export and inspect a
+password-encrypted control-plane recovery package, stage only a compatible package, and retain an encrypted
+pre-restore checkpoint. The next production increment is time-aligned durable multi-estate review packets without
+copying one tenant's facts into another tenant boundary.
 
 ### Operator-authored evaluation suites
 
@@ -834,6 +837,35 @@ The **Export handoff** action creates both a readable Markdown brief and a struc
 local data directory. These packages preserve ownership, case state, source, confidence, validation status,
 timestamps, and the complete timeline for shift handoff or downstream review. They do not send notifications,
 open tickets, or change Splunk; external workflow automation remains an explicit deployment integration.
+
+### Control-plane backup and recovery
+
+Setup → **Encrypted control-plane recovery** creates an AES-256-GCM package using a password-derived scrypt key.
+The package contains `config.json`, the paired encrypted credential vault and local vault key, immutable Splunk
+connection identities, RBAC/OIDC policy and identities, and the paired model-trust database/signing identity.
+Environment-managed secrets, private-CA file contents, evidence, cases, discovery results, queues, schedules,
+audit history, exports, downloaded model weights, and generated artifacts are not included.
+
+Restore is deliberately two-step. A read-only inspection decrypts into short-lived local staging and validates the
+outer ciphertext, every component digest, settings schema, vault/key pairing, required SQLite tables and integrity,
+local break-glass administrator contract, model-trust signer pairing, and same-major/minor release compatibility.
+Staging requires the package ID as an exact typed confirmation. SignalRoom then creates an encrypted pre-restore
+checkpoint using the same password, freezes all other configuration mutations, and waits for restart. The next
+process validates every staged digest again and applies the files before any service opens them. Browser sessions,
+login attempts, and unfinished OIDC transactions are never exported and are revoked on restore.
+
+If the web app cannot start after a restore, an operating-system administrator can inspect or stage the retained
+checkpoint without opening a remote recovery route:
+
+```powershell
+signalroom-recovery --data-dir .\data status
+signalroom-recovery --data-dir .\data inspect .\data\recovery\rollbacks\pre-restore-<id>.signalroom-recovery
+signalroom-recovery --data-dir .\data restore .\data\recovery\rollbacks\pre-restore-<id>.signalroom-recovery --host-authorized
+```
+
+The command prompts for the package password and exact restore confirmation. Start or restart SignalRoom afterward
+to apply it. Protect the package and its password separately; neither SignalRoom nor the checkpoint can recover a
+lost password.
 
 ## Production boundary
 
