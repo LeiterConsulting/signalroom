@@ -10,6 +10,25 @@ SignalRoom uses the same low-friction lifecycle as the upstream Splunk Discovery
 
 Node.js, npm, Docker, Ollama, and Hugging Face are not required to explore demo mode.
 
+## Read-only install and upgrade preflight
+
+Before changing an existing environment, both lifecycle managers run the same compatibility engine. Run it
+independently at any time:
+
+```powershell
+.\install.ps1 -Preflight
+```
+
+```bash
+./install.sh --preflight
+```
+
+The preflight validates the admitted release path, schema-2 source/installation manifest, Python runtime, writable
+capacity, settings and vault pairing, every retained SQLite store, pending restore state, tenant migrations,
+restartable work, optional model preservation, runtime binding, and process/container contracts. It is read only.
+An automatic installer preflight writes a content-addressed receipt before stopping an owned process. See
+[UPGRADES.md](UPGRADES.md) for the complete compatibility and rollback matrix.
+
 ## Optional model bootstrap
 
 Setup contains independent readiness panels for three execution paths:
@@ -223,7 +242,7 @@ The installer will:
 2. Create `.venv` beside the installer.
 3. Validate pip and install SignalRoom in editable mode, rebuilding an interrupted environment if needed.
 4. Retry against public PyPI if a configured private package index is unavailable.
-5. Create `.install_manifest.json` with a dependency-file fingerprint.
+5. Create schema-2 `.install_manifest.json` with dependency and exact-source fingerprints.
 6. Start the app in a hidden background process.
 7. Wait for `/api/health` and print the actual workspace URL.
 
@@ -231,6 +250,7 @@ Useful commands:
 
 ```powershell
 .\install.ps1 -Status
+.\install.ps1 -Preflight
 .\install.ps1 -Restart
 .\install.ps1 -Stop
 .\install.ps1 -Start -OpenBrowser
@@ -253,6 +273,7 @@ Useful commands:
 
 ```bash
 ./install.sh --status
+./install.sh --preflight
 ./install.sh --restart
 ./install.sh --stop
 ./install.sh --start --open-browser
@@ -271,7 +292,9 @@ All lifecycle files stay inside the repository:
 | Path | Purpose |
 |---|---|
 | `.venv/` | Isolated Python environment |
-| `.install_manifest.json` | Installed version and `pyproject.toml` fingerprint |
+| `.install_manifest.json` | Installed version, dependency hash, exact-source digest, and lifecycle ownership |
+| `data/upgrade/preflight_receipts/` | Content-addressed automatic install/upgrade preflight history |
+| `data/upgrade/latest_preflight.json` | Most recent automatic preflight result |
 | `.signalroom.pid` | Managed process identifier |
 | `.signalroom.runtime.json` | Actual host, port, URL, and start time |
 | `signalroom.log` | Standard output |
@@ -386,7 +409,11 @@ Add `-ForceYes` or `--force-yes` for an unattended uninstall.
 docker compose up --build -d
 ```
 
-The published port is bound to localhost and `./data` is mounted for persistence. When Ollama runs on the host, configure its endpoint as `http://host.docker.internal:11434` in Setup.
+The published port is bound to localhost by default and `./data` is mounted for persistence. Set
+`SIGNALROOM_BIND_ADDRESS=0.0.0.0` only for an explicitly governed LAN deployment. The image build excludes the
+host data directory and lifecycle secrets; retained state enters only through the runtime volume. Compose also
+provides a health check and graceful-stop window. When Ollama runs on the host, configure its endpoint as
+`http://host.docker.internal:11434` in Setup.
 
 The Cisco Time Series Model runtime is optional and remains stopped unless its profile is selected. The easiest
 process-install path is **Models → Cisco Time Series Model → Build and start bundled local runtime**. SignalRoom

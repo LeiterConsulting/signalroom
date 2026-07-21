@@ -459,8 +459,20 @@ there is deliberately no remote recovery route.
 
 ## Next production increments
 
-1. Complete the upgrade and installer acceptance matrix
-2. Complete operational recovery and multi-instance acceptance
+1. Complete operational recovery and multi-instance acceptance
+
+## Upgrade readiness is a read-only retained-data contract
+
+`UpgradeReadinessService` evaluates the target and installed release line, schema-2 lifecycle ownership, exact
+source digest, active Python runtime, writable capacity, JSON/vault pairing, every retained SQLite store, pending
+recovery, tenant data-plane transitions, resumable work, optional model storage, runtime binding, and checked-in
+process/container deployment contracts. It starts no download and makes no Splunk call.
+
+Windows and Bash lifecycle managers invoke the same standard-library preflight before changing an environment.
+Source drift first produces a durable content-addressed receipt; only then is an owned process stopped. The updated
+manifest binds the exact source so a Git pull cannot be mistaken for the already running build. Cross-minor/major
+transitions, downgrades, pending restores, active tenant copies, corrupt databases, and broken deployment contracts
+fail closed. Docker excludes host data from the image and admits retained state only through the runtime volume.
 
 ## Release readiness is bound to exact source
 

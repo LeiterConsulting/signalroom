@@ -174,6 +174,7 @@ from .tenancy import (
     TenantIsolationPlanner,
     TenantIsolationStore,
 )
+from .upgrade_readiness import UpgradeReadinessService
 from .validation import QueryIntelligenceService, ValidationService
 from .workload import (
     SplunkWorkloadService,
@@ -223,6 +224,11 @@ class Services:
         self.release_readiness = ReleaseReadinessService(
             ROOT,
             STATIC,
+            DATA,
+            APPLICATION_VERSION,
+        )
+        self.upgrade_readiness = UpgradeReadinessService(
+            ROOT,
             DATA,
             APPLICATION_VERSION,
         )
@@ -1090,6 +1096,7 @@ async def sensitive_cache_control(request: Request, call_next: Any) -> Response:
             "/api/connections",
             "/api/retention",
             "/api/release-readiness",
+            "/api/upgrade-readiness",
         )
     ):
         response.headers["Cache-Control"] = "no-store"
@@ -1525,6 +1532,12 @@ async def retention_overview(request: Request) -> dict[str, Any]:
 async def release_readiness_overview(request: Request) -> dict[str, Any]:
     _admin_actor(request)
     return services.release_readiness.overview()
+
+
+@app.get("/api/upgrade-readiness")
+async def upgrade_readiness_overview(request: Request) -> dict[str, Any]:
+    _admin_actor(request)
+    return services.upgrade_readiness.overview()
 
 
 @app.put("/api/retention/policy")

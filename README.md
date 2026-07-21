@@ -41,6 +41,7 @@ This is a focused reimplementation inspired by [LeiterConsulting/splunk-discover
 - Encrypted Splunk and Hugging Face tokens at rest
 - Password-encrypted control-plane recovery packages with read-only inspection, release compatibility checks, restart-gated restore, and an automatic encrypted rollback checkpoint
 - A source-bound release-candidate gate for Settings density, navigation, labels, disclosure cues, typography, WCAG AA semantic contrast, production language, function ownership, lint, JavaScript syntax, tests, and named viewport review
+- A read-only install/upgrade preflight for exact-source drift, retained-data integrity, recovery and tenant-migration boundaries, runtime visibility, model preservation, and process/container parity
 - A safe demo workspace that runs without Splunk, Ollama, or Hugging Face
 - An outward MCP Streamable HTTP-compatible JSON-RPC endpoint at `POST /mcp`
 
@@ -69,6 +70,7 @@ Lifecycle commands intentionally mirror the Splunk Discovery Tool:
 |---|---|---|
 | Start/install | `.\install.ps1 -Start` | `./install.sh --start` |
 | Status | `.\install.ps1 -Status` | `./install.sh --status` |
+| Compatibility preflight | `.\install.ps1 -Preflight` | `./install.sh --preflight` |
 | Restart | `.\install.ps1 -Restart` | `./install.sh --restart` |
 | Stop | `.\install.ps1 -Stop` | `./install.sh --stop` |
 | Uninstall environment | `.\install.ps1 -Uninstall` | `./install.sh --uninstall` |
@@ -76,7 +78,8 @@ Lifecycle commands intentionally mirror the Splunk Discovery Tool:
 | Check model readiness | `.\install.ps1 -SetupModels` | `./install.sh --setup-models` |
 | Install Ollama and pull models | `.\install.ps1 -InstallOllama -PullModels` | `./install.sh --install-ollama --pull-models` |
 
-See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for port fallback, logs, unattended installs, data preservation, and Docker.
+See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for lifecycle operations and
+[docs/UPGRADES.md](docs/UPGRADES.md) for the admitted upgrade, rollback, retained-data, and container matrix.
 
 ## Optional named access
 
@@ -798,7 +801,8 @@ pre-restore checkpoint. Time-aligned durable multi-estate review packets now per
 references and materialize each tenant's source facts in place. Audit operations packs now have immutable,
 tenant-filtered, read-only reconciliation history. Administrators now have preview-bound, metadata-preserving local
 retention controls for superseded tenant generations, terminal reverse snapshots, and encrypted recovery artifacts.
-The next production increment is release-candidate upgrade, installer, recovery, multi-instance, retention, and
+The upgrade and installer matrix now binds exact source, retained data, recovery state, lifecycle ownership, and
+container boundaries before mutation. The next production increment is operational recovery and multi-instance
 security acceptance testing.
 
 ### Release-candidate quality gate
@@ -806,7 +810,7 @@ security acceptance testing.
 Setup → **Release readiness** evaluates the exact shipped interface and reports promotion blockers in place. The
 Settings modal has nine keyboard-operable section targets; its fixed header updates to name the visible section as
 the independently scrolling content moves. Each settings area is visually bounded, wide layouts no longer squeeze
-multi-column controls into a narrow modal, and every disclosure has an explicit plus/minus state and focus ring.
+multi-column controls into a narrow modal, and every disclosure has an explicit chevron state and focus ring.
 
 The automated gate measures section density, accessible control names, unique IDs, disclosure structure, type
 scale, responsive behavior, critical WCAG AA color pairs, production-ready help language, and function ownership.

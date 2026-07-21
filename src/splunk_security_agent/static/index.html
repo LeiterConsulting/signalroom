@@ -751,6 +751,10 @@
         <div class="form-section release-readiness-section" id="settingsRelease" data-settings-section="settingsRelease" data-settings-title="Release readiness" data-settings-eyebrow="SETTINGS · ACCEPTANCE GATE" data-settings-description="source-bound quality evidence">
           <div class="release-readiness-heading"><div><h3>Release-candidate gate</h3><p>Measure the shipped interface, function ownership, and exact-source verification receipt before promoting a build.</p></div><button class="button ghost small" type="button" id="refreshReleaseReadiness">Run static checks</button></div>
           <div class="release-readiness" id="releaseReadiness" aria-live="polite"><div class="empty-inline compact-empty">Evaluating the current source-bound release checks…</div></div>
+          <section class="upgrade-readiness-panel" aria-labelledby="upgradeReadinessTitle">
+            <header><div><span>DEPLOYMENT LIFECYCLE</span><h3 id="upgradeReadinessTitle">Install and upgrade compatibility</h3><p>Inspect the version path, retained data, recovery boundary, active work, models, runtime binding, and process/container contracts without changing the deployment.</p></div><button class="button ghost small" type="button" id="refreshUpgradeReadiness">Run compatibility preflight</button></header>
+            <div class="upgrade-readiness" id="upgradeReadiness" aria-live="polite"><div class="empty-inline compact-empty">Inspecting this installation without making changes…</div></div>
+          </section>
         </div>
         <footer><span><i class="lock-icon">◆</i> Tokens are encrypted at rest and never returned by the API.</span><button class="button primary" id="saveWorkspace" type="submit">Save workspace</button></footer>
       </form>

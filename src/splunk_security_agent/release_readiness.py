@@ -162,6 +162,8 @@ def source_digest(root: Path) -> str:
         "pyproject.toml",
         "compose.yaml",
         "Dockerfile",
+        ".dockerignore",
+        ".gitignore",
         "install.ps1",
         "install.sh",
     ):
@@ -402,7 +404,8 @@ class ReleaseReadinessService:
             "verification-receipt",
             "Source-bound acceptance receipt",
             current,
-            "The full lint, JavaScript syntax, test, and reviewed-viewport receipt matches this exact source."
+            "The full compatibility, lint, JavaScript syntax, test, and reviewed-viewport receipt "
+            "matches this exact source."
             if current
             else "Run the full release check with a named UI review after the final source change.",
             {
@@ -451,7 +454,13 @@ class ReleaseReadinessService:
                 {
                     "id": "acceptance-verification",
                     "title": "Run source-bound release acceptance",
-                    "items": ["ruff", "node --check", "pytest", "named viewport review"],
+                    "items": [
+                        "upgrade compatibility preflight",
+                        "ruff",
+                        "node --check",
+                        "pytest",
+                        "named viewport review",
+                    ],
                 }
             )
         return {
@@ -500,7 +509,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--root", default=str(Path.cwd()))
     parser.add_argument("--data-dir", default="")
-    parser.add_argument("--full", action="store_true", help="Run lint, JavaScript syntax, and all tests.")
+    parser.add_argument(
+        "--full",
+        action="store_true",
+        help="Run upgrade preflight, lint, JavaScript syntax, and all tests.",
+    )
     parser.add_argument("--reviewer", default="")
     parser.add_argument("--ui-review", default="")
     parser.add_argument("--json", action="store_true")
@@ -526,6 +539,19 @@ def run() -> None:
             raise SystemExit("--full requires --reviewer and a specific --ui-review note.")
         node = shutil.which("node")
         commands = [
+            [
+                sys.executable,
+                "-m",
+                "splunk_security_agent.upgrade_readiness",
+                "--root",
+                str(root),
+                "--data-dir",
+                str(data),
+                "--manifest",
+                str(root / ".install_manifest.json"),
+                "--target-version",
+                service.version,
+            ],
             [sys.executable, "-m", "ruff", "check", "src", "tests"],
             [node or "node", "--check", "src/splunk_security_agent/static/app.js"],
             [sys.executable, "-m", "pytest", "-q"],

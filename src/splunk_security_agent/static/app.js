@@ -13,7 +13,7 @@ const state = {
   evaluationDraft: null, evaluationScenarioIndex: 0,
   deliveryPreview: null, detections: [], activeDetection: null, detectionGitExport: null,
   repositoryStatus: null, repositoryHandoff: null, auth: null, authUsers: [],
-  recovery: null, recoveryInspection: null, retention: null, releaseReadiness: null,
+  recovery: null, recoveryInspection: null, retention: null, releaseReadiness: null, upgradeReadiness: null,
   codeScreenResult: null, timeSeriesStatus: null, timeSeriesResult: null,
   timeSeriesExperiments: null, timeSeriesSchedules: null, timeSeriesScheduleTimer: null,
   workspaceLoaded: false, assuranceTimer: null, discoveryJobs: null,
@@ -1018,7 +1018,7 @@ function renderReleaseReadiness() {
   const receipt = value.receipt;
   const receiptNote = receipt?.ui_review?.note || 'No viewport review note';
   const receiptPunctuation = /[.!?]$/.test(receiptNote) ? '' : '.';
-  const receiptMarkup = receipt ? `<p class="release-receipt"><b>Latest full run:</b> ${escapeHtml(new Date(receipt.created_at).toLocaleString())} by ${escapeHtml(receipt.ui_review?.reviewer || 'unrecorded reviewer')} · ${escapeHtml(receiptNote)}${receiptPunctuation}</p>` : '<p class="release-receipt"><b>No full acceptance receipt exists yet.</b> Static checks do not replace lint, syntax, test-suite, and viewport review evidence.</p>';
+  const receiptMarkup = receipt ? `<p class="release-receipt"><b>Latest full run:</b> ${escapeHtml(new Date(receipt.created_at).toLocaleString())} by ${escapeHtml(receipt.ui_review?.reviewer || 'unrecorded reviewer')} · ${escapeHtml(receiptNote)}${receiptPunctuation}</p>` : '<p class="release-receipt"><b>No full acceptance receipt exists yet.</b> Static checks do not replace compatibility preflight, lint, syntax, test-suite, and viewport review evidence.</p>';
   $('#releaseReadiness').innerHTML = `
     <div class="release-decision ${ready ? 'ready' : ''}"><div><span>${ready ? 'READY FOR PROMOTION' : 'PROMOTION BLOCKED'}</span><b>${Number(value.counts?.passed || 0)} of ${Number(value.counts?.total || 0)} gates pass</b><small>${ready ? 'The full acceptance receipt matches this exact source.' : `${Number(value.counts?.blocked || 0)} gate${value.counts?.blocked === 1 ? ' requires' : 's require'} evidence or remediation.`}</small></div><code>${escapeHtml(shortDigest(value.source_sha256))}</code></div>
     <div class="release-check-list">${checks}</div>${followups}${receiptMarkup}
@@ -1033,6 +1033,33 @@ async function loadReleaseReadiness() {
   try {
     state.releaseReadiness = await api('/api/release-readiness');
     renderReleaseReadiness();
+  } catch (error) {
+    holder.innerHTML = `<div class="empty-inline compact-empty error">${escapeHtml(error.message)}</div>`;
+  }
+}
+
+function renderUpgradeReadiness() {
+  const value = state.upgradeReadiness; if (!value || !$('#upgradeReadiness')) return;
+  const warnings = Number(value.counts?.warnings || 0);
+  const ready = value.decision === 'ready';
+  const decisionLabel = ready ? (warnings ? 'COMPATIBLE · ATTENTION ADVISED' : 'COMPATIBLE') : 'UPGRADE BLOCKED';
+  const checks = (value.checks || []).map(item => `
+    <article class="upgrade-check ${escapeHtml(item.status)}"><i aria-hidden="true"></i><div><b>${escapeHtml(item.title)}</b><span>${escapeHtml(item.summary)}</span>${item.remediation ? `<small>${escapeHtml(item.remediation)}</small>` : ''}</div><em>${escapeHtml(item.status)}</em></article>`).join('');
+  const actions = (value.actions || []).map(item => `<li>${escapeHtml(item)}</li>`).join('');
+  const install = value.installation || {};
+  $('#upgradeReadiness').innerHTML = `
+    <div class="upgrade-decision ${ready ? 'ready' : 'blocked'}"><div><span>${decisionLabel}</span><b>${escapeHtml((value.scenario || 'unknown').replaceAll('-', ' '))}</b><small>${Number(value.counts?.passed || 0)} passed · ${warnings} attention · ${Number(value.counts?.blocked || 0)} blocked</small></div><div><code>${escapeHtml(install.installed_version || 'clean')}</code><i aria-hidden="true">→</i><code>${escapeHtml(install.target_version || '')}</code></div></div>
+    <div class="upgrade-check-list">${checks}</div>
+    <details class="upgrade-actions"><summary>Operator sequence and rollback boundary</summary><ol>${actions}</ol><code>${escapeHtml(value.command || '')}</code></details>`;
+}
+
+async function loadUpgradeReadiness() {
+  if (!state.auth?.permissions?.can_administer) return;
+  const holder = $('#upgradeReadiness');
+  holder.innerHTML = '<div class="empty-inline compact-empty">Reading lifecycle ownership, retained stores, restart boundaries, and deployment contracts…</div>';
+  try {
+    state.upgradeReadiness = await api('/api/upgrade-readiness');
+    renderUpgradeReadiness();
   } catch (error) {
     holder.innerHTML = `<div class="empty-inline compact-empty error">${escapeHtml(error.message)}</div>`;
   }
@@ -6110,7 +6137,7 @@ document.addEventListener('click', async event => {
   }
   const change = event.target.closest('[data-change-investigate]');
   if (change) openInvestigation('discovery', `Explain and validate this change since the previous discovery: ${change.dataset.changeCategory} ${change.dataset.changeInvestigate}. Determine whether it is a real posture change or a collection issue.`, false);
-  if (event.target.closest('#openSettings,#configureModels,[data-open-settings]')) { openSettings(); loadWorkload(); await loadConnections(); await loadTenantIsolation(); await loadRecovery(); await loadRetention(); await loadReleaseReadiness(); }
+  if (event.target.closest('#openSettings,#configureModels,[data-open-settings]')) { openSettings(); loadWorkload(); await loadConnections(); await loadTenantIsolation(); await loadRecovery(); await loadRetention(); await loadReleaseReadiness(); await loadUpgradeReadiness(); }
   if (event.target.closest('#closeSettings')) $('#settingsModal').hidden = true;
   if (event.target.closest('#stageTenantMigration')) await stageTenantMigration();
   if (event.target.closest('#stageTenantReverse')) await stageTenantReverseMigration();
@@ -6343,6 +6370,7 @@ $('#createRecoveryPackage').addEventListener('click', createRecoveryPackage);
 $('#inspectRecoveryPackage').addEventListener('click', inspectRecoveryPackage);
 $('#saveRetentionPolicy').addEventListener('click', saveRetentionPolicy);
 $('#refreshReleaseReadiness').addEventListener('click', loadReleaseReadiness);
+$('#refreshUpgradeReadiness').addEventListener('click', loadUpgradeReadiness);
 $('#settingsNavigator').addEventListener('click', event => {
   const button = event.target.closest('[data-settings-target]');
   if (button) navigateSettingsSection(button.dataset.settingsTarget);
@@ -6442,7 +6470,7 @@ const accessObserver = new MutationObserver(() => {
 accessObserver.observe(document.body, { childList:true, subtree:true });
 
 async function loadWorkspace() {
-  await Promise.all([loadSettings(), loadWorkload(), loadArtifacts(), loadCases(), loadLatestDiscovery(), loadDiscoveryJobs(), loadEstateReviewPackets(), loadValidations(), loadDetections(), loadModelCatalog(), loadTimeSeriesStatus(), loadModelTrust(), loadSplunkModels(), loadAssurance(), loadConnectionDiagnostics(), loadFeedbackBenchmarks(), loadGoldenBenchmarks(), loadRecovery(), loadRetention(), loadReleaseReadiness()]);
+  await Promise.all([loadSettings(), loadWorkload(), loadArtifacts(), loadCases(), loadLatestDiscovery(), loadDiscoveryJobs(), loadEstateReviewPackets(), loadValidations(), loadDetections(), loadModelCatalog(), loadTimeSeriesStatus(), loadModelTrust(), loadSplunkModels(), loadAssurance(), loadConnectionDiagnostics(), loadFeedbackBenchmarks(), loadGoldenBenchmarks(), loadRecovery(), loadRetention(), loadReleaseReadiness(), loadUpgradeReadiness()]);
   renderPromptTree(); renderValidations(); renderDetections(); handleDeepLink(); renderAuth();
   state.workspaceLoaded = true;
   if (!state.assuranceTimer) state.assuranceTimer = setInterval(() => {

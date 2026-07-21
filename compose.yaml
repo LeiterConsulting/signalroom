@@ -1,9 +1,14 @@
 services:
   signalroom:
+    image: signalroom:0.1.0
     build: .
+    init: true
+    stop_grace_period: 30s
     ports:
-      - "127.0.0.1:8003:8003"
+      - "${SIGNALROOM_BIND_ADDRESS:-127.0.0.1}:${SIGNALROOM_PORT:-8003}:8003"
     environment:
+      SIGNALROOM_ROOT: /app
+      SIGNALROOM_DATA_DIR: /app/data
       SPLUNK_MCP_TOKEN: ${SPLUNK_MCP_TOKEN:-}
       HF_TOKEN: ${HF_TOKEN:-}
       SIGNALROOM_CISCO_TSM_ENDPOINT: ${SIGNALROOM_CISCO_TSM_ENDPOINT:-}
@@ -15,6 +20,12 @@ services:
       SIGNALROOM_SOAR_AUTH_TOKEN: ${SIGNALROOM_SOAR_AUTH_TOKEN:-}
     volumes:
       - ./data:/app/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import json,urllib.request; assert json.load(urllib.request.urlopen('http://127.0.0.1:8003/api/health', timeout=3))['ok']"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
     extra_hosts:
       - "host.docker.internal:host-gateway"
 

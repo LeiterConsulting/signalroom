@@ -9,6 +9,7 @@ param(
     [switch]$Stop,
     [switch]$Restart,
     [switch]$Status,
+    [switch]$Preflight,
     [switch]$Uninstall,
     [switch]$ForceYes,
     [switch]$PublicOnly,
@@ -44,7 +45,7 @@ function Show-Help {
     Write-Host ""
     Write-Info "USAGE"
     Write-Host "    .\install.ps1 [OPTIONS]"
-    Write-Host "    .\install.ps1 [start|stop|restart|status|uninstall]"
+    Write-Host "    .\install.ps1 [start|stop|restart|status|preflight|uninstall]"
     Write-Host ""
     Write-Info "OPTIONS"
     Write-Host "    (no arguments)    Install or update dependencies and start"
@@ -52,6 +53,7 @@ function Show-Help {
     Write-Host "    -Stop              Stop the managed service"
     Write-Host "    -Restart           Restart the managed service"
     Write-Host "    -Status            Show process, URL, health, and log locations"
+    Write-Host "    -Preflight         Read-only install and retained-data compatibility check"
     Write-Host "    -Uninstall         Remove the virtual environment and runtime files"
     Write-Host "    -ForceYes          Skip the uninstall confirmation"
     Write-Host "    -PurgeData         With -Uninstall, also remove local secrets and artifacts"
@@ -70,6 +72,7 @@ function Show-Help {
     Write-Host "    .\install.ps1 -SetupModels -InstallOllama -PullModels"
     Write-Host "    .\install.ps1 -Restart"
     Write-Host "    .\install.ps1 -Status"
+    Write-Host "    .\install.ps1 -Preflight"
     Write-Host "    .\install.ps1 -Uninstall -ForceYes"
     Write-Host ""
     Write-Info "DEFAULT WORKSPACE"
@@ -117,13 +120,47 @@ function Get-ProjectHash {
     return (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $InstallDir "pyproject.toml")).Hash.ToLowerInvariant()
 }
 
+function Get-SourceHash {
+    $python = Get-BootstrapPython
+    $script = Join-Path $InstallDir "src\splunk_security_agent\upgrade_readiness.py"
+    $value = & $python $script --root $InstallDir --source-digest
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($value)) {
+        throw "Unable to fingerprint the SignalRoom source tree."
+    }
+    return ([string]$value).Trim()
+}
+
+function Invoke-UpgradePreflight([switch]$Record) {
+    $python = Get-BootstrapPython
+    $script = Join-Path $InstallDir "src\splunk_security_agent\upgrade_readiness.py"
+    $arguments = @(
+        $script,
+        "--root", $InstallDir,
+        "--data-dir", (Join-Path $InstallDir "data"),
+        "--manifest", $ManifestFile,
+        "--target-version", $Version
+    )
+    if ($Record) { $arguments += "--record" }
+    Write-Info "Running install and retained-data compatibility preflight..."
+    & $python @arguments
+    if ($LASTEXITCODE -ne 0) {
+        Write-Failure "Upgrade preflight blocked this installation. Resolve the reported checks first."
+        exit 1
+    }
+}
+
 function Test-Installation {
     if (-not (Test-Path -LiteralPath $ManifestFile) -or -not (Test-Path -LiteralPath $VenvPython)) {
         return $false
     }
     try {
         $manifest = Get-Content -Raw -LiteralPath $ManifestFile | ConvertFrom-Json
-        return ($manifest.version -eq $Version -and $manifest.project_hash -eq (Get-ProjectHash))
+        return (
+            $manifest.manifest_schema -eq 2 -and
+            $manifest.version -eq $Version -and
+            $manifest.project_hash -eq (Get-ProjectHash) -and
+            $manifest.source_hash -eq (Get-SourceHash)
+        )
     } catch {
         return $false
     }
@@ -133,6 +170,13 @@ function Install-Dependencies {
     $bootstrapPython = Get-BootstrapPython
     $pythonVersion = (& $bootstrapPython --version 2>&1) -replace "Python ", ""
     Write-Success "Python $pythonVersion found"
+    if (Test-Path -LiteralPath $VenvPython) {
+        & $VenvPython -c "import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)"
+        if ($LASTEXITCODE -ne 0) {
+            Write-Warn "The existing virtual environment uses an unsupported Python; rebuilding it..."
+            Remove-SafeTree $VenvDir
+        }
+    }
     if (-not (Test-Path -LiteralPath $VenvPython)) {
         Write-Info "Creating isolated virtual environment..."
         & $bootstrapPython -m venv $VenvDir
@@ -147,16 +191,22 @@ function Install-Dependencies {
     }
     Write-Info "Installing SignalRoom and dependencies..."
     Invoke-PipWithFallback "SignalRoom installation" @("install", "-e", $InstallDir, "-q")
-    $pipVersion = (& $VenvPython -m pip --version) -replace "pip ", "" -replace " from.*", ""
+    $pipOutput = & $VenvPython -m pip --version 2>&1 | Select-Object -First 1
+    $pipVersion = ([string]$pipOutput) -replace "pip ", "" -replace " from.*", ""
     $manifest = @{
+        manifest_schema = 2
         version = $Version
         project_hash = Get-ProjectHash
+        source_hash = Get-SourceHash
         installed_at = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
         os = "Windows"
         python = @{ version = $pythonVersion; executable = $VenvPython }
         pip = @{ version = $pipVersion }
         virtual_env = $VenvDir
+        install_root = $InstallDir
+        data_dir = (Join-Path $InstallDir "data")
         preferred_port = $Port
+        compatibility = @{ policy = "same-major-minor"; preflight_required = $true }
     }
     $manifest | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $ManifestFile -Encoding UTF8
     Write-Success "SignalRoom installation is up to date."
@@ -202,7 +252,16 @@ function Test-Health([string]$Url) {
 }
 
 function Start-SignalRoom {
-    if (-not (Test-Installation)) { Install-Dependencies }
+    $needsInstall = -not (Test-Installation)
+    if ($needsInstall) {
+        Invoke-UpgradePreflight -Record
+        $upgradePid = Get-ManagedPid
+        if ($upgradePid -and (Get-Process -Id $upgradePid -ErrorAction SilentlyContinue)) {
+            Write-Info "Preflight passed; stopping the owned SignalRoom process before dependency refresh..."
+            Stop-SignalRoom
+        }
+        Install-Dependencies
+    }
     $existingPid = Get-ManagedPid
     if ($existingPid -and (Get-Process -Id $existingPid -ErrorAction SilentlyContinue)) {
         if (Test-OwnedProcess $existingPid) {
@@ -363,6 +422,7 @@ elseif ($Start) { $selected = "start" }
 elseif ($Stop) { $selected = "stop" }
 elseif ($Restart) { $selected = "restart" }
 elseif ($Status) { $selected = "status" }
+elseif ($Preflight) { $selected = "preflight" }
 elseif ($Uninstall) { $selected = "uninstall" }
 
 switch ($selected) {
@@ -371,8 +431,14 @@ switch ($selected) {
     "--help" { Show-Help }
     "start" { Start-SignalRoom; if ($SetupModels -or $InstallOllama -or $PullModels) { Invoke-ModelSetup } }
     "stop" { Stop-SignalRoom }
-    "restart" { Stop-SignalRoom; Start-Sleep -Seconds 1; Start-SignalRoom }
+    "restart" {
+        if (-not (Test-Installation)) { Invoke-UpgradePreflight }
+        Stop-SignalRoom
+        Start-Sleep -Seconds 1
+        Start-SignalRoom
+    }
     "status" { Show-Status }
+    "preflight" { Invoke-UpgradePreflight }
     "uninstall" { Uninstall-Service }
     "" {
         Write-Info "=================================================="

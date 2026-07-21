@@ -5,6 +5,8 @@ __pycache__/
 .ruff_cache/
 .tmp/
 data/*.db
+data/*.db-*
+data/**/*.db-*
 data/*.json
 data/*.log
 data/*_signing.key
@@ -21,6 +23,7 @@ data/model_attestations/*
 data/models/*
 !data/models/.gitkeep
 data/recovery/*
+data/upgrade/
 .env
 .install_manifest.json
 .signalroom.pid

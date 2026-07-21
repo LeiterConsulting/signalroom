@@ -47,9 +47,7 @@ class methods are reviewed through their owning service and tests rather than gu
 
 ## Remaining release-candidate slices
 
-1. **Upgrade and installer matrix** — clean install, in-place upgrade, Windows/Linux launch, Docker Compose,
-   localhost/LAN binding, optional model installation, rollback, and retained-data compatibility.
-2. **Operational recovery and multi-instance acceptance** — encrypted backup/restore drills, stale identity and
+1. **Operational recovery and multi-instance acceptance** — encrypted backup/restore drills, stale identity and
    tenant-route failure cases, unavailable secondary Splunk behavior, authorization boundaries, and long-running
    progress/cancellation UX.
 

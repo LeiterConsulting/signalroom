@@ -44,7 +44,7 @@ show_help() {
 
 USAGE
     ./install.sh [OPTIONS]
-    ./install.sh [start|stop|restart|status|uninstall]
+    ./install.sh [start|stop|restart|status|preflight|uninstall]
 
 OPTIONS
     (no arguments)    Install or update dependencies and start
@@ -52,6 +52,7 @@ OPTIONS
     --stop            Stop the managed service
     --restart         Restart the managed service
     --status          Show process, URL, health, and log locations
+    --preflight       Read-only install and retained-data compatibility check
     --uninstall       Remove the virtual environment and runtime files
     --force-yes       Skip the uninstall confirmation
     --purge-data      With --uninstall, also remove local secrets and artifacts
@@ -70,6 +71,7 @@ EXAMPLES
     ./install.sh --setup-models --install-ollama --pull-models
     ./install.sh --restart
     ./install.sh --status
+    ./install.sh --preflight
     ./install.sh --uninstall --force-yes
 
 DEFAULT WORKSPACE
@@ -80,8 +82,8 @@ EOF
 parse_args() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            start|stop|restart|status|uninstall) COMMAND="$1" ;;
-            --start|--stop|--restart|--status|--uninstall) COMMAND="${1#--}" ;;
+            start|stop|restart|status|preflight|uninstall) COMMAND="$1" ;;
+            --start|--stop|--restart|--status|--preflight|--uninstall) COMMAND="${1#--}" ;;
             -h|--help) COMMAND="help" ;;
             --public_only|--public-only) PUBLIC_ONLY="yes" ;;
             --force-yes) FORCE_YES="yes" ;;
@@ -139,12 +141,40 @@ run_pip() {
 installation_current() {
     find_python
     [[ -x "$VENV_PYTHON" && -f "$MANIFEST_FILE" ]] || return 1
-    "$VENV_PYTHON" - "$MANIFEST_FILE" "$INSTALL_DIR/pyproject.toml" "$VERSION" <<'PY' >/dev/null 2>&1
+    local source_hash
+    source_hash="$("$PYTHON_CMD" "$INSTALL_DIR/src/splunk_security_agent/upgrade_readiness.py" \
+        --root "$INSTALL_DIR" --source-digest)"
+    "$VENV_PYTHON" - "$MANIFEST_FILE" "$INSTALL_DIR/pyproject.toml" "$VERSION" \
+        "$source_hash" <<'PY' >/dev/null 2>&1
 import hashlib, json, pathlib, sys
 manifest = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
 digest = hashlib.sha256(pathlib.Path(sys.argv[2]).read_bytes()).hexdigest()
-raise SystemExit(0 if manifest.get("version") == sys.argv[3] and manifest.get("project_hash") == digest else 1)
+current = (
+    manifest.get("manifest_schema") == 2
+    and manifest.get("version") == sys.argv[3]
+    and manifest.get("project_hash") == digest
+    and manifest.get("source_hash") == sys.argv[4]
+)
+raise SystemExit(0 if current else 1)
 PY
+}
+
+upgrade_preflight() {
+    local record="${1:-no}"
+    find_python
+    local args=(
+        "$INSTALL_DIR/src/splunk_security_agent/upgrade_readiness.py"
+        --root "$INSTALL_DIR"
+        --data-dir "$INSTALL_DIR/data"
+        --manifest "$MANIFEST_FILE"
+        --target-version "$VERSION"
+    )
+    [[ "$record" == "yes" ]] && args+=(--record)
+    info "Running install and retained-data compatibility preflight..."
+    if ! "$PYTHON_CMD" "${args[@]}"; then
+        fail "Upgrade preflight blocked this installation. Resolve the reported checks first."
+        exit 1
+    fi
 }
 
 install_dependencies() {
@@ -152,6 +182,12 @@ install_dependencies() {
     local python_version
     python_version="$("$PYTHON_CMD" --version 2>&1 | awk '{print $2}')"
     success "Python $python_version found"
+    if [[ -x "$VENV_PYTHON" ]] && ! "$VENV_PYTHON" -c \
+        'import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)'; then
+        warn "The existing virtual environment uses an unsupported Python; rebuilding it..."
+        case "$VENV_DIR" in "$INSTALL_DIR"/*) ;; *) fail "Unsafe virtual environment path."; exit 1 ;; esac
+        rm -rf -- "$VENV_DIR"
+    fi
     if [[ ! -x "$VENV_PYTHON" ]]; then
         info "Creating isolated virtual environment..."
         "$PYTHON_CMD" -m venv "$VENV_DIR"
@@ -164,18 +200,25 @@ install_dependencies() {
     fi
     info "Installing SignalRoom and dependencies..."
     run_pip "SignalRoom installation" install -e "$INSTALL_DIR" -q
-    local pip_version project_hash
+    local pip_version project_hash source_hash
     pip_version="$("$VENV_PYTHON" -m pip --version | awk '{print $2}')"
     project_hash="$("$VENV_PYTHON" -c 'import hashlib, pathlib, sys; print(hashlib.sha256(pathlib.Path(sys.argv[1]).read_bytes()).hexdigest())' "$INSTALL_DIR/pyproject.toml")"
-    "$VENV_PYTHON" - "$MANIFEST_FILE" "$VERSION" "$project_hash" "$python_version" "$pip_version" "$VENV_DIR" "$PORT" "$(detect_os)" <<'PY'
+    source_hash="$("$PYTHON_CMD" "$INSTALL_DIR/src/splunk_security_agent/upgrade_readiness.py" \
+        --root "$INSTALL_DIR" --source-digest)"
+    "$VENV_PYTHON" - "$MANIFEST_FILE" "$VERSION" "$project_hash" "$python_version" \
+        "$pip_version" "$VENV_DIR" "$PORT" "$(detect_os)" "$source_hash" <<'PY'
 import json, pathlib, sys
 from datetime import datetime, timezone
 pathlib.Path(sys.argv[1]).write_text(json.dumps({
-    "version": sys.argv[2], "project_hash": sys.argv[3],
+    "manifest_schema": 2, "version": sys.argv[2], "project_hash": sys.argv[3],
+    "source_hash": sys.argv[9],
     "installed_at": datetime.now(timezone.utc).isoformat(), "os": sys.argv[8],
     "python": {"version": sys.argv[4], "executable": sys.argv[6]},
     "pip": {"version": sys.argv[5]}, "virtual_env": sys.argv[6],
+    "install_root": str(pathlib.Path(sys.argv[1]).resolve().parent),
+    "data_dir": str(pathlib.Path(sys.argv[1]).resolve().parent / "data"),
     "preferred_port": int(sys.argv[7]),
+    "compatibility": {"policy": "same-major-minor", "preflight_required": True},
 }, indent=2), encoding="utf-8")
 PY
     success "SignalRoom installation is up to date."
@@ -222,7 +265,16 @@ open_workspace() {
 }
 
 start_signalroom() {
-    if ! installation_current; then install_dependencies; fi
+    if ! installation_current; then
+        upgrade_preflight yes
+        local upgrade_pid=""
+        upgrade_pid="$(managed_pid 2>/dev/null || true)"
+        if [[ -n "$upgrade_pid" ]] && ps -p "$upgrade_pid" >/dev/null 2>&1; then
+            info "Preflight passed; stopping the owned SignalRoom process before dependency refresh..."
+            stop_signalroom
+        fi
+        install_dependencies
+    fi
     local existing=""
     existing="$(managed_pid 2>/dev/null || true)"
     if [[ -n "$existing" ]] && ps -p "$existing" >/dev/null 2>&1; then
@@ -368,8 +420,14 @@ main() {
             if [[ "$SETUP_MODELS" == "yes" || "$INSTALL_OLLAMA" == "yes" || "$PULL_MODELS" == "yes" ]]; then setup_models; fi
             ;;
         stop) stop_signalroom ;;
-        restart) stop_signalroom; sleep 1; start_signalroom ;;
+        restart)
+            if ! installation_current; then upgrade_preflight; fi
+            stop_signalroom
+            sleep 1
+            start_signalroom
+            ;;
         status) show_status ;;
+        preflight) upgrade_preflight ;;
         uninstall) uninstall_signalroom ;;
         "")
             info "=================================================="

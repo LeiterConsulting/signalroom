@@ -1,0 +1,16 @@
+.git/
+.github/
+.venv/
+.pytest_cache/
+.ruff_cache/
+.tmp/
+__pycache__/
+*.py[cod]
+*.log
+.env
+.install_manifest.json
+.signalroom.pid
+.signalroom.runtime.json
+data/
+tests/
+services/
