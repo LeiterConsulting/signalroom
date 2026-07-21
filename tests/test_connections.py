@@ -180,6 +180,49 @@ def test_services_construct_alias_specific_client_and_agent(tmp_path: Path, monk
     )
 
 
+def test_connection_overview_includes_current_secret_free_diagnostic(tmp_path: Path, monkeypatch) -> None:
+    from splunk_security_agent import app as app_module
+
+    monkeypatch.setattr(app_module, "DATA", tmp_path / "service-data")
+    services = app_module.Services()
+    connection = _connection(
+        name="Lab Splunk",
+        url="http://192.168.1.52:8089/services/mcp",
+        verify=False,
+    )
+    draft = services.connection_registry.upsert_managed(
+        "lab-splunk", "tenant.lab", connection, credentials_changed=True
+    )
+    services.config.update_secrets(**{"splunk_token:lab-splunk": "encrypted-secret"})
+    services.connection_diagnostics_store.record(
+        {
+            "checked_at": "2026-07-21T12:00:00+00:00",
+            "endpoint": connection.url,
+            "ready": False,
+            "connection_alias": "lab-splunk",
+            "connection_fingerprint": draft["fingerprint"],
+            "blocking_stage": "mcp",
+            "tool_count": 0,
+            "stages": [
+                {
+                    "id": "mcp",
+                    "label": "MCP initialization",
+                    "status": "error",
+                    "detail": "Protocol mismatch.",
+                    "remediation": "Use HTTPS.",
+                }
+            ],
+        }
+    )
+
+    item = services.connection_overview()["managed_splunk_connections"][0]
+
+    assert item["latest_diagnostic"]["current_revision"] is True
+    assert item["latest_diagnostic"]["blocking_stage"] == "mcp"
+    assert item["latest_diagnostic"]["stages"][0]["remediation"] == "Use HTTPS."
+    assert "encrypted-secret" not in str(item)
+
+
 def test_rebinding_pauses_schedules_and_assurance_with_exact_concurrency(tmp_path: Path):
     registry = ConnectionRegistryStore(tmp_path / "connections.db")
     first = registry.sync_primary(_connection(), demo_mode=False)

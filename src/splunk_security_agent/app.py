@@ -449,13 +449,33 @@ class Services:
                 ),
             }
         )
-        result["managed_splunk_connections"] = [
-            {
-                **item,
-                "token_configured": bool(self.config.secret(f"splunk_token:{item['alias']}")),
-            }
-            for item in result.get("managed_splunk_connections", [])
-        ]
+        managed_connections: list[dict[str, Any]] = []
+        for item in result.get("managed_splunk_connections", []):
+            latest = self.connection_diagnostics_store.latest(str(item["alias"]))
+            diagnostic = None
+            if latest:
+                diagnostic = {
+                    "checked_at": latest.get("checked_at"),
+                    "ready": bool(latest.get("ready")),
+                    "current_revision": (
+                        latest.get("connection_fingerprint") == item.get("fingerprint")
+                    ),
+                    "blocking_stage": latest.get("blocking_stage"),
+                    "tool_count": int(latest.get("tool_count") or 0),
+                    "depth_readiness": latest.get("depth_readiness") or {},
+                    "missing_by_depth": latest.get("missing_by_depth") or {},
+                    "stages": latest.get("stages") or [],
+                }
+            managed_connections.append(
+                {
+                    **item,
+                    "token_configured": bool(
+                        self.config.secret(f"splunk_token:{item['alias']}")
+                    ),
+                    "latest_diagnostic": diagnostic,
+                }
+            )
+        result["managed_splunk_connections"] = managed_connections
         if allowed_connection_ids is not None:
             result["execution_scopes"] = [
                 item
@@ -1047,7 +1067,12 @@ def _recovery_frozen_response() -> JSONResponse:
 async def sensitive_cache_control(request: Request, call_next: Any) -> Response:
     response = await call_next(request)
     if request.url.path.startswith(
-        ("/api/recovery", "/api/discovery/review-packets", "/api/audit-operations")
+        (
+            "/api/recovery",
+            "/api/discovery/review-packets",
+            "/api/audit-operations",
+            "/api/connections",
+        )
     ):
         response.headers["Cache-Control"] = "no-store"
     return response

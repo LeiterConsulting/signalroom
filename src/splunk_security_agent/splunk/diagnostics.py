@@ -191,6 +191,7 @@ class SplunkConnectionDiagnostics:
             return self._finish(connection, checked_at, stages, binding=binding)
         host = parsed.hostname
         port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        likely_https_management_port = parsed.scheme == "http" and port == 8089
         if not parsed.path.rstrip("/").endswith("/services/mcp"):
             stages.append(
                 self._stage(
@@ -199,6 +200,24 @@ class SplunkConnectionDiagnostics:
                     "warning",
                     f"The configured path is {parsed.path or '/'}; the common path is /services/mcp.",
                     remediation="Confirm the exact path in the Splunk MCP Server app.",
+                )
+            )
+        elif likely_https_management_port:
+            stages.append(
+                self._stage(
+                    "configuration",
+                    "Endpoint configuration",
+                    "warning",
+                    (
+                        f"HTTP is configured for {host}:8089, but Splunk's management port "
+                        "normally requires HTTPS."
+                    ),
+                    remediation=(
+                        f"Change the endpoint to https://{host}:8089{parsed.path}. "
+                        "For a trusted self-signed certificate, keep HTTPS and disable certificate "
+                        "verification or configure a private CA bundle."
+                    ),
+                    metadata={"verify_tls": connection.verify_ssl, "custom_ca": False},
                 )
             )
         else:
@@ -342,14 +361,15 @@ class SplunkConnectionDiagnostics:
         )
         health = await client.health()
         if not health.get("ok"):
+            error = str(health.get("error") or "The MCP endpoint rejected initialization.")
             stages.append(
                 self._stage(
                     "mcp",
                     "MCP initialization",
                     "error",
-                    str(health.get("error") or "The MCP endpoint rejected initialization."),
+                    self._mcp_failure_detail(error, parsed.scheme, port),
                     duration_ms=self._duration(started),
-                    remediation=self._mcp_remediation(str(health.get("error") or "")),
+                    remediation=self._mcp_remediation(error, parsed.scheme, port, host, parsed.path),
                 )
             )
             return self._finish(connection, checked_at, stages, binding=binding)
@@ -556,8 +576,33 @@ class SplunkConnectionDiagnostics:
         return str(exc).replace("\n", " ")[:500] or exc.__class__.__name__
 
     @staticmethod
-    def _mcp_remediation(error: str) -> str:
+    def _mcp_failure_detail(error: str, scheme: str = "", port: int = 0) -> str:
+        if scheme == "http" and port == 8089 and "illegal request line" in error.lower():
+            return (
+                "The TCP path is open, but the endpoint returned TLS bytes to a plain HTTP request. "
+                "This is a protocol mismatch, not a certificate-verification failure."
+            )
+        return error or "The MCP endpoint rejected initialization."
+
+    @staticmethod
+    def _mcp_remediation(
+        error: str,
+        scheme: str = "",
+        port: int = 0,
+        host: str = "",
+        path: str = "/services/mcp",
+    ) -> str:
         lowered = error.lower()
+        if scheme == "http" and port == 8089 and (
+            "illegal request line" in lowered
+            or "wrong version number" in lowered
+            or "invalid http" in lowered
+        ):
+            target = f"https://{host}:8089{path or '/services/mcp'}" if host else "an https:// URL"
+            return (
+                f"Edit this connection to use {target}. Disabling TLS verification does not disable "
+                "HTTPS; it only permits a trusted self-signed certificate. Then run diagnostics again."
+            )
         if "authentication" in lowered or "401" in lowered or "403" in lowered:
             return "Replace the MCP token and confirm that its Splunk role can execute MCP tools."
         if "not found" in lowered or "404" in lowered or "post requests" in lowered:

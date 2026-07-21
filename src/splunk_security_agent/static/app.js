@@ -1351,12 +1351,34 @@ function renderManagedSplunkConnections() {
     const assignment = !state.auth?.enabled || assigned.has(item.alias)
       ? 'Available to this operator'
       : 'Not assigned to this signed-in user';
+    const diagnostic = item.latest_diagnostic;
+    const currentDiagnostic = Boolean(diagnostic?.current_revision);
+    const failedStage = currentDiagnostic
+      ? (diagnostic.stages || []).find(stage => stage.status === 'error')
+      : null;
+    const warningStages = currentDiagnostic
+      ? (diagnostic.stages || []).filter(stage => stage.status === 'warning')
+      : [];
+    const progressId = `managed-splunk-progress-${item.alias}`;
+    const progressMarkup = ready
+      ? `<b>Connection contract passed</b><span>The exact current revision exposes ${Number(diagnostic?.tool_count || 0).toLocaleString()} MCP tools and satisfies quick discovery.</span>`
+      : failedStage
+        ? `<b>Blocked at ${escapeHtml(failedStage.label || diagnostic.blocking_stage || 'connection preflight')}</b><span>${escapeHtml(failedStage.detail || 'The connection contract did not pass.')}</span>${failedStage.remediation ? `<strong>Next action: ${escapeHtml(failedStage.remediation)}</strong>` : ''}`
+        : currentDiagnostic
+          ? '<b>Connection contract did not pass</b><span>Review the diagnostic stages below, correct the blocker, and run diagnostics again.</span>'
+          : diagnostic
+            ? '<b>The saved diagnostic belongs to an older revision</b><span>Run diagnostics against the exact endpoint and trust settings shown here.</span>'
+            : '<b>Diagnostics required</b><span>Run configuration, DNS, TCP, TLS, MCP authentication, and tool-contract checks before enabling this scope.</span>';
+    const diagnosticsMarkup = currentDiagnostic && diagnostic?.stages?.length
+      ? `<details class="managed-splunk-diagnostics" ${failedStage ? 'open' : ''}><summary>Diagnostic evidence · ${diagnostic.stages.length} stages${warningStages.length ? ` · ${warningStages.length} warning${warningStages.length === 1 ? '' : 's'}` : ''}</summary><div class="diagnostic-stages">${diagnostic.stages.map(diagnosticStageMarkup).join('')}</div></details>`
+      : '';
     return `<article class="managed-splunk-card ${statusClass}" data-managed-splunk="${escapeHtml(item.alias)}">
       <header><div><span>${escapeHtml(status)}</span><h5>${escapeHtml(item.display_name || item.alias)}</h5><small><code>${escapeHtml(item.alias)}</code> · ${escapeHtml(item.tenant_scope_id)}</small></div><b>${item.verify_tls ? 'TLS verified' : 'TLS unverified'}</b></header>
       <p>${escapeHtml(item.endpoint)} · revision <code>${escapeHtml(shortFingerprint(item.fingerprint))}</code>${item.ca_bundle_bound ? ' · private CA bound' : ''}</p>
       <div class="managed-splunk-contract"><span>${item.token_configured ? 'Encrypted token stored' : 'Token missing'}</span><span>${escapeHtml(assignment)}</span><span>${item.diagnostics_checked_at ? `Last checked ${escapeHtml(new Date(item.diagnostics_checked_at).toLocaleString())}` : 'Never checked'}</span></div>
-      <div class="managed-splunk-progress" data-managed-splunk-progress role="status" aria-live="polite">${ready ? 'The exact current revision passed the quick discovery tool contract.' : 'Run diagnostics before this connection can enter an execution selector.'}</div>
-      <footer><button class="button ghost small" type="button" data-diagnose-managed-splunk="${escapeHtml(item.alias)}">Run diagnostics</button>${item.enabled ? `<button class="button ghost small" type="button" data-admit-managed-splunk="${escapeHtml(item.alias)}" data-enabled="false">Disable</button>` : `<button class="button primary small" type="button" data-admit-managed-splunk="${escapeHtml(item.alias)}" data-enabled="true" ${ready ? '' : 'disabled'}>Enable scope</button>`}<button class="button ghost small" type="button" data-edit-managed-splunk="${escapeHtml(item.alias)}">Edit</button><button class="button ghost small danger-action" type="button" data-archive-managed-splunk="${escapeHtml(item.alias)}">Archive</button></footer>
+      <div class="managed-splunk-progress ${failedStage ? 'blocked' : ready ? 'ready' : ''}" id="${escapeHtml(progressId)}" data-managed-splunk-progress role="status" aria-live="polite">${progressMarkup}</div>
+      ${diagnosticsMarkup}
+      <footer><button class="button ghost small" type="button" data-diagnose-managed-splunk="${escapeHtml(item.alias)}">Run diagnostics</button>${item.enabled ? `<button class="button ghost small" type="button" data-admit-managed-splunk="${escapeHtml(item.alias)}" data-enabled="false">Disable</button>` : ready ? `<button class="button primary small" type="button" data-admit-managed-splunk="${escapeHtml(item.alias)}" data-enabled="true" data-ready="true">Enable scope</button>` : `<button class="button ghost small" type="button" data-admit-managed-splunk="${escapeHtml(item.alias)}" data-enabled="true" data-ready="false" aria-describedby="${escapeHtml(progressId)}">Why Enable is locked</button>`}<button class="button ghost small" type="button" data-edit-managed-splunk="${escapeHtml(item.alias)}">Edit</button><button class="button ghost small danger-action" type="button" data-archive-managed-splunk="${escapeHtml(item.alias)}">Archive</button></footer>
     </article>`;
   }).join('') : '<div class="empty-inline compact-empty">No additional Splunk instances are configured. Primary remains the only execution scope.</div>';
 }
@@ -1437,14 +1459,21 @@ async function diagnoseManagedSplunk(alias, button) {
     const result = await streamApi(`/api/connections/splunk/${encodeURIComponent(alias)}/diagnostics/stream`, {}, event => {
       if (event.type === 'progress' || event.type === 'heartbeat') output.textContent = `${event.label || 'Working'} · ${event.detail || ''}`;
     });
-    output.textContent = result.ready ? `Ready · ${result.tool_count || 0} MCP tools satisfy quick discovery.` : `Blocked at ${String(result.blocking_stage || 'preflight').replaceAll('-', ' ')}.`;
     await loadConnections();
-    toast(result.ready ? 'Connection revision is ready for explicit admission' : 'Connection remains disabled');
+    toast(result.ready ? 'Connection revision is ready for explicit admission' : `Connection blocked at ${String(result.blocking_stage || 'preflight').replaceAll('-', ' ')} · review the saved diagnostic evidence`);
   } catch (error) { output.textContent = error.message; }
   finally { button.disabled = false; }
 }
 
 async function setManagedSplunkAdmission(alias, enabled, button) {
+  if (enabled && button.dataset.ready !== 'true') {
+    const card = button.closest('[data-managed-splunk]');
+    const diagnostic = (state.connections?.managed_splunk_connections || []).find(item => item.alias === alias)?.latest_diagnostic;
+    const failed = diagnostic?.current_revision ? (diagnostic.stages || []).find(stage => stage.status === 'error') : null;
+    card?.querySelector('.managed-splunk-diagnostics')?.setAttribute('open', '');
+    toast(failed?.remediation || 'Run successful diagnostics against this exact connection revision before enabling it.');
+    return;
+  }
   button.disabled = true;
   try {
     await api(`/api/connections/splunk/${encodeURIComponent(alias)}/admission`, {method:'PATCH',body:JSON.stringify({enabled})});

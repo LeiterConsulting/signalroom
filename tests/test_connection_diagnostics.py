@@ -70,3 +70,21 @@ async def test_invalid_endpoint_stops_before_network_and_is_durable(tmp_path):
     assert result["blocking_stage"] == "configuration"
     assert len(result["stages"]) == 1
     assert store.latest()["id"] == result["id"]
+
+
+def test_http_management_port_protocol_mismatch_has_actionable_remediation(tmp_path):
+    diagnostics = SplunkConnectionDiagnostics(
+        ConnectionDiagnosticsStore(tmp_path / "connections.db")
+    )
+    error = "Unable to reach the Splunk MCP endpoint: illegal request line"
+
+    assert "protocol mismatch" in diagnostics._mcp_failure_detail(error, "http", 8089)
+    remediation = diagnostics._mcp_remediation(
+        error,
+        "http",
+        8089,
+        "192.168.1.52",
+        "/services/mcp",
+    )
+    assert "https://192.168.1.52:8089/services/mcp" in remediation
+    assert "Disabling TLS verification does not disable HTTPS" in remediation
