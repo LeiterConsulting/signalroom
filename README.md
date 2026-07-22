@@ -4,6 +4,8 @@ SignalRoom is a local-first analyst workspace and MCP server for evidence-led Sp
 
 This is a focused reimplementation inspired by [LeiterConsulting/splunk-discovery-tool](https://github.com/LeiterConsulting/splunk-discovery-tool), not a fork. It preserves the useful product patterns—durable discovery artifacts, a managed SPL/context library, MCP tool aliasing, encrypted credentials, and deterministic chat routes—while separating them into smaller modules and adding task-specific Ollama/Hugging Face model routing.
 
+For a quick technical walkthrough of how a prompt becomes a governed Splunk/MCP and model-backed response, see [How SignalRoom model orchestration works — TL;DR](docs/MODEL_ORCHESTRATION_TLDR.md).
+
 ## What works now
 
 - A polished local web workspace with setup, investigation chat, discovery, durable cases, context, and model views
