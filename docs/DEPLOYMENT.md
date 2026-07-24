@@ -51,6 +51,14 @@ For a terminal-driven deployment:
 
 External installation and model downloads are always opt-in. Local SecureBERT installation is initiated from Setup so the operator sees the exact profile, purpose, and progress. On macOS, `--install-ollama` opens the signed app download; finish the app installation and rerun with `--pull-models`.
 
+For a non-mutating model-preparation audit on Linux or macOS, run:
+
+```bash
+./install.sh --diagnose_all
+```
+
+The collector runs from the system Python so it remains usable when `.venv`, pip, PyTorch, or Transformers is incomplete. It writes `signalroom-diagnose-all.log` in the installation root and returns a non-zero status when it observes a blocker. It never reads the credential vault or dumps environment variables. See [Model installation diagnostics](MODEL_DIAGNOSTICS.md).
+
 After installing and evaluating models, use **Models → Local model supply chain** to approve each exact
 artifact. The default audit mode is appropriate while proving the deployment. Before selecting enforcement,
 approve the currently configured general and security-reasoning routes; SignalRoom will reject the transition
@@ -274,6 +282,7 @@ Useful commands:
 ```bash
 ./install.sh --status
 ./install.sh --preflight
+./install.sh --diagnose_all
 ./install.sh --restart
 ./install.sh --stop
 ./install.sh --start --open-browser
@@ -299,6 +308,7 @@ All lifecycle files stay inside the repository:
 | `.signalroom.runtime.json` | Actual host, port, URL, and start time |
 | `signalroom.log` | Standard output |
 | `signalroom.err.log` | Server and startup errors |
+| `signalroom-diagnose-all.log` | Redacted, non-mutating installation and model-preparation diagnostic report |
 | `data/` | Configuration, encrypted secrets, evidence database, and artifacts |
 | `data/discovery_jobs.db` | Durable manual discovery queue, progress, cancellation, recovery, and compact results |
 | `data/estate_reviews.db` | Content-free immutable multi-estate review references, alignment decisions, and lifecycle state |

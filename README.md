@@ -74,6 +74,7 @@ Lifecycle commands intentionally mirror the Splunk Discovery Tool:
 | Start/install | `.\install.ps1 -Start` | `./install.sh --start` |
 | Status | `.\install.ps1 -Status` | `./install.sh --status` |
 | Compatibility preflight | `.\install.ps1 -Preflight` | `./install.sh --preflight` |
+| Diagnose model preparation | Run the Python collector directly | `./install.sh --diagnose_all` |
 | Restart | `.\install.ps1 -Restart` | `./install.sh --restart` |
 | Stop | `.\install.ps1 -Stop` | `./install.sh --stop` |
 | Uninstall environment | `.\install.ps1 -Uninstall` | `./install.sh --uninstall` |
@@ -399,6 +400,14 @@ For scripted setup, install SignalRoom and then explicitly install Ollama and do
 ```
 
 The macOS flag opens Ollama's signed app download because its supported installation is interactive; rerun with `--pull-models` after starting the app. Model downloads can consume several gigabytes, so neither installer downloads them unless requested.
+
+If model installation or readiness is unclear on macOS or Linux, run:
+
+```bash
+./install.sh --diagnose_all
+```
+
+The command makes no configuration changes and installs or downloads nothing. It tests the host and virtual-environment architecture, dependency consistency, binary-wheel availability, public Hugging Face model metadata, local model artifacts, Ollama CLI/app/process/HTTP state, the running SignalRoom readiness API when available, and redacted tails of the existing service logs. The attachment-friendly result is written to `signalroom-diagnose-all.log`; a non-zero exit means at least one blocker was observed. See [Model installation diagnostics](docs/MODEL_DIAGNOSTICS.md) for the complete contract.
 
 The equivalent manual commands are:
 
