@@ -294,6 +294,35 @@ Useful commands:
 
 Positional verbs also work: `./install.sh status`.
 
+### Apple Silicon Python compatibility
+
+SignalRoom checks the physical Mac architecture independently from the architecture reported by the current
+shell. When Apple Silicon hardware is using Intel `x86_64` Python through Rosetta, current PyTorch releases
+cannot supply the macOS wheel required by the local Transformers and SecureBERT runtime.
+
+During an interactive install, SignalRoom explains the limitation and asks:
+
+```text
+Install native Apple Silicon Homebrew and Python 3.13 now? Type "yes" to continue:
+```
+
+Approval runs Homebrew's official installer under an arm64 process when `/opt/homebrew` is absent, installs the
+native `python@3.13` formula, verifies that Python reports `arm64`, and rebuilds an existing Intel `.venv`. It
+does not remove an existing `/usr/local` Intel Homebrew installation or retained SignalRoom data.
+
+For scripted installation, express the decision explicitly:
+
+```bash
+# Approve native Homebrew/Python installation when required.
+./install.sh --install-native-python
+
+# Keep Intel Python and accept that local Transformers/SecureBERT will be unavailable.
+./install.sh --allow-rosetta-python
+```
+
+Without a terminal or either flag, the installer stops with remediation instructions instead of waiting for
+input. The two flags are mutually exclusive.
+
 ## Runtime files
 
 All lifecycle files stay inside the repository:

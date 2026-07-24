@@ -52,6 +52,12 @@ For a quick technical walkthrough of how a prompt becomes a governed Splunk/MCP 
 
 Python 3.11 or later is the only prerequisite. The universal installer creates an isolated environment, installs dependencies, starts SignalRoom in the background, checks its health, and prints the workspace URL.
 
+On Apple Silicon, the macOS installer verifies the Python CPU architecture as well as its version. If only Intel
+Python is available through Rosetta, SignalRoom explains that core/Ollama features can run but local
+Transformers and SecureBERT cannot, then asks for explicit approval before installing native Homebrew and
+Python 3.13. Scripted installs can provide that approval with `--install-native-python`; operators who knowingly
+want the limited Intel environment can use `--allow-rosetta-python`.
+
 ### Windows
 
 ```powershell
@@ -81,6 +87,7 @@ Lifecycle commands intentionally mirror the Splunk Discovery Tool:
 | Public PyPI only | `.\install.ps1 -PublicOnly` | `./install.sh --public_only` |
 | Check model readiness | `.\install.ps1 -SetupModels` | `./install.sh --setup-models` |
 | Install Ollama and pull models | `.\install.ps1 -InstallOllama -PullModels` | `./install.sh --install-ollama --pull-models` |
+| Approve native Python repair | Not applicable | `./install.sh --install-native-python` |
 
 See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for lifecycle operations and
 [docs/UPGRADES.md](docs/UPGRADES.md) for the admitted upgrade, rollback, retained-data, and container matrix.

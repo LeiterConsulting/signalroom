@@ -222,18 +222,37 @@ class DiagnoseAll:
         )
         if platform.system() == "Darwin":
             uname_machine = self._command_text(["uname", "-m"], timeout=5).strip()
-            if uname_machine and uname_machine != platform.machine():
+            arm64_capable = self._command_text(
+                ["/usr/sbin/sysctl", "-in", "hw.optional.arm64"],
+                timeout=5,
+            ).strip()
+            translated = self._command_text(
+                ["/usr/sbin/sysctl", "-in", "sysctl.proc_translated"],
+                timeout=5,
+            ).strip()
+            process_machine = platform.machine()
+            if arm64_capable == "1" and process_machine != "arm64":
+                log.record(
+                    "WARN",
+                    "Apple Silicon is using Intel Python under Rosetta",
+                    f"hardware=arm64 · process={process_machine} · uname={uname_machine or 'unknown'} "
+                    f"· translated={translated or 'unknown'}. Local Transformers and SecureBERT "
+                    "require native arm64 Python because compatible PyTorch macOS Intel wheels "
+                    "are unavailable.",
+                )
+            elif uname_machine and uname_machine != process_machine:
                 log.record(
                     "WARN",
                     "macOS process architecture differs from the kernel architecture",
-                    f"process={platform.machine()} · kernel={uname_machine}. "
+                    f"process={process_machine} · kernel={uname_machine}. "
                     "Rosetta or mixed-architecture Python can prevent compatible wheels from loading.",
                 )
             else:
                 log.record(
                     "PASS",
                     "macOS architecture is internally consistent",
-                    f"architecture={uname_machine or platform.machine()}",
+                    f"hardware={'arm64' if arm64_capable == '1' else uname_machine or process_machine} "
+                    f"· process={process_machine} · translated={translated or '0'}",
                 )
 
     def _installation(self, log: DiagnosticLog) -> None:
