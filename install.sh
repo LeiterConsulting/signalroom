@@ -22,8 +22,12 @@ OPEN_BROWSER="no"
 SETUP_MODELS="no"
 INSTALL_OLLAMA="no"
 PULL_MODELS="no"
+INSTALL_NATIVE_PYTHON="no"
+ALLOW_ROSETTA_PYTHON="no"
 PORT="8003"
 BIND_ADDRESS="127.0.0.1"
+PYTHON_CMD=""
+VENV_PYTHON=""
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;36m'; NC='\033[0m'
 info() { printf "%b%s%b\n" "$BLUE" "$1" "$NC"; }
@@ -66,6 +70,10 @@ OPTIONS
     --setup-models    Check Ollama and Hugging Face model readiness
     --install-ollama  Explicitly install Ollama from ollama.com
     --pull-models     Download the configured Ollama model profiles
+    --install-native-python
+                      On Apple Silicon, approve native Homebrew/Python installation
+    --allow-rosetta-python
+                      Continue on Apple Silicon with Intel Python; local Transformers unavailable
     --help            Show this help
 
 EXAMPLES
@@ -99,6 +107,8 @@ parse_args() {
             --setup-models) SETUP_MODELS="yes" ;;
             --install-ollama) INSTALL_OLLAMA="yes" ;;
             --pull-models) PULL_MODELS="yes" ;;
+            --install-native-python) INSTALL_NATIVE_PYTHON="yes" ;;
+            --allow-rosetta-python) ALLOW_ROSETTA_PYTHON="yes" ;;
             --port)
                 shift; [[ $# -gt 0 ]] || { fail "--port requires a value"; exit 1; }; PORT="$1"
                 ;;
@@ -112,20 +122,164 @@ parse_args() {
         shift
     done
     [[ "$PORT" =~ ^[0-9]+$ ]] || { fail "Port must be a number."; exit 1; }
+    if [[ "$INSTALL_NATIVE_PYTHON" == "yes" && "$ALLOW_ROSETTA_PYTHON" == "yes" ]]; then
+        fail "--install-native-python and --allow-rosetta-python cannot be used together."
+        exit 1
+    fi
+}
+
+sysctl_value() {
+    local sysctl_command=""
+    if [[ -x /usr/sbin/sysctl ]]; then sysctl_command="/usr/sbin/sysctl"
+    elif command -v sysctl >/dev/null 2>&1; then sysctl_command="$(command -v sysctl)"
+    else return 1
+    fi
+    "$sysctl_command" -in "$1" 2>/dev/null
+}
+
+macos_is_apple_silicon() {
+    [[ "$(detect_os)" == "macOS" ]] || return 1
+    [[ "$(sysctl_value hw.optional.arm64 || true)" == "1" ]]
+}
+
+python_is_supported() {
+    local candidate="$1"
+    [[ -x "$candidate" ]] || return 1
+    "$candidate" -c \
+        'import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)' \
+        >/dev/null 2>&1
+}
+
+python_architecture() {
+    "$1" -c 'import platform; print(platform.machine())' 2>/dev/null
+}
+
+native_macos_python() {
+    local candidate=""
+    for candidate in \
+        "${SIGNALROOM_PYTHON:-}" \
+        "/opt/homebrew/opt/python@3.13/libexec/bin/python3" \
+        "/opt/homebrew/bin/python3.13" \
+        "/opt/homebrew/bin/python3"; do
+        [[ -n "$candidate" ]] || continue
+        if python_is_supported "$candidate" && \
+            [[ "$(python_architecture "$candidate")" == "arm64" ]]; then
+            printf "%s" "$candidate"
+            return 0
+        fi
+    done
+    return 1
 }
 
 find_python() {
-    if command -v python3 >/dev/null 2>&1; then PYTHON_CMD="$(command -v python3)"
+    local native_python=""
+    if macos_is_apple_silicon; then
+        native_python="$(native_macos_python || true)"
+    fi
+    if [[ -n "$native_python" ]]; then PYTHON_CMD="$native_python"
+    elif [[ -n "${SIGNALROOM_PYTHON:-}" ]]; then PYTHON_CMD="$SIGNALROOM_PYTHON"
+    elif command -v python3 >/dev/null 2>&1; then PYTHON_CMD="$(command -v python3)"
     elif command -v python >/dev/null 2>&1; then PYTHON_CMD="$(command -v python)"
     else fail "Python 3.11+ was not found."; exit 1
     fi
-    if ! "$PYTHON_CMD" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)'; then
+    if ! python_is_supported "$PYTHON_CMD"; then
         fail "SignalRoom requires Python 3.11 or newer."
         exit 1
     fi
     if [[ "$(detect_os)" == "Windows" ]]; then VENV_PYTHON="$VENV_DIR/Scripts/python.exe"
     else VENV_PYTHON="$VENV_DIR/bin/python"
     fi
+}
+
+install_native_macos_python() {
+    [[ -x /usr/bin/arch ]] || {
+        fail "macOS native-architecture launcher /usr/bin/arch is unavailable."
+        exit 1
+    }
+    if [[ ! -x /opt/homebrew/bin/brew ]]; then
+        command -v curl >/dev/null 2>&1 || {
+            fail "curl is required to install native Homebrew and Python."
+            exit 1
+        }
+        warn "Native Homebrew is not installed at /opt/homebrew."
+        info "SignalRoom will run Homebrew's official installer, then install Python 3.13."
+        info "The Homebrew installer shows its changes and may request your macOS password."
+        local installer=""
+        installer="$(mktemp "${TMPDIR:-/tmp}/signalroom-homebrew.XXXXXX")"
+        if ! curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh \
+            -o "$installer"; then
+            rm -f -- "$installer"
+            fail "The official Homebrew installer could not be downloaded."
+            exit 1
+        fi
+        if [[ -t 0 ]]; then
+            if ! /usr/bin/arch -arm64 /bin/bash "$installer"; then
+                rm -f -- "$installer"
+                fail "Native Homebrew installation failed."
+                exit 1
+            fi
+        elif ! NONINTERACTIVE=1 /usr/bin/arch -arm64 /bin/bash "$installer"; then
+            rm -f -- "$installer"
+            fail "Native Homebrew installation failed in non-interactive mode."
+            exit 1
+        fi
+        rm -f -- "$installer"
+    fi
+
+    info "Installing native Apple Silicon Python 3.13..."
+    if ! /usr/bin/arch -arm64 /opt/homebrew/bin/brew install python@3.13; then
+        fail "Native Python 3.13 installation failed."
+        exit 1
+    fi
+    local native_python=""
+    native_python="$(native_macos_python || true)"
+    if [[ -z "$native_python" ]]; then
+        fail "Homebrew completed, but a supported arm64 Python could not be verified."
+        exit 1
+    fi
+    export SIGNALROOM_PYTHON="$native_python"
+    PYTHON_CMD="$native_python"
+    success "Native Apple Silicon Python is ready: $PYTHON_CMD"
+}
+
+ensure_macos_python_compatibility() {
+    macos_is_apple_silicon || return 0
+    local selected_architecture=""
+    selected_architecture="$(python_architecture "$PYTHON_CMD")"
+    [[ "$selected_architecture" == "arm64" ]] && return 0
+
+    warn "SignalRoom detected Apple Silicon hardware, but the selected Python is $selected_architecture."
+    info "Selected Python: $PYTHON_CMD"
+    info "Core SignalRoom and Ollama can run this way, but local Transformers and SecureBERT"
+    info "require native arm64 Python because current PyTorch releases do not provide"
+    info "compatible macOS Intel wheels."
+
+    if [[ "$ALLOW_ROSETTA_PYTHON" == "yes" ]]; then
+        warn "Continuing with Intel Python by explicit request. Local Transformers remain unavailable."
+        return 0
+    fi
+
+    local consent=""
+    if [[ "$INSTALL_NATIVE_PYTHON" == "yes" ]]; then
+        consent="yes"
+    elif [[ -t 0 ]]; then
+        read -r -p 'Install native Apple Silicon Homebrew and Python 3.13 now? Type "yes" to continue: ' consent
+    else
+        fail "Interactive approval is required before installing native Homebrew and Python."
+        info "Rerun with --install-native-python to approve installation, or"
+        info "--allow-rosetta-python to continue without local Transformers."
+        exit 1
+    fi
+
+    case "$consent" in
+        yes|YES|Yes)
+            install_native_macos_python
+            ;;
+        *)
+            warn "Native Python installation declined. Local Transformers and SecureBERT remain unavailable."
+            ALLOW_ROSETTA_PYTHON="yes"
+            ;;
+    esac
 }
 
 run_pip() {
@@ -148,6 +302,17 @@ run_pip() {
 installation_current() {
     find_python
     [[ -x "$VENV_PYTHON" && -f "$MANIFEST_FILE" ]] || return 1
+    if macos_is_apple_silicon; then
+        local selected_machine venv_machine
+        selected_machine="$(python_architecture "$PYTHON_CMD")"
+        venv_machine="$(python_architecture "$VENV_PYTHON")"
+        if [[ "$INSTALL_NATIVE_PYTHON" == "yes" && "$venv_machine" != "arm64" ]]; then
+            return 1
+        fi
+        if [[ "$selected_machine" == "arm64" && "$venv_machine" != "arm64" ]]; then
+            return 1
+        fi
+    fi
     local source_hash
     source_hash="$("$PYTHON_CMD" "$INSTALL_DIR/src/splunk_security_agent/upgrade_readiness.py" \
         --root "$INSTALL_DIR" --source-digest)"
@@ -186,12 +351,20 @@ upgrade_preflight() {
 
 install_dependencies() {
     find_python
-    local python_version
+    ensure_macos_python_compatibility
+    local python_version python_machine
     python_version="$("$PYTHON_CMD" --version 2>&1 | awk '{print $2}')"
-    success "Python $python_version found"
+    python_machine="$(python_architecture "$PYTHON_CMD")"
+    success "Python $python_version ($python_machine) found"
     if [[ -x "$VENV_PYTHON" ]] && ! "$VENV_PYTHON" -c \
         'import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)'; then
         warn "The existing virtual environment uses an unsupported Python; rebuilding it..."
+        case "$VENV_DIR" in "$INSTALL_DIR"/*) ;; *) fail "Unsafe virtual environment path."; exit 1 ;; esac
+        rm -rf -- "$VENV_DIR"
+    fi
+    if [[ -x "$VENV_PYTHON" ]] && \
+        [[ "$(python_architecture "$VENV_PYTHON")" != "$python_machine" ]]; then
+        warn "The existing virtual environment uses a different CPU architecture; rebuilding it..."
         case "$VENV_DIR" in "$INSTALL_DIR"/*) ;; *) fail "Unsafe virtual environment path."; exit 1 ;; esac
         rm -rf -- "$VENV_DIR"
     fi
@@ -213,14 +386,14 @@ install_dependencies() {
     source_hash="$("$PYTHON_CMD" "$INSTALL_DIR/src/splunk_security_agent/upgrade_readiness.py" \
         --root "$INSTALL_DIR" --source-digest)"
     "$VENV_PYTHON" - "$MANIFEST_FILE" "$VERSION" "$project_hash" "$python_version" \
-        "$pip_version" "$VENV_DIR" "$PORT" "$(detect_os)" "$source_hash" <<'PY'
+        "$pip_version" "$VENV_DIR" "$PORT" "$(detect_os)" "$source_hash" "$python_machine" <<'PY'
 import json, pathlib, sys
 from datetime import datetime, timezone
 pathlib.Path(sys.argv[1]).write_text(json.dumps({
     "manifest_schema": 2, "version": sys.argv[2], "project_hash": sys.argv[3],
     "source_hash": sys.argv[9],
     "installed_at": datetime.now(timezone.utc).isoformat(), "os": sys.argv[8],
-    "python": {"version": sys.argv[4], "executable": sys.argv[6]},
+    "python": {"version": sys.argv[4], "executable": sys.argv[6], "architecture": sys.argv[10]},
     "pip": {"version": sys.argv[5]}, "virtual_env": sys.argv[6],
     "install_root": str(pathlib.Path(sys.argv[1]).resolve().parent),
     "data_dir": str(pathlib.Path(sys.argv[1]).resolve().parent / "data"),
@@ -274,6 +447,8 @@ open_workspace() {
 start_signalroom() {
     if ! installation_current; then
         upgrade_preflight yes
+        find_python
+        ensure_macos_python_compatibility
         local upgrade_pid=""
         upgrade_pid="$(managed_pid 2>/dev/null || true)"
         if [[ -n "$upgrade_pid" ]] && ps -p "$upgrade_pid" >/dev/null 2>&1; then
@@ -444,7 +619,11 @@ main() {
             ;;
         stop) stop_signalroom ;;
         restart)
-            if ! installation_current; then upgrade_preflight; fi
+            if ! installation_current; then
+                upgrade_preflight
+                find_python
+                ensure_macos_python_compatibility
+            fi
             stop_signalroom
             sleep 1
             start_signalroom

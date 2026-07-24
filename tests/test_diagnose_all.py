@@ -4,6 +4,7 @@ from pathlib import Path
 from splunk_security_agent.diagnose_all import (
     RUNTIME_REQUIREMENTS,
     DiagnoseAll,
+    DiagnosticLog,
     model_matches,
     redact,
     safe_url,
@@ -87,3 +88,46 @@ def test_installer_exposes_diagnose_all_command_and_log() -> None:
     assert "--diagnose-all" in shell
     assert "signalroom-diagnose-all.log" in shell
     assert "src/splunk_security_agent/diagnose_all.py" in shell
+
+
+def test_installer_offers_native_python_repair_for_apple_silicon() -> None:
+    shell = (PROJECT_ROOT / "install.sh").read_text(encoding="utf-8")
+
+    assert "hw.optional.arm64" in shell
+    assert "--install-native-python" in shell
+    assert "--allow-rosetta-python" in shell
+    assert "Type \"yes\" to continue" in shell
+    assert "/usr/bin/arch -arm64 /bin/bash" in shell
+    assert "/opt/homebrew/bin/brew install python@3.13" in shell
+    assert "different CPU architecture; rebuilding it" in shell
+    assert 'INSTALL_NATIVE_PYTHON" == "yes" && "$venv_machine" != "arm64' in shell
+
+
+def test_diagnostic_identifies_rosetta_python_on_apple_silicon(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    diagnostic = DiagnoseAll(tmp_path, tmp_path / "diagnose.log", network=False)
+
+    def command_text(arguments: list[str], *, timeout: int) -> str:
+        del timeout
+        if arguments[-1] == "hw.optional.arm64":
+            return "1\n"
+        if arguments[-1] == "sysctl.proc_translated":
+            return "1\n"
+        if arguments[-2:] == ["uname", "-m"]:
+            return "x86_64\n"
+        return ""
+
+    monkeypatch.setattr("splunk_security_agent.diagnose_all.platform.system", lambda: "Darwin")
+    monkeypatch.setattr("splunk_security_agent.diagnose_all.platform.machine", lambda: "x86_64")
+    monkeypatch.setattr(diagnostic, "_command_text", command_text)
+
+    with DiagnosticLog(diagnostic.log_path) as log:
+        diagnostic._host(log)
+
+    output = diagnostic.log_path.read_text(encoding="utf-8")
+    assert "[WARN] Apple Silicon is using Intel Python under Rosetta" in output
+    assert "hardware=arm64" in output
+    assert "process=x86_64" in output
+    assert "Local Transformers and SecureBERT require native arm64 Python" in output

@@ -19,7 +19,8 @@ Run it after reproducing a model setup problem and attach that file to the issue
 
 The collector records explicit `PASS`, `WARN`, `FAIL`, and `INFO` observations for:
 
-- Operating system, machine architecture, Python architecture, OpenSSL, and mixed Rosetta/native execution on macOS.
+- Operating system, physical machine architecture, Python architecture, OpenSSL, Apple Silicon capability from
+  `sysctl`, and mixed Rosetta/native execution on macOS.
 - Source-tree completeness, installation-manifest readability, write access, and free model-storage capacity.
 - `.venv` Python and pip availability plus `pip check`.
 - Importability and versions of `huggingface_hub`, `sentence_transformers`, `torch`, and `transformers`.
@@ -35,6 +36,11 @@ The collector records explicit `PASS`, `WARN`, `FAIL`, and `INFO` observations f
 - Redacted tails from `signalroom.err.log` and `signalroom.log`.
 
 The pip compatibility step uses `--dry-run`, `--no-deps`, `--only-binary=:all:`, and `--no-cache-dir`. It resolves the four direct runtime requirements without installing packages, building source distributions, or retaining a package cache. This is intended to expose unsupported Python/macOS architecture combinations and package-index failures without repeating the installation.
+
+On an Apple Silicon Mac, a report that says `Apple Silicon is using Intel Python under Rosetta` is actionable
+even when `uname -m` reports `x86_64`: translated processes can mask the physical hardware architecture.
+Rerun the normal installer and approve its native-Python repair, or use
+`./install.sh --install-native-python` for an explicitly approved scripted repair.
 
 ## What it does not do
 
