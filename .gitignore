@@ -31,3 +31,4 @@ data/upgrade/
 .signalroom.runtime.json
 signalroom.log
 signalroom.err.log
+signalroom-diagnose-all.log

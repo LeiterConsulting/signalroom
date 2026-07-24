@@ -12,6 +12,7 @@ PID_FILE="$INSTALL_DIR/.signalroom.pid"
 RUNTIME_FILE="$INSTALL_DIR/.signalroom.runtime.json"
 LOG_FILE="$INSTALL_DIR/signalroom.log"
 ERROR_LOG_FILE="$INSTALL_DIR/signalroom.err.log"
+DIAGNOSTIC_LOG_FILE="$INSTALL_DIR/signalroom-diagnose-all.log"
 PYPI_URL="https://pypi.org/simple"
 COMMAND=""
 PUBLIC_ONLY="no"
@@ -44,7 +45,7 @@ show_help() {
 
 USAGE
     ./install.sh [OPTIONS]
-    ./install.sh [start|stop|restart|status|preflight|uninstall]
+    ./install.sh [start|stop|restart|status|preflight|diagnose_all|uninstall]
 
 OPTIONS
     (no arguments)    Install or update dependencies and start
@@ -53,6 +54,8 @@ OPTIONS
     --restart         Restart the managed service
     --status          Show process, URL, health, and log locations
     --preflight       Read-only install and retained-data compatibility check
+    --diagnose_all    Diagnose installation, Ollama, Transformers, and model preparation
+    --diagnose-all    Alias for --diagnose_all
     --uninstall       Remove the virtual environment and runtime files
     --force-yes       Skip the uninstall confirmation
     --purge-data      With --uninstall, also remove local secrets and artifacts
@@ -72,6 +75,7 @@ EXAMPLES
     ./install.sh --restart
     ./install.sh --status
     ./install.sh --preflight
+    ./install.sh --diagnose_all
     ./install.sh --uninstall --force-yes
 
 DEFAULT WORKSPACE
@@ -82,8 +86,11 @@ EOF
 parse_args() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            start|stop|restart|status|preflight|uninstall) COMMAND="$1" ;;
+            start|stop|restart|status|preflight|diagnose_all|diagnose-all|uninstall)
+                COMMAND="${1//-/_}"
+                ;;
             --start|--stop|--restart|--status|--preflight|--uninstall) COMMAND="${1#--}" ;;
+            --diagnose_all|--diagnose-all) COMMAND="diagnose_all" ;;
             -h|--help) COMMAND="help" ;;
             --public_only|--public-only) PUBLIC_ONLY="yes" ;;
             --force-yes) FORCE_YES="yes" ;;
@@ -411,6 +418,22 @@ setup_models() {
     fi
 }
 
+diagnose_all() {
+    find_python
+    info "Running non-mutating installation and model diagnostics..."
+    if "$PYTHON_CMD" "$INSTALL_DIR/src/splunk_security_agent/diagnose_all.py" \
+        --root "$INSTALL_DIR" --log "$DIAGNOSTIC_LOG_FILE"; then
+        success "SignalRoom diagnostics passed."
+        info "Attach this log for review: $DIAGNOSTIC_LOG_FILE"
+        return 0
+    else
+        local status=$?
+        warn "SignalRoom diagnostics found one or more blockers."
+        info "Attach this log for review: $DIAGNOSTIC_LOG_FILE"
+        return "$status"
+    fi
+}
+
 main() {
     parse_args "$@"
     case "$COMMAND" in
@@ -428,6 +451,7 @@ main() {
             ;;
         status) show_status ;;
         preflight) upgrade_preflight ;;
+        diagnose_all) diagnose_all ;;
         uninstall) uninstall_signalroom ;;
         "")
             info "=================================================="
