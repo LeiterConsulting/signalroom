@@ -126,11 +126,13 @@ from .schemas import (
     ManagedSplunkConnectionUpdate,
     ModelActivateRequest,
     ModelArtifactApproval,
+    ModelIntakeStageRequest,
     ModelPullRequest,
     ModelTournamentPromotionRequest,
     ModelTournamentReviewRequest,
     ModelTournamentRunCreate,
     ModelTrustPolicyUpdate,
+    OllamaCandidateStageRequest,
     QueryIntelligenceRequest,
     RecoveryPackageCreate,
     RecoveryRestoreStage,
@@ -150,6 +152,7 @@ from .schemas import (
     TimeSeriesRuntimeUpdate,
     TimeSeriesScheduleCreate,
     TimeSeriesScheduleUpdate,
+    ValidationPreflightRequest,
     ValidationTaskCreate,
     ValidationTaskUpdate,
     WorkloadPolicyUpdate,
@@ -157,6 +160,8 @@ from .schemas import (
 from .splunk import (
     ConnectionDiagnosticsStore,
     DemoSplunkClient,
+    SplContextCompileRequest,
+    SplContextEngine,
     SplunkConnectionDiagnostics,
     SplunkMCPClient,
 )
@@ -709,7 +714,12 @@ class Services:
             }
         )
         self._splunk = WorkloadControlledSplunkClient(raw_splunk, self.workload, instance_id)
-        self._agent = SecurityAgent(self.config, self.evidence, self._splunk)
+        self._agent = SecurityAgent(
+            self.config,
+            self.evidence,
+            self._splunk,
+            self.spl_context_for_scope(self._connection_binding),
+        )
         self._splunk_models = SplunkModelInventoryService(self.config, self._splunk)
         self._discovery = DiscoveryPipeline(
             self._splunk,
@@ -762,6 +772,14 @@ class Services:
             self.tenant_data_registry,
         )
 
+    def spl_context_for_scope(self, scope: dict[str, Any]) -> SplContextEngine:
+        """Bind schema context to the same immutable connection and tenant revision as execution."""
+        return SplContextEngine(
+            DATA / "artifacts",
+            scope,
+            self.tenant_data_registry,
+        )
+
     def splunk_for_scope(self, scope: dict[str, Any]) -> Any:
         self.refresh()
         alias = str(scope.get("alias") or "primary")
@@ -809,7 +827,12 @@ class Services:
         cache_key = next(key for key, value in self._scope_clients.items() if value is client)
         agent = self._scope_agents.get(cache_key)
         if agent is None:
-            agent = SecurityAgent(self.config, self.evidence, client)
+            agent = SecurityAgent(
+                self.config,
+                self.evidence,
+                client,
+                self.spl_context_for_scope(scope),
+            )
             self._scope_agents[cache_key] = agent
         return agent
 
@@ -917,6 +940,17 @@ def _scoped_validation(task_id: str, scope: dict[str, Any]) -> Any:
     ):
         raise HTTPException(404, "Validation task not found")
     return task
+
+
+def _scoped_artifact(artifact_id: str, scope: dict[str, Any]) -> Any:
+    record = services.evidence.get(artifact_id, scope["tenant_scope_id"])
+    if record is None or (
+        record.connection_alias != scope["alias"]
+        or record.connection_fingerprint != scope["fingerprint"]
+        or record.tenant_scope_id != scope["tenant_scope_id"]
+    ):
+        raise HTTPException(404, "Artifact not found")
+    return record
 
 
 def _scoped_detection(detection_id: str, scope: dict[str, Any]) -> dict[str, Any]:
@@ -2504,6 +2538,111 @@ async def model_updates() -> dict[str, Any]:
     return await services.model_setup.check_updates()
 
 
+@app.post("/api/model-lifecycle/intake", status_code=201)
+async def stage_model_intake(
+    value: ModelIntakeStageRequest, request: Request
+) -> dict[str, Any]:
+    try:
+        result = await services.model_setup.stage_publisher_intake(value.model)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(503, str(exc)) from exc
+    principal = getattr(request.state, "principal", {}) or {}
+    services.audit.record(
+        "model.lifecycle.intake.staged",
+        "create",
+        target_type="model-source",
+        target_id=value.model,
+        summary="A first-party model revision was staged for bounded capability review.",
+        metadata={
+            "revision": result.get("revision", ""),
+            "pipeline_tag": result.get("pipeline_tag", ""),
+            "downloads_started": 0,
+        },
+        actor=str(principal.get("username") or "local-operator"),
+    )
+    return result
+
+
+@app.delete("/api/model-lifecycle/intake")
+async def discard_model_intake(
+    value: ModelIntakeStageRequest, request: Request
+) -> dict[str, Any]:
+    try:
+        result = services.model_setup.discard_publisher_intake(value.model)
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    principal = getattr(request.state, "principal", {}) or {}
+    services.audit.record(
+        "model.lifecycle.intake.discarded",
+        "delete",
+        target_type="model-source",
+        target_id=value.model,
+        summary="A pending model-source intake item was removed without changing capabilities.",
+        metadata={"downloads_started": 0},
+        actor=str(principal.get("username") or "local-operator"),
+    )
+    return result
+
+
+@app.post("/api/model-lifecycle/candidates", status_code=201)
+async def stage_ollama_candidate(
+    value: OllamaCandidateStageRequest, request: Request
+) -> dict[str, Any]:
+    try:
+        result = await services.model_setup.stage_ollama_candidate(
+            value.model,
+            label=value.label,
+            task=value.task,
+            endpoint=value.endpoint,
+        )
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(503, str(exc)) from exc
+    services.refresh(force=True)
+    principal = getattr(request.state, "principal", {}) or {}
+    profile = result["profile"]
+    services.audit.record(
+        "model.lifecycle.candidate.staged",
+        "create",
+        target_type="model-profile",
+        target_id=profile["id"],
+        summary="An installed Ollama model was staged without changing investigation routing.",
+        metadata={
+            "model": profile["model"],
+            "task": profile["task"],
+            "local_digest": result.get("local_digest", ""),
+            "routing_unchanged": result["routing_unchanged"],
+        },
+        actor=str(principal.get("username") or "local-operator"),
+    )
+    return result
+
+
+@app.delete("/api/model-lifecycle/candidates/{profile_id}")
+async def discard_ollama_candidate(profile_id: str, request: Request) -> dict[str, Any]:
+    try:
+        result = services.model_setup.discard_ollama_candidate(profile_id)
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    services.refresh(force=True)
+    principal = getattr(request.state, "principal", {}) or {}
+    services.audit.record(
+        "model.lifecycle.candidate.discarded",
+        "delete",
+        target_type="model-profile",
+        target_id=profile_id,
+        summary="A non-routed Ollama evaluation candidate was discarded.",
+        metadata={"routing_changed": False},
+        actor=str(principal.get("username") or "local-operator"),
+    )
+    return result
+
+
 @app.post("/api/model-capabilities/code-vulnerability/screen")
 async def screen_code_vulnerability(
     value: CodeVulnerabilityScreenRequest, request: Request
@@ -3141,6 +3280,30 @@ async def model_pull_status(job_id: str) -> dict[str, Any]:
         return services.model_setup.get_job(job_id)
     except KeyError as exc:
         raise HTTPException(404, str(exc)) from exc
+
+
+@app.get("/api/spl-context")
+async def spl_context(
+    connection_alias: str = "primary",
+    connection_fingerprint: str = "",
+    tenant_scope_id: str = "workspace-primary",
+    summary: bool = False,
+) -> dict[str, Any]:
+    """Return the schema-only context contract for one immutable Splunk scope."""
+    scope = _request_scope(connection_alias, connection_fingerprint, tenant_scope_id)
+    engine = services.spl_context_for_scope(scope)
+    return engine.summary() if summary else engine.snapshot()
+
+
+@app.post("/api/spl-context/compile")
+async def compile_spl_context(request: SplContextCompileRequest) -> dict[str, Any]:
+    """Compile typed intent without contacting Splunk or exposing source event values."""
+    scope = _request_scope(
+        request.connection_alias,
+        request.connection_fingerprint,
+        request.tenant_scope_id,
+    )
+    return services.spl_context_for_scope(scope).compile(request.intent)
 
 
 @app.post("/api/chat")
@@ -4396,6 +4559,55 @@ async def update_validation(
     return task.model_dump(mode="json")
 
 
+@app.post("/api/validations/{task_id}/preflight/stream")
+async def preflight_validation_stream(
+    task_id: str,
+    request: ValidationPreflightRequest,
+    connection_alias: str = "primary",
+    connection_fingerprint: str = "",
+    tenant_scope_id: str = "workspace-primary",
+) -> StreamingResponse:
+    scope = _request_scope(connection_alias, connection_fingerprint, tenant_scope_id)
+    _scoped_validation(task_id, scope)
+
+    async def run(progress: Any) -> dict[str, Any]:
+        try:
+            task = await services.validations.ensure_preflight(
+                task_id,
+                include_saia=request.include_saia,
+                refresh=True,
+                progress=progress,
+            )
+            receipt = task.preflight_receipt or {}
+            services.audit.record(
+                "validation.preflight.completed",
+                "validate",
+                target_type="validation-task",
+                target_id=task_id,
+                outcome=str(receipt.get("status") or "unknown"),
+                summary="Splunk parser and optional SAIA capability preflight completed.",
+                metadata={
+                    "query_fingerprint": task.query_fingerprint,
+                    "parser_status": (receipt.get("parser") or {}).get("status", "unavailable"),
+                    "saia_status": (receipt.get("saia") or {}).get("status", "not-requested"),
+                    "include_saia": request.include_saia,
+                },
+            )
+            return task.model_dump(mode="json")
+        except Exception as exc:
+            services.audit.record(
+                "validation.preflight.failed",
+                "validate",
+                target_type="validation-task",
+                target_id=task_id,
+                outcome="blocked",
+                summary=f"SPL preflight blocked ({type(exc).__name__}).",
+            )
+            raise
+
+    return _stream_response(run)
+
+
 @app.post("/api/validations/{task_id}/approve")
 async def approve_validation(
     task_id: str,
@@ -4406,6 +4618,7 @@ async def approve_validation(
     scope = _request_scope(connection_alias, connection_fingerprint, tenant_scope_id)
     _scoped_validation(task_id, scope)
     try:
+        await services.validations.ensure_preflight(task_id, include_saia=False)
         task = services.validations.approve(task_id)
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from exc
@@ -4450,6 +4663,7 @@ async def run_validation_stream(
                     "query_fingerprint": task.query_fingerprint,
                     "result_count": task.result_count,
                     "artifact_id": task.artifact_id,
+                    "shape_status": (task.execution_receipt or {}).get("status", "not-assessed"),
                 },
             )
             return task.model_dump(mode="json")
@@ -5653,7 +5867,11 @@ async def list_artifacts(
     scope = _request_scope(connection_alias, connection_fingerprint, tenant_scope_id)
     return [
         record.model_dump(mode="json")
-        for record in services.evidence.list(tenant_scope_id=scope["tenant_scope_id"])
+        for record in services.evidence.list(
+            tenant_scope_id=scope["tenant_scope_id"],
+            connection_alias=scope["alias"],
+            connection_fingerprint=scope["fingerprint"],
+        )
     ]
 
 
@@ -5665,9 +5883,7 @@ async def get_artifact(
     tenant_scope_id: str = "workspace-primary",
 ) -> dict[str, Any]:
     scope = _request_scope(connection_alias, connection_fingerprint, tenant_scope_id)
-    record = services.evidence.get(artifact_id, scope["tenant_scope_id"])
-    if not record:
-        raise HTTPException(404, "Artifact not found")
+    record = _scoped_artifact(artifact_id, scope)
     return record.model_dump(mode="json")
 
 
@@ -5707,6 +5923,7 @@ async def update_artifact(
     tenant_scope_id: str = "workspace-primary",
 ) -> dict[str, Any]:
     scope = _request_scope(connection_alias, connection_fingerprint, tenant_scope_id)
+    _scoped_artifact(artifact_id, scope)
     updated = services.evidence.update(artifact_id, record, scope["tenant_scope_id"])
     if not updated:
         raise HTTPException(404, "Artifact not found")
@@ -5771,6 +5988,7 @@ async def delete_artifact(
     tenant_scope_id: str = "workspace-primary",
 ) -> dict[str, bool]:
     scope = _request_scope(connection_alias, connection_fingerprint, tenant_scope_id)
+    _scoped_artifact(artifact_id, scope)
     if not services.evidence.delete(artifact_id, scope["tenant_scope_id"]):
         raise HTTPException(404, "Artifact not found")
     services.invalidate_context_caches()
@@ -5799,6 +6017,8 @@ async def search_context(
             q,
             min(max(limit, 1), 20),
             tenant_scope_id=scope["tenant_scope_id"],
+            connection_alias=scope["alias"],
+            connection_fingerprint=scope["fingerprint"],
         )
     ]
 

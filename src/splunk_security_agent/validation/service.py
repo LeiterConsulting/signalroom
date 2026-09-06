@@ -18,6 +18,7 @@ from ..schemas import (
     ValidationTaskUpdate,
 )
 from ..splunk.guardrails import validate_read_only_spl
+from ..splunk.validation_adapter import SplValidationAdapter
 from .store import ValidationStore
 
 RELATIVE_TIME = re.compile(r"^-(?P<count>\d{1,4})(?P<unit>[smhdw])$")
@@ -43,6 +44,7 @@ class ValidationService:
         self.workload = workload
         self.splunk_factory = splunk_factory
         self.binding_validator = binding_validator
+        self.adapter = SplValidationAdapter()
 
     def create(self, value: ValidationTaskCreate) -> ValidationTaskRecord:
         self.validate_contract(value.spl, value.earliest_time, value.latest_time, value.row_limit)
@@ -73,6 +75,82 @@ class ValidationService:
         )
         return self.store.approve(task_id)
 
+    async def preflight(
+        self,
+        task_id: str,
+        *,
+        include_saia: bool = False,
+        progress: ProgressCallback | None = None,
+    ) -> ValidationTaskRecord:
+        task = self.store.get(task_id)
+        if task is None:
+            raise KeyError(f"Validation task not found: {task_id}")
+        self.validate_contract(task.spl, task.earliest_time, task.latest_time, task.row_limit)
+        splunk = self._bound_client(task)
+        await report_progress(
+            progress,
+            "validation:preflight-capabilities",
+            "Inspecting Splunk validation capabilities",
+            "Checking the exact MCP connection for parser and optional SAIA SPL tools.",
+            progress=6,
+        )
+        receipt = await self.adapter.preflight(task, splunk, include_saia=include_saia)
+        updated = self.store.set_preflight(task_id, receipt)
+        if updated is None:
+            raise ValueError("This validation task cannot be preflighted in its current state")
+        await report_progress(
+            progress,
+            "validation:preflight",
+            (
+                "Splunk parser preflight passed"
+                if receipt["status"] == "passed"
+                else "Splunk parser proof is incomplete"
+                if receipt["status"] == "advisory-only"
+                else "Splunk preflight blocked execution"
+            ),
+            self._preflight_detail(receipt),
+            progress=16,
+            status="error" if receipt["status"] == "blocked" else "complete",
+            metrics={
+                "status": receipt["status"],
+                "parser": (receipt.get("parser") or {}).get("status", "unavailable"),
+                "saia": (receipt.get("saia") or {}).get("status", "not-requested"),
+            },
+        )
+        if receipt["status"] == "blocked":
+            raise ValueError(self._preflight_detail(receipt))
+        return updated
+
+    async def ensure_preflight(
+        self,
+        task_id: str,
+        *,
+        include_saia: bool = False,
+        refresh: bool = False,
+        progress: ProgressCallback | None = None,
+    ) -> ValidationTaskRecord:
+        task = self.store.get(task_id)
+        if task is None:
+            raise KeyError(f"Validation task not found: {task_id}")
+        receipt = task.preflight_receipt or {}
+        current = (
+            receipt.get("query_fingerprint") == task.query_fingerprint
+            and receipt.get("connection_fingerprint") == task.connection_fingerprint
+            and receipt.get("status") in {"passed", "advisory-only"}
+        )
+        saia_complete = not include_saia or (receipt.get("saia") or {}).get("status") in {
+            "passed",
+            "unavailable",
+            "error",
+        }
+        if current and saia_complete and not refresh:
+            return task
+        return await self.preflight(
+            task_id,
+            include_saia=include_saia,
+            progress=progress,
+        )
+
     @staticmethod
     def validate_contract(
         spl: str, earliest_time: str, latest_time: str, row_limit: int
@@ -96,6 +174,18 @@ class ValidationService:
         if task is None:
             raise KeyError(f"Validation task not found: {task_id}")
         self.validate_contract(task.spl, task.earliest_time, task.latest_time, task.row_limit)
+        if task.status != "approved":
+            raise ValueError("Validation task must be explicitly approved before execution")
+        try:
+            task = await self.ensure_preflight(
+                task_id,
+                include_saia=False,
+                refresh=True,
+                progress=progress,
+            )
+        except Exception as exc:
+            self.store.fail(task_id, str(exc))
+            raise
         running = self.store.mark_running(task_id)
         if running is None:
             raise ValueError("Validation task must be explicitly approved before execution")
@@ -118,22 +208,7 @@ class ValidationService:
             "row_limit": running.row_limit,
         }
         try:
-            scope = {
-                "alias": running.connection_alias,
-                "fingerprint": running.connection_fingerprint,
-                "tenant_scope_id": running.tenant_scope_id,
-            }
-            if self.binding_validator is not None:
-                valid, reason = self.binding_validator(
-                    running.connection_alias,
-                    running.connection_fingerprint,
-                    running.tenant_scope_id,
-                )
-                if not valid:
-                    raise ValueError(
-                        "Validation target is no longer executable: " + reason
-                    )
-            splunk = self.splunk_factory(scope) if self.splunk_factory else self.splunk
+            splunk = self._bound_client(running)
             await report_progress(
                 progress,
                 "validation:splunk",
@@ -151,6 +226,7 @@ class ValidationService:
                 result = await splunk.call("run_query", arguments)
             rows = self._rows(result)
             preview = self._bounded_preview(rows)
+            execution_receipt = self.adapter.compare_result_shape(running, rows)
             await report_progress(
                 progress,
                 "validation:preserve",
@@ -165,7 +241,12 @@ class ValidationService:
                     kind="validation",
                     source="Approved Splunk MCP validation",
                     tags=["splunk", "validation", *running.evidence_refs],
-                    content=self._artifact_content(running, len(rows), preview),
+                    content=self._artifact_content(
+                        running,
+                        len(rows),
+                        preview,
+                        execution_receipt,
+                    ),
                     connection_alias=running.connection_alias,
                     connection_fingerprint=running.connection_fingerprint,
                     tenant_scope_id=running.tenant_scope_id,
@@ -178,6 +259,8 @@ class ValidationService:
                     "connection_alias": running.connection_alias,
                     "connection_fingerprint": running.connection_fingerprint,
                     "tenant_scope_id": running.tenant_scope_id,
+                    "preflight_receipt": running.preflight_receipt,
+                    "execution_receipt": execution_receipt,
                 },
             )
             if running.case_id and self.cases.get(
@@ -204,16 +287,29 @@ class ValidationService:
                     ),
                     running.tenant_scope_id,
                 )
-            completed = self.store.complete(running.id, len(rows), preview, artifact.id)
+            completed = self.store.complete(
+                running.id,
+                len(rows),
+                preview,
+                artifact.id,
+                execution_receipt,
+            )
             assert completed is not None
             await report_progress(
                 progress,
                 "validation:complete",
                 "Validation result preserved",
-                f"{len(rows)} row(s) · evidence artifact {artifact.id}.",
+                (
+                    f"{len(rows)} row(s) · shape {execution_receipt['status']} · "
+                    f"evidence artifact {artifact.id}."
+                ),
                 progress=100,
                 status="complete",
-                metrics={"result_count": len(rows), "artifact_id": artifact.id},
+                metrics={
+                    "result_count": len(rows),
+                    "artifact_id": artifact.id,
+                    "shape_status": execution_receipt["status"],
+                },
             )
             return completed
         except asyncio.CancelledError:
@@ -264,10 +360,52 @@ class ValidationService:
             total_chars += size
         return preview
 
+    def _bound_client(self, task: ValidationTaskRecord) -> Any:
+        if self.binding_validator is not None:
+            valid, reason = self.binding_validator(
+                task.connection_alias,
+                task.connection_fingerprint,
+                task.tenant_scope_id,
+            )
+            if not valid:
+                raise ValueError("Validation target is no longer executable: " + reason)
+        scope = {
+            "alias": task.connection_alias,
+            "fingerprint": task.connection_fingerprint,
+            "tenant_scope_id": task.tenant_scope_id,
+        }
+        return self.splunk_factory(scope) if self.splunk_factory else self.splunk
+
+    @staticmethod
+    def _preflight_detail(receipt: dict[str, Any]) -> str:
+        checks = receipt.get("checks") or []
+        blocked = [
+            str(item.get("detail") or "")
+            for item in checks
+            if isinstance(item, dict) and item.get("status") == "blocked"
+        ]
+        parser = receipt.get("parser") or {}
+        return (
+            " ".join(blocked)
+            or str(parser.get("summary") or "")
+            or "Splunk validation preflight completed."
+        )[:4000]
+
     @staticmethod
     def _artifact_content(
-        task: ValidationTaskRecord, result_count: int, preview: list[Any]
+        task: ValidationTaskRecord,
+        result_count: int,
+        preview: list[Any],
+        execution_receipt: dict[str, Any] | None = None,
     ) -> str:
+        receipts = json.dumps(
+            {
+                "preflight": task.preflight_receipt,
+                "execution": execution_receipt or {},
+            },
+            indent=2,
+            default=str,
+        )
         return "\n".join(
             [
                 f"# {task.title}",
@@ -281,12 +419,16 @@ class ValidationService:
                 f"- Window: `{task.earliest_time}` to `{task.latest_time}`",
                 f"- Row limit: {task.row_limit}",
                 f"- Result count: {result_count}",
+                f"- Result-shape status: `{(execution_receipt or {}).get('status', 'not-assessed')}`",
                 "",
                 "## Rationale",
                 task.rationale,
                 "",
                 "## Executed SPL",
                 f"```spl\n{task.spl}\n```",
+                "",
+                "## SPL validation receipts",
+                f"```json\n{receipts}\n```",
                 "",
                 "## Bounded result preview",
                 f"```json\n{json.dumps(preview, indent=2, default=str)}\n```",

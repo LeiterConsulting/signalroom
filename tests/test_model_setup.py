@@ -11,6 +11,7 @@ import pytest
 from splunk_security_agent.config import ConfigStore
 from splunk_security_agent.model_setup import (
     ModelSetupService,
+    _candidate_runtime_installed,
     _huggingface_repo,
     _model_installed,
 )
@@ -19,13 +20,13 @@ from splunk_security_agent.schemas import ArtifactCreate
 
 
 class FakeResponse:
-    def __init__(self, payload: dict[str, Any]):
+    def __init__(self, payload: Any):
         self.payload = payload
 
     def raise_for_status(self) -> None:
         return None
 
-    def json(self) -> dict[str, Any]:
+    def json(self) -> Any:
         return self.payload
 
 
@@ -148,6 +149,20 @@ async def test_update_check_is_read_only_and_does_not_claim_untracked_ollama_is_
                         "pipeline_tag": "sentence-similarity",
                     }
                 )
+            if url == "https://huggingface.co/api/models":
+                publisher = kwargs["params"]["author"]
+                if publisher == "cisco-ai":
+                    return FakeResponse(
+                        [
+                            {
+                                "id": "cisco-ai/new-security-model",
+                                "sha": "new-model-sha",
+                                "lastModified": "2026-09-04T00:00:00Z",
+                                "pipeline_tag": "text-classification",
+                            }
+                        ]
+                    )
+                return FakeResponse([])
             return await super().get(url, **kwargs)
 
     monkeypatch.setattr("splunk_security_agent.model_setup.httpx.AsyncClient", UpdateClient)
@@ -164,7 +179,124 @@ async def test_update_check_is_read_only_and_does_not_claim_untracked_ollama_is_
         item["candidate_id"]: item for item in result["candidate_sources"]
     }
     assert candidate_sources["cisco-time-series-1"]["status"] == "source-observed"
+    publisher_catalogs = {
+        item["publisher"]: item for item in result["publisher_catalogs"]
+    }
+    assert publisher_catalogs["cisco-ai"]["status"] == "review-required"
+    assert [
+        item["model"] for item in publisher_catalogs["cisco-ai"]["unreviewed_models"]
+    ] == ["cisco-ai/new-security-model"]
     assert FakeClient.last_instance.posts == []
+
+
+@pytest.mark.asyncio
+async def test_publisher_check_detects_revision_change_without_repository_rename(
+    monkeypatch, tmp_path
+):
+    class RevisionClient(FakeClient):
+        async def get(self, url: str, **kwargs: Any) -> FakeResponse:
+            if url.endswith("/api/tags"):
+                return FakeResponse({"models": [{"name": "llama3.1:8b", "digest": "local"}]})
+            if url.startswith("https://huggingface.co/api/models/"):
+                return FakeResponse(
+                    {
+                        "sha": "individual-source-sha",
+                        "lastModified": "2026-09-05T00:00:00Z",
+                        "pipeline_tag": "token-classification",
+                    }
+                )
+            if url == "https://huggingface.co/api/models":
+                if kwargs["params"]["author"] == "cisco-ai":
+                    return FakeResponse(
+                        [
+                            {
+                                "id": "cisco-ai/SecureBERT2.0-NER",
+                                "sha": "changed-with-the-same-repository-id",
+                                "lastModified": "2026-09-05T00:00:00Z",
+                                "pipeline_tag": "token-classification",
+                                "gated": False,
+                            }
+                        ]
+                    )
+                return FakeResponse([])
+            return await super().get(url, **kwargs)
+
+    monkeypatch.setattr("splunk_security_agent.model_setup.httpx.AsyncClient", RevisionClient)
+    result = await ModelSetupService(ConfigStore(tmp_path)).check_updates()
+    cisco = next(item for item in result["publisher_catalogs"] if item["publisher"] == "cisco-ai")
+
+    assert cisco["status"] == "review-required"
+    changed = next(
+        item
+        for item in cisco["changed_reviewed_models"]
+        if item["model"] == "cisco-ai/SecureBERT2.0-NER"
+    )
+    assert changed["reviewed_revision"] != changed["revision"]
+    assert any(item["field"] == "revision" for item in changed["changes"])
+
+
+@pytest.mark.asyncio
+async def test_installed_ollama_model_can_be_staged_and_discarded_without_routing(
+    monkeypatch, tmp_path
+):
+    class CandidateClient(FakeClient):
+        async def get(self, url: str, **kwargs: Any) -> FakeResponse:
+            if url.endswith("/api/tags"):
+                return FakeResponse(
+                    {
+                        "models": [
+                            {"name": "llama3.1:8b", "digest": "baseline"},
+                            {"name": "qwen3.5:4b", "digest": "candidate-digest"},
+                        ]
+                    }
+                )
+            return await super().get(url, **kwargs)
+
+    monkeypatch.setattr("splunk_security_agent.model_setup.httpx.AsyncClient", CandidateClient)
+    config = ConfigStore(tmp_path)
+    service = ModelSetupService(config)
+    before = config.load()
+
+    result = await service.stage_ollama_candidate(
+        "qwen3.5:4b", task="chat", label="Qwen evaluation"
+    )
+    profile = result["profile"]
+
+    assert result["routing_unchanged"] == {
+        "default_chat_model": before.default_chat_model,
+        "security_reasoning_model": before.security_reasoning_model,
+    }
+    assert profile["lifecycle"] == "candidate"
+    assert profile["model"] == "qwen3.5:4b"
+    assert config.load().default_chat_model == before.default_chat_model
+
+    discarded = service.discard_ollama_candidate(profile["id"])
+    assert discarded["discarded"] is True
+    assert all(item.id != profile["id"] for item in config.load().models)
+
+
+@pytest.mark.asyncio
+async def test_publisher_intake_is_durable_and_never_downloads(monkeypatch, tmp_path):
+    service = ModelSetupService(ConfigStore(tmp_path))
+
+    async def metadata(_client, repo):
+        return {
+            "revision": "immutable-source-revision",
+            "last_modified": "2026-09-05T00:00:00Z",
+            "pipeline_tag": "text-generation",
+            "source_url": f"https://huggingface.co/{repo}",
+        }
+
+    monkeypatch.setattr(service, "_hub_metadata", metadata)
+    entry = await service.stage_publisher_intake("fdtn-ai/antares-1b")
+
+    assert entry["status"] == "pending-review"
+    assert entry["downloads_started"] == 0
+    assert service.catalog()["intake_queue"][0]["model"] == "fdtn-ai/antares-1b"
+
+    discarded = service.discard_publisher_intake("fdtn-ai/antares-1b")
+    assert discarded["discarded"] is True
+    assert service.catalog()["intake_queue"] == []
 
 
 def test_candidate_catalog_distinguishes_bounded_admitted_capabilities(tmp_path):
@@ -188,6 +320,31 @@ def test_candidate_catalog_distinguishes_bounded_admitted_capabilities(tmp_path)
         gate["name"] == "Durable experiment and alert-draft boundary"
         for gate in forecast["admission_gates"]
     )
+
+    antares = candidates["antares-vulnerability-localization"]
+    assert antares["configured"] is False
+    assert antares["runtime_installed"] is False
+    assert antares["status"] == "research-candidate"
+    assert antares["automatic_use"] is False
+    assert {gate["status"] for gate in antares["admission_gates"]} == {
+        "pass",
+        "blocked",
+    }
+    assert catalog["publisher_review"]["reviewed_at"] == "2026-09-05"
+    assert any(
+        finding["label"] == "Cisco Time Series Model"
+        and "supersedes" in finding["detail"]
+        for finding in catalog["publisher_review"]["findings"]
+    )
+
+
+def test_unknown_candidate_runtime_is_not_mistaken_for_time_series_runtime(monkeypatch):
+    monkeypatch.setattr(
+        "splunk_security_agent.model_setup.importlib.util.find_spec", lambda _: object()
+    )
+
+    assert _candidate_runtime_installed("dedicated-time-series") is True
+    assert _candidate_runtime_installed("dedicated-repository-agent") is False
 
 
 @pytest.mark.asyncio

@@ -18,6 +18,276 @@ def test_spl_extraction_from_fence():
     )
 
 
+def test_spl_authoring_is_distinct_from_running_or_explaining_supplied_spl():
+    assert SecurityAgent._is_spl_authoring_request(
+        "Create SPL to count failed authentication events by host", "spl"
+    )
+    assert SecurityAgent._is_spl_authoring_request(
+        "How can I write a search for suspicious PowerShell?", "spl"
+    )
+    assert not SecurityAgent._is_spl_authoring_request(
+        "Explain this SPL: ```spl\nindex=main | stats count\n```", "spl"
+    )
+    assert not SecurityAgent._is_spl_authoring_request(
+        "Run this SPL: ```spl\nindex=main | head 5\n```", "spl"
+    )
+    assert SecurityAgent._is_spl_authoring_request(
+        'Create SPL for this event shape: ```json\n{"host":"example"}\n```', "spl"
+    )
+    assert not SecurityAgent._is_spl_authoring_request(
+        "Build a threat-hunt hypothesis with testable decision points", "hunt"
+    )
+
+
+def test_context_compilations_become_separate_scope_bound_candidates():
+    request = ChatRequest(
+        message="Create two searches",
+        connection_alias="lab-002",
+        connection_fingerprint="b" * 64,
+        tenant_scope_id="tenant-lab-002",
+    )
+    result = {
+        "compilations": [
+            {
+                "status": "context-compiled",
+                "purpose": "Inspect failures",
+                "expected_result": "Twenty events",
+                "spl": 'search index="security" earliest=-24h latest=now | head 20',
+                "earliest_time": "-24h",
+                "latest_time": "now",
+                "row_limit": 20,
+                "context_revision": "c" * 64,
+                "source_run_id": "discovery-002",
+                "data_exposure": "schema-and-synthetic-only",
+                "result_contract": {
+                    "contract": "signalroom.spl-result-shape.v1",
+                    "operation": "events",
+                    "expected_fields": ["_time", "host"],
+                },
+                "checks": [{"name": "context", "status": "passed", "detail": "Exact scope"}],
+            },
+            {
+                "status": "context-compiled",
+                "purpose": "Count failures",
+                "expected_result": "One count",
+                "spl": 'search index="security" earliest=-24h latest=now | stats count',
+                "earliest_time": "-24h",
+                "latest_time": "now",
+                "row_limit": 1,
+                "context_revision": "c" * 64,
+                "source_run_id": "discovery-002",
+                "data_exposure": "schema-and-synthetic-only",
+                "result_contract": {
+                    "contract": "signalroom.spl-result-shape.v1",
+                    "operation": "count",
+                    "expected_fields": ["event_count"],
+                },
+                "checks": [{"name": "context", "status": "passed", "detail": "Exact scope"}],
+            },
+        ]
+    }
+
+    unrelated_evidence = [
+        EvidenceRef(
+            id="artifact-002:0",
+            source="retrieval",
+            title="Unrelated RAG excerpt",
+            excerpt="A source value that did not govern compilation.",
+        )
+    ]
+    candidates = SecurityAgent._compiled_spl_candidates(result, unrelated_evidence, request)
+
+    assert len(candidates) == 2
+    assert [item.ordinal for item in candidates] == [1, 2]
+    assert all(item.origin == "context-compiler" for item in candidates)
+    assert all(item.trust_status == "context-compiled" for item in candidates)
+    assert all(item.data_exposure == "schema-and-synthetic-only" for item in candidates)
+    assert all(item.safety == "reviewable" for item in candidates)
+    assert all(item.connection_alias == "lab-002" for item in candidates)
+    assert all(item.evidence_refs == [] for item in candidates)
+    assert candidates[0].result_contract["expected_fields"] == ["_time", "host"]
+    assert candidates[1].result_contract["expected_fields"] == ["event_count"]
+
+
+def test_response_extracts_multiple_scope_bound_spl_candidates():
+    request = ChatRequest(
+        message="Build a hunt",
+        connection_alias="lab-002",
+        connection_fingerprint="b" * 64,
+        tenant_scope_id="tenant-lab-002",
+    )
+    evidence = [
+        EvidenceRef(
+            id="artifact-002:0",
+            source="Splunk discovery knowledge",
+            title="Lab telemetry",
+            excerpt="The endpoint index was observed.",
+            connection_alias="lab-002",
+            connection_fingerprint="b" * 64,
+            tenant_scope_id="tenant-lab-002",
+        )
+    ]
+    answer = """### Fast sample
+```spl
+index=endpoint action=blocked | head 20
+```
+
+### Aggregate by host
+```spl
+index=endpoint action=blocked | stats count by host
+```
+
+```json
+{"not": "spl"}
+```
+"""
+
+    candidates = SecurityAgent._spl_candidates(answer, evidence, {}, request)
+
+    assert [item.title for item in candidates] == ["Fast sample", "Aggregate by host"]
+    assert [item.ordinal for item in candidates] == [1, 2]
+    assert all(item.safety == "reviewable" for item in candidates)
+    assert all(item.connection_alias == "lab-002" for item in candidates)
+    assert all(item.connection_fingerprint == "b" * 64 for item in candidates)
+    assert all(item.tenant_scope_id == "tenant-lab-002" for item in candidates)
+    assert all(item.evidence_refs == ["artifact-002:0"] for item in candidates)
+    assert "event sample" in candidates[0].expected_result
+    assert "aggregate result" in candidates[1].expected_result
+
+
+def test_response_spl_candidates_distinguish_blocked_and_already_executed():
+    request = ChatRequest(message="Review searches")
+    answer = """### Re-run
+```spl
+index=main | head 1
+```
+
+### Unsafe example
+```spl
+index=main | outputlookup findings.csv
+```
+"""
+
+    candidates = SecurityAgent._spl_candidates(
+        answer,
+        [],
+        {"tool": "run_query", "arguments": {"query": "index=main | head 1"}},
+        request,
+    )
+
+    assert candidates[0].safety == "already-executed"
+    assert candidates[1].safety == "blocked"
+    assert "high-risk command" in candidates[1].safety_reason
+
+
+def test_response_spl_candidate_accepts_compact_and_unlabelled_fences():
+    compact = SecurityAgent._spl_candidates(
+        "```spl index=main | stats count```", [], {}, ChatRequest(message="Count")
+    )
+    unlabelled = SecurityAgent._spl_candidates(
+        "```\nindex=main | head 5\n```", [], {}, ChatRequest(message="Sample")
+    )
+
+    assert compact[0].spl == "index=main | stats count"
+    assert unlabelled[0].spl == "index=main | head 5"
+
+
+def test_response_spl_candidate_preserves_model_stated_purpose_and_result():
+    candidates = SecurityAgent._spl_candidates(
+        """**Search 1: Recent authentication sample**
+**Purpose:** Inspect a small event sample without aggregating it.
+**Expected Result:** Ten recent authentication events with host and user.
+```spl
+index=auth | fields _time host user | head 10
+```""",
+        [],
+        {},
+        ChatRequest(message="Draft a search"),
+    )
+
+    assert candidates[0].title == "Recent authentication sample"
+    assert candidates[0].purpose == "Inspect a small event sample without aggregating it."
+    assert candidates[0].expected_result == "Ten recent authentication events with host and user."
+
+    after_fence = SecurityAgent._spl_candidates(
+        """Search 1: Recent authentication sample
+```spl
+index=auth | head 10
+```
+Purpose: Inspect current authentication evidence.
+Expected Result: Up to ten bounded events.
+
+Search 2: Authentication totals
+```spl
+index=auth | stats count
+```
+Purpose: Count current authentication evidence.
+Expected Result: One aggregate count.
+""",
+        [],
+        {},
+        ChatRequest(message="Draft two searches"),
+    )
+    assert [item.title for item in after_fence] == [
+        "Recent authentication sample",
+        "Authentication totals",
+    ]
+    assert after_fence[0].purpose == "Inspect current authentication evidence."
+    assert after_fence[1].purpose == "Count current authentication evidence."
+    assert after_fence[1].expected_result == "One aggregate count."
+
+
+def test_response_spl_candidate_blocks_unproven_connection_alias_as_index():
+    candidate = SecurityAgent._spl_candidates(
+        "```spl\nindex=primary | head 10\n```",
+        [EvidenceRef(id="a:0", title="Inventory", source="discovery", excerpt="Indexes: 12")],
+        {},
+        ChatRequest(message="Draft a search", connection_alias="primary"),
+    )[0]
+
+    assert candidate.safety == "blocked"
+    assert "connection alias 'primary' as an index" in candidate.safety_reason
+
+
+async def test_explicit_no_execution_instruction_prevents_metadata_tool_calls(tmp_path):
+    class NeverCalled:
+        async def call(self, logical_name, arguments=None):
+            raise AssertionError(f"Unexpected Splunk call: {logical_name}")
+
+    agent = SecurityAgent(
+        ConfigStore(tmp_path / "data"), EvidenceStore(tmp_path / "evidence.db"), NeverCalled()
+    )
+
+    result, trace, provenance = await agent._deterministic_tool(
+        ChatRequest(
+            message="Draft two searches aggregated by sourcetype, but do not execute either search."
+        )
+    )
+
+    assert result is None
+    assert trace is None
+    assert provenance == {}
+
+
+def test_scope_context_names_the_exact_active_execution_boundary():
+    value = SecurityAgent._scope_context_block(
+        ChatRequest(
+            message="Build SPL",
+            connection_alias="lab-002",
+            connection_fingerprint="c" * 64,
+            tenant_scope_id="tenant-002",
+        ),
+        [],
+    )
+
+    assert "Connection alias: lab-002" in value
+    assert f"Connection revision: {'c' * 64}" in value
+    assert "Tenant scope: tenant-002" in value
+    assert "No discovery knowledge for this exact scope" in value
+    assert "Do not imply that an index, sourcetype, field" in value
+    assert "routing metadata, never evidence of an index" in value
+
+
 def test_entity_extraction_is_gated_by_security_intent():
     assert not SecurityAgent._should_extract_entities("What Splunk version is connected?", "general")
     assert SecurityAgent._should_extract_entities("Investigate CVE-2025-1234", "triage")

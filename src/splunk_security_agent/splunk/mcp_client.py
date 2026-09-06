@@ -25,6 +25,14 @@ TOOL_ALIASES: dict[str, list[str]] = {
     "generate_spl": ["saia_generate_spl", "generate_spl"],
     "explain_spl": ["saia_explain_spl", "explain_spl"],
     "optimize_spl": ["saia_optimize_spl", "optimize_spl"],
+    "validate_spl": [
+        "splunk_validate_spl",
+        "validate_spl",
+        "splunk_parse_spl",
+        "parse_spl",
+        "splunk_search_parser",
+        "search_parser",
+    ],
 }
 
 CACHEABLE_TOOLS = {

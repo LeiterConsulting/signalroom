@@ -136,3 +136,48 @@ def test_artifact_retrieval_and_embeddings_are_tenant_scoped(tmp_path):
         [0.0, 1.0], "securebert", tenant_scope_id="tenant-primary"
     )
     assert {item.id for item in semantic} <= {f"{primary.id}:0"}
+
+
+def test_artifact_retrieval_can_require_exact_connection_revision(tmp_path):
+    store = EvidenceStore(tmp_path / "evidence.db")
+    old = store.add(
+        ArtifactCreate(
+            title="Old endpoint inventory",
+            content="revision marker endpoint telemetry",
+            tenant_scope_id="tenant-shared",
+            connection_alias="lab",
+            connection_fingerprint="a" * 64,
+        )
+    )
+    current = store.add(
+        ArtifactCreate(
+            title="Current endpoint inventory",
+            content="revision marker endpoint telemetry",
+            tenant_scope_id="tenant-shared",
+            connection_alias="lab",
+            connection_fingerprint="b" * 64,
+        )
+    )
+    store.save_embeddings(
+        "securebert",
+        [(f"{old.id}:0", [1.0, 0.0]), (f"{current.id}:0", [0.9, 0.1])],
+    )
+    scope = {
+        "tenant_scope_id": "tenant-shared",
+        "connection_alias": "lab",
+        "connection_fingerprint": "b" * 64,
+    }
+
+    assert [item.id for item in store.list(**scope)] == [current.id]
+    assert [item.title for item in store.search("revision marker", **scope)] == [
+        "Current endpoint inventory"
+    ]
+    assert [item[0] for item in store.pending_embeddings("other-model", **scope)] == [
+        f"{current.id}:0"
+    ]
+    assert [item.id for item in store.semantic_candidates(**scope)] == [
+        f"{current.id}:0"
+    ]
+    assert [item.id for item in store.semantic_search([1.0, 0.0], "securebert", **scope)] == [
+        f"{current.id}:0"
+    ]

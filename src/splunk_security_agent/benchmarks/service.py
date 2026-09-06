@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from ..agents import SecurityAgent
-from ..agents.security_agent import MODE_PROMPTS, SYSTEM_PROMPT
+from ..agents.security_agent import MODE_PROMPTS, SCOPE_PROMPT_POLICY, SYSTEM_PROMPT
 from ..config import ConfigStore
 from ..progress import ProgressCallback, report_progress
 from ..providers import ModelRouter
@@ -61,6 +61,8 @@ class GoldenBenchmarkService:
                 "model": profile.model,
                 "task": profile.task,
                 "enabled": profile.enabled,
+                "lifecycle": profile.lifecycle,
+                "staged_at": profile.staged_at,
             }
             for profile in settings.models
             if profile.provider == "ollama" and profile.task in {"chat", "security_reasoning"}
@@ -554,6 +556,7 @@ class GoldenBenchmarkService:
             {
                 "system": SYSTEM_PROMPT,
                 "modes": MODE_PROMPTS,
+                "scope_policy": SCOPE_PROMPT_POLICY,
                 "benchmark_max_output_tokens": BENCHMARK_MAX_OUTPUT_TOKENS,
             },
             sort_keys=True,

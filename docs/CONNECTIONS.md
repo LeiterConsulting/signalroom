@@ -27,7 +27,7 @@ complete multi-tenant isolation.
 
 ## Physical-isolation readiness contract
 
-Administrators can create a payload-opaque readiness plan in Setup for any admitted tenant and exact
+Administrators can create a payload-opaque readiness plan in **Settings → Instances** for any admitted tenant and exact
 connection revision. The plan inventories schemas and root-row counts and streams manifest-admitted files
 through SHA-256 without parsing or exposing them. It never moves a database row or file, creates runtime
 routing, or grants migration authority.
@@ -82,9 +82,14 @@ discovery tool contract and an administrator explicitly enables it. Token rotati
 admission even though the token is deliberately excluded from the identity fingerprint.
 
 The selected alias is used to construct a separate MCP client, workload-controller identity, model
-inventory, discovery pipeline, and investigation agent. Context and case retrieval remain tenant and
+inventory, discovery pipeline, and investigation agent. Knowledge and case retrieval remain tenant and
 revision scoped. Archiving removes the encrypted token and selector entry but preserves existing
 evidence, cases, jobs, and immutable provenance.
+
+Each investigation agent also receives a separate SPL Context Engine for that exact alias, fingerprint, and
+tenant. It will load only the correspondingly named latest discovery blueprint. A changed connection revision
+therefore shows **SPL context · discovery needed** until discovery runs against the replacement identity; schema
+from the prior instance cannot be used to context-compile SPL for the new one.
 
 ## Durable workflow behavior
 
@@ -121,7 +126,7 @@ The registry separates immutable identities from mutable aliases. The current li
 3. Run streamed configuration, DNS, TCP, TLS, MCP-authentication, and tool-contract diagnostics.
 4. Explicitly enable the exact successful revision.
 5. Assign the alias to named local users when optional RBAC is active.
-6. Select the admitted scope in the header before investigating, discovering, or curating Context and Cases.
+6. Select the admitted scope in the header before investigating, discovering, or curating Knowledge and Cases.
 7. Disable or archive the alias without deleting retained evidence.
 
 Local POC mode can use every admitted alias. With RBAC enabled, the selector is filtered to the exact
@@ -193,3 +198,17 @@ Reputation never proves compromise, an unfamiliar asset is not malware, and cont
 silently become an instruction. Each future connector must declare a stable identity, tenant scope,
 least-privilege authority, data-handling boundary, health/version contract, evidence attribution, and
 separate approval for external writes.
+
+## SPL validation capabilities vary by connection
+
+SignalRoom discovers SPL parser and Splunk AI Assistant capabilities independently for every immutable Splunk MCP
+connection revision. One estate may advertise a native parser or SAIA helper while another exposes only
+`splunk_run_query`. The validation queue never assumes that capability from the server product version, from a
+different alias, or from a previous connection revision.
+
+Use **Validate with Splunk** on a saved draft to see the exact target's current receipt. `Splunk parser passed`
+means an advertised parser returned an explicit positive decision without executing the search. `Parser
+unavailable` means runtime validation is still needed; it does not mean SignalRoom secretly substituted a local
+regex screen for a Splunk parser. Optional SAIA critique is offered only when a recognized tool is advertised and
+receives the SPL and bounds, not source rows. The execution step remains separately approved, read-only, bounded,
+workload-controlled, and attached to the draft's connection fingerprint and tenant scope.

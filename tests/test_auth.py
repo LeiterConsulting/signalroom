@@ -161,6 +161,20 @@ def test_roles_and_connection_assignment_are_independent(tmp_path) -> None:
     )
     assert allowed is False
     assert "Primary Splunk" in reason
+    allowed, reason = service.authorize(
+        analyst,
+        "POST",
+        "/api/validations/validation-1/preflight/stream",
+    )
+    assert allowed is False
+    assert "Primary Splunk" in reason
+    allowed, reason = service.authorize(
+        analyst,
+        "POST",
+        "/api/validations/validation-1/run/stream",
+    )
+    assert allowed is False
+    assert "Primary Splunk" in reason
     assert service.authorize(
         analyst,
         "POST",

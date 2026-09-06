@@ -20,7 +20,7 @@ from urllib.request import Request, urlopen
 
 RUNTIME_REQUIREMENTS = (
     "huggingface-hub>=0.27,<2",
-    "sentence-transformers>=3.4,<6",
+    "sentence-transformers>=3.4,<7",
     "torch>=2.5",
     "transformers>=4.48,<6",
 )

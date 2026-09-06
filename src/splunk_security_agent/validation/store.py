@@ -36,11 +36,14 @@ class ValidationStore:
                     id TEXT PRIMARY KEY, title TEXT NOT NULL, rationale TEXT NOT NULL,
                     spl TEXT NOT NULL, earliest_time TEXT NOT NULL, latest_time TEXT NOT NULL,
                     row_limit INTEGER NOT NULL, evidence_refs TEXT NOT NULL,
+                    result_contract TEXT NOT NULL DEFAULT '{}',
                     source_run_id TEXT NOT NULL, source_finding_ref TEXT NOT NULL,
                     case_id TEXT, expires_at TEXT, assurance_package_id TEXT NOT NULL DEFAULT '',
                     approval_scope TEXT NOT NULL DEFAULT 'single-execution',
                     status TEXT NOT NULL, query_fingerprint TEXT NOT NULL,
                     result_count INTEGER NOT NULL DEFAULT 0, result_preview TEXT NOT NULL,
+                    preflight_receipt TEXT NOT NULL DEFAULT '{}',
+                    execution_receipt TEXT NOT NULL DEFAULT '{}',
                     artifact_id TEXT NOT NULL, error TEXT NOT NULL,
                     approved_at TEXT, started_at TEXT, completed_at TEXT,
                     connection_alias TEXT NOT NULL DEFAULT 'primary',
@@ -75,6 +78,18 @@ class ValidationStore:
                 "tenant_scope_id": (
                     "ALTER TABLE validation_tasks ADD COLUMN tenant_scope_id "
                     "TEXT NOT NULL DEFAULT 'workspace-primary'"
+                ),
+                "result_contract": (
+                    "ALTER TABLE validation_tasks ADD COLUMN result_contract "
+                    "TEXT NOT NULL DEFAULT '{}'"
+                ),
+                "preflight_receipt": (
+                    "ALTER TABLE validation_tasks ADD COLUMN preflight_receipt "
+                    "TEXT NOT NULL DEFAULT '{}'"
+                ),
+                "execution_receipt": (
+                    "ALTER TABLE validation_tasks ADD COLUMN execution_receipt "
+                    "TEXT NOT NULL DEFAULT '{}'"
                 ),
             }
             for name, statement in migrations.items():
@@ -129,11 +144,12 @@ class ValidationStore:
             db.execute(
                 """INSERT INTO validation_tasks
                 (id,title,rationale,spl,earliest_time,latest_time,row_limit,evidence_refs,
-                source_run_id,source_finding_ref,case_id,expires_at,assurance_package_id,
+                result_contract,source_run_id,source_finding_ref,case_id,expires_at,assurance_package_id,
                 approval_scope,status,query_fingerprint,result_count,result_preview,artifact_id,error,
+                preflight_receipt,execution_receipt,
                 approved_at,started_at,completed_at,connection_alias,connection_fingerprint,
                 tenant_scope_id,created_at,updated_at)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     task_id,
                     value.title.strip(),
@@ -143,6 +159,7 @@ class ValidationStore:
                     value.latest_time.strip(),
                     value.row_limit,
                     json.dumps(sorted(set(value.evidence_refs))),
+                    json.dumps(value.result_contract, sort_keys=True, default=str),
                     value.source_run_id,
                     value.source_finding_ref,
                     value.case_id,
@@ -155,6 +172,8 @@ class ValidationStore:
                     "[]",
                     "",
                     "",
+                    "{}",
+                    "{}",
                     None,
                     None,
                     None,
@@ -219,6 +238,8 @@ class ValidationStore:
                 "completed_at": None,
                 "result_count": 0,
                 "result_preview": "[]",
+                "preflight_receipt": "{}",
+                "execution_receipt": "{}",
                 "artifact_id": "",
                 "error": "",
                 "query_fingerprint": self.fingerprint(
@@ -230,6 +251,8 @@ class ValidationStore:
                 "updated_at": datetime.now(UTC).isoformat(),
             }
         )
+        if "spl" in fields:
+            fields["result_contract"] = "{}"
         assignments = ", ".join(f"{key} = ?" for key in fields)
         with self._lock, self.connect() as db:
             db.execute(
@@ -267,19 +290,40 @@ class ValidationStore:
             )
         return self.get(task_id) if result.rowcount else None
 
+    def set_preflight(
+        self, task_id: str, receipt: dict[str, Any]
+    ) -> ValidationTaskRecord | None:
+        current = self.get(task_id)
+        if current is None or current.status not in {"draft", "error", "approved"}:
+            return None
+        now = datetime.now(UTC).isoformat()
+        with self._lock, self.connect() as db:
+            db.execute(
+                """UPDATE validation_tasks SET preflight_receipt=?,updated_at=? WHERE id=?""",
+                (json.dumps(receipt, default=str), now, task_id),
+            )
+        return self.get(task_id)
+
     def complete(
-        self, task_id: str, result_count: int, result_preview: list[Any], artifact_id: str
+        self,
+        task_id: str,
+        result_count: int,
+        result_preview: list[Any],
+        artifact_id: str,
+        execution_receipt: dict[str, Any] | None = None,
     ) -> ValidationTaskRecord | None:
         now = datetime.now(UTC).isoformat()
         with self._lock, self.connect() as db:
             result = db.execute(
                 """UPDATE validation_tasks SET status = 'complete', result_count = ?,
-                result_preview = ?, artifact_id = ?, error = '', completed_at = ?, updated_at = ?
+                result_preview = ?, artifact_id = ?, execution_receipt=?, error = '',
+                completed_at = ?, updated_at = ?
                 WHERE id = ? AND status = 'running'""",
                 (
                     result_count,
                     json.dumps(result_preview, default=str),
                     artifact_id,
+                    json.dumps(execution_receipt or {}, default=str),
                     now,
                     now,
                     task_id,
@@ -393,6 +437,7 @@ class ValidationStore:
             latest_time=row["latest_time"],
             row_limit=int(row["row_limit"]),
             evidence_refs=json.loads(row["evidence_refs"]),
+            result_contract=json.loads(row["result_contract"]),
             source_run_id=row["source_run_id"],
             source_finding_ref=row["source_finding_ref"],
             case_id=row["case_id"],
@@ -403,6 +448,8 @@ class ValidationStore:
             query_fingerprint=row["query_fingerprint"],
             result_count=int(row["result_count"]),
             result_preview=json.loads(row["result_preview"]),
+            preflight_receipt=json.loads(row["preflight_receipt"]),
+            execution_receipt=json.loads(row["execution_receipt"]),
             artifact_id=row["artifact_id"],
             error=row["error"],
             approved_at=row["approved_at"],

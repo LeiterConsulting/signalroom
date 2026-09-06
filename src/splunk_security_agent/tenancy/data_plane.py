@@ -2274,9 +2274,20 @@ class RoutedEvidenceStore:
             self.registry.note_write(record.tenant_scope_id)
             return result
 
-    def list(self, limit: int = 100, tenant_scope_id: str | None = None) -> list[Any]:
+    def list(
+        self,
+        limit: int = 100,
+        tenant_scope_id: str | None = None,
+        connection_alias: str | None = None,
+        connection_fingerprint: str | None = None,
+    ) -> list[Any]:
         if tenant_scope_id:
-            return self._store(tenant_scope_id).list(limit, tenant_scope_id)
+            return self._store(tenant_scope_id).list(
+                limit,
+                tenant_scope_id,
+                connection_alias,
+                connection_fingerprint,
+            )
         return self._aggregate("list", limit)
 
     def get(self, artifact_id: str, tenant_scope_id: str | None = None) -> Any:
@@ -2309,9 +2320,22 @@ class RoutedEvidenceStore:
                 self.registry.note_write(tenant)
             return result
 
-    def search(self, query: str, limit: int = 6, tenant_scope_id: str | None = None) -> list[Any]:
+    def search(
+        self,
+        query: str,
+        limit: int = 6,
+        tenant_scope_id: str | None = None,
+        connection_alias: str | None = None,
+        connection_fingerprint: str | None = None,
+    ) -> list[Any]:
         if tenant_scope_id:
-            return self._store(tenant_scope_id).search(query, limit, tenant_scope_id)
+            return self._store(tenant_scope_id).search(
+                query,
+                limit,
+                tenant_scope_id,
+                connection_alias,
+                connection_fingerprint,
+            )
         values: list[Any] = []
         for tenant, store in self._active_stores():
             values.extend(store.search(query, limit, tenant))
@@ -2321,10 +2345,21 @@ class RoutedEvidenceStore:
         return sorted(values, key=lambda item: item.score, reverse=True)[:limit]
 
     def pending_embeddings(
-        self, model_profile: str, limit: int = 32, tenant_scope_id: str | None = None
+        self,
+        model_profile: str,
+        limit: int = 32,
+        tenant_scope_id: str | None = None,
+        connection_alias: str | None = None,
+        connection_fingerprint: str | None = None,
     ) -> list[tuple[str, str]]:
         if tenant_scope_id:
-            return self._store(tenant_scope_id).pending_embeddings(model_profile, limit, tenant_scope_id)
+            return self._store(tenant_scope_id).pending_embeddings(
+                model_profile,
+                limit,
+                tenant_scope_id,
+                connection_alias,
+                connection_fingerprint,
+            )
         values: list[tuple[str, str]] = []
         for tenant, store in self._active_stores():
             values.extend(store.pending_embeddings(model_profile, limit, tenant))
@@ -2366,9 +2401,20 @@ class RoutedEvidenceStore:
             for key in ("total_chunks", "indexed_chunks", "pending_chunks")
         }
 
-    def semantic_candidates(self, limit: int = 24, tenant_scope_id: str | None = None) -> list[Any]:
+    def semantic_candidates(
+        self,
+        limit: int = 24,
+        tenant_scope_id: str | None = None,
+        connection_alias: str | None = None,
+        connection_fingerprint: str | None = None,
+    ) -> list[Any]:
         if tenant_scope_id:
-            return self._store(tenant_scope_id).semantic_candidates(limit, tenant_scope_id)
+            return self._store(tenant_scope_id).semantic_candidates(
+                limit,
+                tenant_scope_id,
+                connection_alias,
+                connection_fingerprint,
+            )
         return self._aggregate("semantic_candidates", limit)[:limit]
 
     def semantic_search(
@@ -2377,10 +2423,17 @@ class RoutedEvidenceStore:
         model_profile: str,
         limit: int = 6,
         tenant_scope_id: str | None = None,
+        connection_alias: str | None = None,
+        connection_fingerprint: str | None = None,
     ) -> list[Any]:
         if tenant_scope_id:
             return self._store(tenant_scope_id).semantic_search(
-                query_vector, model_profile, limit, tenant_scope_id
+                query_vector,
+                model_profile,
+                limit,
+                tenant_scope_id,
+                connection_alias,
+                connection_fingerprint,
             )
         values: list[Any] = []
         for tenant, store in self._active_stores():

@@ -17,6 +17,7 @@ from ..schemas import (
     AgentTrace,
     ChatRequest,
     ChatResponse,
+    ChatSplCandidate,
     EntityPivot,
     EvidenceLedgerEntry,
     EvidenceRef,
@@ -24,7 +25,8 @@ from ..schemas import (
     ModelRecommendation,
     ResultEnrichment,
 )
-from ..splunk.guardrails import READ_ONLY_DENY
+from ..splunk.context_engine import SplContextEngine
+from ..splunk.guardrails import READ_ONLY_DENY, validate_read_only_spl
 
 SYSTEM_PROMPT = """You are a senior Splunk security analyst. Be evidence-led and concise.
 Separate observed facts from hypotheses. Cite supplied evidence with [E1], [E2], etc.
@@ -34,6 +36,22 @@ requested fact first, and do not say that a search is still needed or recommend 
 the identical search. Refer to it as [TOOL_RESULT], not as numbered evidence.
 Prefer read-only SPL. Explain risk, confidence, and the next useful validation step.
 If context is insufficient, say exactly what evidence is missing."""
+
+SCOPE_PROMPT_POLICY = (
+    "Answer only for this scope. Any proposed SPL must be read-only, explicitly bounded, "
+    "and based on fields or data sources proven in this scope. The connection alias and tenant "
+    "scope are routing metadata, never evidence of an index or sourcetype with the same name. "
+    "Clearly label assumptions and use an unmistakable placeholder when an index is not proven."
+)
+
+TOOL_EXECUTION_OPT_OUT = re.compile(
+    r"(?i)\b(?:do\s+not|don't|without)\s+(?:run|execute|query|search|contact|call)\b"
+)
+SPL_AUTHORING_REQUEST = re.compile(
+    r"(?is)\b(?:build|compose|construct|create|draft|generate|produce|write)\b.{0,120}"
+    r"\b(?:spl|search|query)\b|"
+    r"\b(?:spl|search|query)\b.{0,120}\b(?:for|that|to\s+(?:detect|find|show|summarize))\b"
+)
 
 
 ENTITY_SIGNAL = re.compile(
@@ -91,15 +109,22 @@ MODE_PROMPTS = {
 
 
 class SecurityAgent:
-    def __init__(self, config: ConfigStore, evidence: EvidenceStore, splunk_client: Any):
+    def __init__(
+        self,
+        config: ConfigStore,
+        evidence: EvidenceStore,
+        splunk_client: Any,
+        spl_context: SplContextEngine | None = None,
+    ):
         self.config = config
         self.evidence = evidence
         self.splunk = splunk_client
+        self.spl_context = spl_context
         self.router = ModelRouter(config)
         self.memory: dict[tuple[str, str, str], list[dict[str, str]]] = {}
         self._entity_cache: dict[str, tuple[float, list[dict[str, Any]]]] = {}
         self._retrieval_cache: dict[
-            tuple[str, bool, str, str], tuple[float, list[EvidenceRef], str]
+            tuple[str, bool, str, str, str], tuple[float, list[EvidenceRef], str]
         ] = {}
 
     def invalidate_context_cache(self) -> None:
@@ -117,11 +142,22 @@ class SecurityAgent:
         history = self.memory.setdefault(memory_key, [])[-8:]
         mode = self.router.classify_mode(request.message, request.mode)
         profile_id, route = self.router.route_chat(request.message, request.model_profile, mode)
-        live_query_intent = self._compile_live_query(request.message)
-        direct_mcp_expected = bool(live_query_intent and request.execute_searches)
-        route_target = "live Splunk MCP" if direct_mcp_expected else profile_id
+        spl_authoring_request = self._is_spl_authoring_request(request.message, mode)
+        live_query_intent = (
+            None if spl_authoring_request else self._compile_live_query(request.message)
+        )
+        direct_mcp_expected = bool(live_query_intent and self._tool_execution_allowed(request))
+        route_target = (
+            "SPL Context Engine"
+            if spl_authoring_request
+            else "live Splunk MCP"
+            if direct_mcp_expected
+            else profile_id
+        )
         route_detail = (
-            "A narrow factual request will be answered directly from a bounded read-only query."
+            "A local model will propose typed intent; only the deterministic compiler may emit SPL."
+            if spl_authoring_request
+            else "A narrow factual request will be answered directly from a bounded read-only query."
             if direct_mcp_expected
             else route
         )
@@ -155,9 +191,16 @@ class SecurityAgent:
         await report_progress(
             progress,
             "retrieval",
-            "Searching local evidence",
             (
-                "Ranking discovery knowledge, runbooks, and analyst artifacts before "
+                "Loading the exact-scope SPL context"
+                if spl_authoring_request
+                else "Searching local evidence"
+            ),
+            (
+                "Using the active discovery schema and relationship graph; RAG excerpts and "
+                "source event rows are excluded from SPL planning."
+                if spl_authoring_request
+                else "Ranking discovery knowledge, runbooks, and analyst artifacts before "
                 "considering a live Splunk call."
             ),
             progress=16,
@@ -168,21 +211,32 @@ class SecurityAgent:
                 specialist_retrieval_allowed,
                 request.tenant_scope_id,
                 request.connection_fingerprint,
+                request.connection_alias,
             )
             if self._should_retrieve(request.message, request.include_context)
             and not live_query_intent
+            and not spl_authoring_request
             else self._empty_retrieval()
         )
         evidence, retrieval_mode = await retrieval_work
-        if live_query_intent:
+        if spl_authoring_request:
+            retrieval_mode = (
+                "Exact-scope schema context selected; generic RAG excerpts were intentionally "
+                "excluded from authoring."
+            )
+        elif live_query_intent:
             retrieval_mode = "Live MCP query prioritized over cached discovery context"
         await report_progress(
             progress,
             "retrieval",
-            f"Retrieved {len(evidence)} evidence chunk{'s' if len(evidence) != 1 else ''}",
+            (
+                "Exact-scope SPL context selected"
+                if spl_authoring_request
+                else f"Retrieved {len(evidence)} evidence chunk{'s' if len(evidence) != 1 else ''}"
+            ),
             (
                 retrieval_mode
-                if evidence or live_query_intent
+                if spl_authoring_request or evidence or live_query_intent
                 else "No matching local context was found."
             ),
             progress=32,
@@ -220,6 +274,7 @@ class SecurityAgent:
             self._extract_entities(request.message, specialist_entity_allowed)
             if specialist_entity_allowed and self._should_extract_entities(request.message, mode)
             and not direct_mcp_expected
+            and not spl_authoring_request
             else self._empty_entities()
         )
         await report_progress(
@@ -297,10 +352,91 @@ class SecurityAgent:
                     ),
                 )
             )
+        spl_plan_result: dict[str, Any] | None = None
+        if spl_authoring_request:
+            await report_progress(
+                progress,
+                "spl-context",
+                "Planning against the active Splunk schema",
+                (
+                    "The local model receives exact-scope schema, relationships, and result "
+                    "shapes; source event examples are omitted and pasted samples are synthesized. "
+                    "SignalRoom will compile its typed plan deterministically."
+                ),
+                progress=72,
+                metrics={"provider": "ollama", "profile": profile_id, "raw_values": 0},
+            )
+            if self.spl_context is None:
+                spl_plan_result = {
+                    "status": "blocked",
+                    "reason": "The SPL Context Engine is not bound to this connection.",
+                    "compilations": [],
+                }
+            else:
+                try:
+                    spl_plan_result = await self.spl_context.plan_and_compile(
+                        request.message,
+                        self.router.provider(profile_id),
+                    )
+                except (ModelProviderError, KeyError, ValueError) as exc:
+                    spl_plan_result = {
+                        "status": "blocked",
+                        "reason": f"The typed SPL planning step failed: {exc}",
+                        "compilations": [],
+                    }
+            ready_count = sum(
+                item.get("status") == "context-compiled"
+                for item in spl_plan_result.get("compilations", [])
+                if isinstance(item, dict)
+            )
+            trace.append(
+                AgentTrace(
+                    step=len(trace) + 1,
+                    kind="model" if ready_count else "guardrail",
+                    label=(
+                        f"Context-compiled {ready_count} SPL draft"
+                        f"{'s' if ready_count != 1 else ''}"
+                        if ready_count
+                        else "SPL compilation blocked"
+                    ),
+                    detail=(
+                        "The model supplied typed intent only. Exact-scope identifiers, read-only "
+                        "syntax, and bounds were enforced by SignalRoom without raw event samples."
+                        if ready_count
+                        else str(spl_plan_result.get("reason") or "No proposed plan passed context checks.")
+                    ),
+                )
+            )
+            await report_progress(
+                progress,
+                "spl-context",
+                "Trusted SPL draft ready" if ready_count else "SPL draft needs context",
+                (
+                    f"Compiled {ready_count} separately reviewable search"
+                    f"{'es' if ready_count != 1 else ''}; parser validation and approved "
+                    "execution remain pending."
+                    if ready_count
+                    else str(
+                        spl_plan_result.get("reason")
+                        or "The context could not prove the requested plan."
+                    )
+                ),
+                progress=84,
+                status="complete",
+                metrics={"compiled_searches": ready_count, "raw_values": 0},
+            )
+
         direct_answer = self._format_live_tool_answer(tool_result, tool_provenance)
         response_profile = profile_id
         response_route = route
-        if direct_answer is not None:
+        if spl_authoring_request:
+            answer = self._format_context_compilation(spl_plan_result or {})
+            model_name = str((spl_plan_result or {}).get("model") or "SPL Context Engine")
+            requested_model = str((spl_plan_result or {}).get("requested_model") or profile_id)
+            model_activation = (spl_plan_result or {}).get("model_activation") or {}
+            response_profile = profile_id
+            response_route = "typed-intent:context-compiler"
+        elif direct_answer is not None:
             await report_progress(
                 progress,
                 "model",
@@ -328,10 +464,14 @@ class SecurityAgent:
             )
         else:
             context = self._context_block(evidence, tool_result, entities)
+            scope_context = self._scope_context_block(request, evidence)
             messages = [
                 {
                     "role": "system",
-                    "content": f"{SYSTEM_PROMPT}\n\nINVESTIGATION MODE: {mode}\n{MODE_PROMPTS[mode]}",
+                    "content": (
+                        f"{SYSTEM_PROMPT}\n\nINVESTIGATION MODE: {mode}\n{MODE_PROMPTS[mode]}"
+                        f"\n\n{scope_context}"
+                    ),
                 },
                 *history,
                 {"role": "user", "content": f"{request.message}\n\n{context}"},
@@ -392,9 +532,17 @@ class SecurityAgent:
         await report_progress(
             progress,
             "model",
-            "Verified response ready" if direct_answer is not None else "Local synthesis complete",
             (
-                "The answer was rendered directly from the live Splunk MCP result."
+                "Context-compiled SPL ready"
+                if spl_authoring_request
+                else "Verified response ready"
+                if direct_answer is not None
+                else "Local synthesis complete"
+            ),
+            (
+                "The local model supplied typed intent; deterministic application code emitted SPL."
+                if spl_authoring_request
+                else "The answer was rendered directly from the live Splunk MCP result."
                 if direct_answer is not None
                 else f"{model_name} returned an evidence-bounded response."
             ),
@@ -406,15 +554,46 @@ class SecurityAgent:
         await report_progress(
             progress,
             "ledger",
-            "Building the evidence ledger",
-            "Attaching provenance, confidence, validation status, and follow-on analyst actions.",
+            "Building the SPL trust receipt" if spl_authoring_request else "Building the evidence ledger",
+            (
+                "Attaching the exact context revision, compiler checks, and pending validation steps."
+                if spl_authoring_request
+                else "Attaching provenance, confidence, validation status, and follow-on analyst actions."
+            ),
             progress=94,
         )
 
+        retained_message = request.message
+        if spl_authoring_request and self.spl_context is not None:
+            retained_message, _ = self.spl_context.sanitize_authoring_request(retained_message)
         history.extend(
-            [{"role": "user", "content": request.message}, {"role": "assistant", "content": answer}]
+            [{"role": "user", "content": retained_message}, {"role": "assistant", "content": answer}]
         )
         self.memory[memory_key] = history[-10:]
+        spl_candidates = self._spl_candidates(
+            answer,
+            evidence,
+            tool_provenance,
+            request,
+            self.spl_context,
+        )
+        compiled_candidates = self._compiled_spl_candidates(
+            spl_plan_result,
+            evidence,
+            request,
+        )
+        if compiled_candidates:
+            compiled_spl = {
+                re.sub(r"\s+", " ", item.spl).strip() for item in compiled_candidates
+            }
+            spl_candidates = compiled_candidates + [
+                item
+                for item in spl_candidates
+                if re.sub(r"\s+", " ", item.spl).strip() not in compiled_spl
+            ]
+            for ordinal, item in enumerate(spl_candidates[:8], 1):
+                item.ordinal = ordinal
+            spl_candidates = spl_candidates[:8]
         response = ChatResponse(
             conversation_id=conversation_id,
             message=answer,
@@ -435,8 +614,11 @@ class SecurityAgent:
                 mode,
                 response_profile,
                 request.tenant_scope_id,
+                request.connection_alias,
+                request.connection_fingerprint,
             ),
             enrichment=enrichment,
+            spl_candidates=spl_candidates,
             connection_alias=request.connection_alias,
             connection_fingerprint=request.connection_fingerprint,
             tenant_scope_id=request.tenant_scope_id,
@@ -466,12 +648,25 @@ class SecurityAgent:
         allow_specialist: bool = False,
         tenant_scope_id: str = "workspace-primary",
         connection_fingerprint: str = "",
+        connection_alias: str = "primary",
     ) -> tuple[list[EvidenceRef], str]:
-        cache_key = (query, allow_specialist, tenant_scope_id, connection_fingerprint)
+        cache_key = (
+            query,
+            allow_specialist,
+            tenant_scope_id,
+            connection_alias,
+            connection_fingerprint,
+        )
         cached = self._retrieval_cache.get(cache_key)
         if cached and time.monotonic() - cached[0] < 60:
             return cached[1], f"{cached[2]} (cached)"
-        lexical = self.evidence.search(query, limit=24, tenant_scope_id=tenant_scope_id)
+        lexical = self.evidence.search(
+            query,
+            limit=24,
+            tenant_scope_id=tenant_scope_id,
+            connection_alias=connection_alias,
+            connection_fingerprint=connection_fingerprint,
+        )
         settings = self.config.load()
         cloud_runtime = settings.specialist_runtime == "cloud"
         if not allow_specialist or (
@@ -484,7 +679,11 @@ class SecurityAgent:
             provider = self.router.provider(settings.embedding_model)
             specialist_label = "Local SecureBERT" if not cloud_runtime else "Hosted SecureBERT"
             pending = self.evidence.pending_embeddings(
-                settings.embedding_model, limit=48, tenant_scope_id=tenant_scope_id
+                settings.embedding_model,
+                limit=48,
+                tenant_scope_id=tenant_scope_id,
+                connection_alias=connection_alias,
+                connection_fingerprint=connection_fingerprint,
             )
             inputs = [query, *(content for _, content in pending)]
             try:
@@ -501,7 +700,10 @@ class SecurityAgent:
             except ModelProviderError:
                 candidate_map = {item.id: item for item in lexical}
                 for item in self.evidence.semantic_candidates(
-                    limit=64, tenant_scope_id=tenant_scope_id
+                    limit=64,
+                    tenant_scope_id=tenant_scope_id,
+                    connection_alias=connection_alias,
+                    connection_fingerprint=connection_fingerprint,
                 ):
                     candidate_map.setdefault(item.id, item)
                 candidates = list(candidate_map.values())[:64]
@@ -545,6 +747,8 @@ class SecurityAgent:
                 settings.embedding_model,
                 limit=6,
                 tenant_scope_id=tenant_scope_id,
+                connection_alias=connection_alias,
+                connection_fingerprint=connection_fingerprint,
             )
             merged: dict[str, EvidenceRef] = {item.id: item for item in lexical}
             for item in semantic:
@@ -685,6 +889,7 @@ class SecurityAgent:
                 allow_semantic_retrieval,
                 request.tenant_scope_id,
                 request.connection_fingerprint,
+                request.connection_alias,
             )
             context_matches = self._merge_evidence(
                 [], context_matches, limit=4, max_per_artifact=1
@@ -937,8 +1142,23 @@ class SecurityAgent:
         progress: ProgressCallback | None = None,
     ) -> tuple[Any, tuple[str, str] | None, dict[str, Any]]:
         text = request.message.lower()
+        if self._is_spl_authoring_request(request.message, mode):
+            await report_progress(
+                progress,
+                "splunk-plan",
+                "Reserved live access for validation",
+                (
+                    "SPL authoring uses the local schema context first. No live event search will "
+                    "run until the analyst stages and approves a compiled draft."
+                ),
+                progress=68,
+                status="complete",
+                metrics={"splunk_calls": 0},
+            )
+            return None, None, {}
         query = self._extract_spl(request.message)
-        if query and request.execute_searches:
+        execution_allowed = self._tool_execution_allowed(request)
+        if query and execution_allowed:
             if READ_ONLY_DENY.search(query):
                 return (
                     {"blocked_query": query},
@@ -973,7 +1193,7 @@ class SecurityAgent:
             )
 
         live_query = self._compile_live_query(request.message)
-        if live_query and request.execute_searches:
+        if live_query and execution_allowed:
             arguments = {
                 "query": live_query["query"],
                 "earliest_time": live_query["earliest_time"],
@@ -1064,7 +1284,7 @@ class SecurityAgent:
                     ("get_metadata", {"type": "hosts", "row_limit": 100}, "hosts"),
                 ]
             )
-        if not request.execute_searches or not plan:
+        if not execution_allowed or not plan:
             await report_progress(
                 progress,
                 "splunk-plan",
@@ -1114,6 +1334,28 @@ class SecurityAgent:
                 "arguments": [arguments for _name, arguments, _label in plan],
                 "read_only": True,
             },
+        )
+
+    @staticmethod
+    def _tool_execution_allowed(request: ChatRequest) -> bool:
+        """Honor an explicit no-execution instruction even when the UI allows read-only tools."""
+        return request.execute_searches and not bool(TOOL_EXECUTION_OPT_OUT.search(request.message))
+
+    @staticmethod
+    def _is_spl_authoring_request(message: str, mode: str = "general") -> bool:
+        """Separate requests to create SPL from requests to explain or run supplied SPL."""
+        supplied = SecurityAgent._extract_spl(message)
+        if supplied and SecurityAgent._looks_like_spl(supplied):
+            return False
+        normalized = re.sub(r"\s+", " ", message.strip())
+        if SPL_AUTHORING_REQUEST.search(normalized):
+            return True
+        return mode == "spl" and bool(
+            re.search(
+                r"(?i)\b(?:how (?:can|do|would) i|help me|need (?:a|an)|want (?:a|an))\b.{0,120}"
+                r"\b(?:spl|search|query)\b",
+                normalized,
+            )
         )
 
     @staticmethod
@@ -1278,6 +1520,354 @@ class SecurityAgent:
         if len(lines) == 1:
             lines.append("No local evidence or tool result is available.")
         return "\n".join(lines)
+
+    @staticmethod
+    def _scope_context_block(request: ChatRequest, evidence: list[EvidenceRef]) -> str:
+        discovery_refs = sum(
+            item.kind == "discovery-knowledge"
+            or item.source == "Splunk discovery knowledge"
+            for item in evidence
+        )
+        knowledge_status = (
+            f"{discovery_refs} current-scope discovery reference(s) were retrieved."
+            if discovery_refs
+            else (
+                "No discovery knowledge for this exact scope was retrieved for this question. "
+                "Do not imply that an index, sourcetype, field, or knowledge object exists unless "
+                "it appears in supplied evidence or a tool result."
+            )
+        )
+        fingerprint = request.connection_fingerprint or "unbound"
+        return (
+            "ACTIVE SPLUNK SCOPE (authoritative execution and evidence boundary):\n"
+            f"- Connection alias: {request.connection_alias}\n"
+            f"- Connection revision: {fingerprint}\n"
+            f"- Tenant scope: {request.tenant_scope_id}\n"
+            f"- Scope knowledge: {knowledge_status}\n"
+            f"{SCOPE_PROMPT_POLICY}"
+        )
+
+    @classmethod
+    def _spl_candidates(
+        cls,
+        answer: str,
+        evidence: list[EvidenceRef],
+        provenance: dict[str, Any] | None,
+        request: ChatRequest,
+        context_engine: SplContextEngine | None = None,
+    ) -> list[ChatSplCandidate]:
+        """Turn every SPL-shaped response block into a reviewable, scope-bound candidate."""
+        provenance = provenance or {}
+        tool_arguments = provenance.get("arguments") or {}
+        executed_query = (
+            str(tool_arguments.get("query") or "").strip()
+            if isinstance(tool_arguments, dict)
+            else ""
+        )
+        matches = list(
+            re.finditer(
+                r"```(?P<opening>[^\r\n`]*)\r?\n?(?P<body>[\s\S]*?)```",
+                answer,
+            )
+        )
+        candidates: list[ChatSplCandidate] = []
+        seen: set[str] = set()
+        evidence_refs = [item.id for item in evidence[:16]]
+        for match in matches:
+            opening = match.group("opening").strip()
+            language = opening.lower()
+            body = match.group("body").strip()
+            if language in {"spl", "splunk", "search"}:
+                spl = body
+            elif any(language.startswith(f"{name} ") for name in ("spl", "splunk", "search")):
+                name, inline = opening.split(maxsplit=1)
+                language = name.lower()
+                spl = f"{inline}\n{body}".strip()
+            else:
+                spl = f"{opening}\n{body}".strip()
+            if not spl or (language not in {"spl", "splunk", "search"} and not cls._looks_like_spl(spl)):
+                continue
+            normalized = re.sub(r"\s+", " ", spl).strip()
+            digest = hashlib.sha256(normalized.encode()).hexdigest()
+            if digest in seen:
+                continue
+            seen.add(digest)
+            ordinal = len(candidates) + 1
+            title, purpose, stated_result = cls._spl_candidate_details(
+                answer[: match.start()], answer[match.end() :], ordinal
+            )
+            safety = "reviewable"
+            safety_reason = (
+                "Read-only syntax passed initial screening. Execution still requires contract "
+                "analysis and explicit analyst approval."
+            )
+            try:
+                validate_read_only_spl(spl)
+            except ValueError as exc:
+                safety = "blocked"
+                safety_reason = str(exc)
+            if executed_query and normalized == re.sub(r"\s+", " ", executed_query).strip():
+                safety = "already-executed"
+                safety_reason = "This exact SPL already ran through Splunk MCP for this response."
+            referenced_indexes = re.findall(
+                r"(?i)(?:^|\s)index\s*=\s*[\"']?([A-Za-z0-9_.:-]+)", spl
+            )
+            if (
+                safety == "reviewable"
+                and request.connection_alias.lower() in {item.lower() for item in referenced_indexes}
+                and not any(
+                    re.search(
+                        rf"(?i)\bindex\s*(?:=|:)\s*[\"']?{re.escape(request.connection_alias)}\b",
+                        item.excerpt,
+                    )
+                    for item in evidence
+                )
+            ):
+                safety = "blocked"
+                safety_reason = (
+                    f"The SPL uses connection alias '{request.connection_alias}' as an index, but "
+                    "the exact-scope evidence does not prove an index with that name. Replace it "
+                    "with an observed index before staging."
+                )
+            trust_status = "already-executed" if safety == "already-executed" else (
+                "blocked" if safety == "blocked" else "model-proposed"
+            )
+            trust_reason = safety_reason
+            context_revision = ""
+            source_run_id = ""
+            trust_checks: list[dict[str, str]] = []
+            if context_engine is not None and safety == "reviewable":
+                assessment = context_engine.assess_spl(spl)
+                trust_status = str(assessment.get("status") or "model-proposed")
+                context_revision = str(assessment.get("context_revision") or "")
+                source_run_id = str(assessment.get("source_run_id") or "")
+                trust_checks = list(assessment.get("checks") or [])[:16]
+                blockers = list(assessment.get("blockers") or [])
+                warnings = list(assessment.get("warnings") or [])
+                trust_reason = " ".join(blockers or warnings) or (
+                    "Identifiers are grounded in the exact-scope context. Splunk parser validation "
+                    "and bounded execution remain pending."
+                )
+                if trust_status == "blocked":
+                    safety = "blocked"
+                    safety_reason = trust_reason
+            candidates.append(
+                ChatSplCandidate(
+                    id=f"chat-spl-{digest[:16]}",
+                    ordinal=ordinal,
+                    title=title,
+                    purpose=purpose,
+                    expected_result=stated_result or cls._spl_expected_result(spl),
+                    spl=spl,
+                    evidence_refs=evidence_refs,
+                    safety=safety,
+                    safety_reason=safety_reason,
+                    trust_status=trust_status,
+                    trust_reason=trust_reason,
+                    context_revision=context_revision,
+                    source_run_id=source_run_id,
+                    trust_checks=trust_checks,
+                    connection_alias=request.connection_alias,
+                    connection_fingerprint=request.connection_fingerprint,
+                    tenant_scope_id=request.tenant_scope_id,
+                )
+            )
+            if len(candidates) >= 8:
+                break
+        return candidates
+
+    @staticmethod
+    def _compiled_spl_candidates(
+        result: dict[str, Any] | None,
+        evidence: list[EvidenceRef],
+        request: ChatRequest,
+    ) -> list[ChatSplCandidate]:
+        if not result:
+            return []
+        compilations = result.get("compilations")
+        if not isinstance(compilations, list):
+            compilations = [result] if result.get("spl") else []
+        candidates: list[ChatSplCandidate] = []
+        for item in compilations:
+            if not isinstance(item, dict) or item.get("status") != "context-compiled":
+                continue
+            spl = str(item.get("spl") or "").strip()
+            if not spl:
+                continue
+            digest = hashlib.sha256(re.sub(r"\s+", " ", spl).strip().encode()).hexdigest()
+            candidates.append(
+                ChatSplCandidate(
+                    id=f"context-spl-{digest[:16]}",
+                    ordinal=len(candidates) + 1,
+                    title=str(
+                        item.get("purpose")
+                        or f"Context-compiled search {len(candidates) + 1}"
+                    )[:240],
+                    purpose=str(item.get("purpose") or "Execute the typed analyst search intent."),
+                    expected_result=str(item.get("expected_result") or "A bounded Splunk result."),
+                    spl=spl,
+                    earliest_time=str(item.get("earliest_time") or "-24h"),
+                    latest_time=str(item.get("latest_time") or "now"),
+                    row_limit=int(item.get("row_limit") or 100),
+                    evidence_refs=[],
+                    safety="reviewable",
+                    safety_reason=(
+                        "Context compilation passed. Splunk parser validation and an explicitly "
+                        "approved bounded execution are still required."
+                    ),
+                    origin="context-compiler",
+                    trust_status="context-compiled",
+                    trust_reason=(
+                        "A local model proposed typed intent; SignalRoom resolved exact-scope "
+                        "identifiers and emitted this SPL through its deterministic compiler."
+                    ),
+                    context_revision=str(item.get("context_revision") or ""),
+                    source_run_id=str(item.get("source_run_id") or ""),
+                    data_exposure=str(item.get("data_exposure") or "schema-and-synthetic-only"),
+                    trust_checks=list(item.get("checks") or [])[:16],
+                    result_contract=dict(item.get("result_contract") or {}),
+                    connection_alias=request.connection_alias,
+                    connection_fingerprint=request.connection_fingerprint,
+                    tenant_scope_id=request.tenant_scope_id,
+                )
+            )
+        return candidates[:8]
+
+    @staticmethod
+    def _format_context_compilation(result: dict[str, Any]) -> str:
+        compilations = result.get("compilations")
+        if not isinstance(compilations, list):
+            compilations = [result] if result.get("spl") else []
+        ready = [
+            item
+            for item in compilations
+            if isinstance(item, dict) and item.get("status") == "context-compiled"
+        ]
+        blocked = [
+            item
+            for item in compilations
+            if isinstance(item, dict) and item.get("status") != "context-compiled"
+        ]
+        if not ready:
+            reasons = [str(result.get("reason") or "")]
+            for item in blocked:
+                reasons.extend(str(value) for value in item.get("errors") or [])
+            detail = next(
+                (value for value in reasons if value),
+                "The active context could not prove the requested dataset or fields.",
+            )
+            return (
+                "I did not produce executable-looking SPL because the request could not pass the "
+                f"active connection's context checks. {detail}\n\n"
+                "Run or refresh Discovery for this Splunk connection, then ask again. SignalRoom "
+                "will not fill missing schema with guessed indexes or fields."
+            )
+
+        lines = [
+            (
+                f"SignalRoom context-compiled {len(ready)} bounded SPL draft"
+                f"{'s' if len(ready) != 1 else ''} for the active Splunk connection."
+            )
+        ]
+        for ordinal, item in enumerate(ready, 1):
+            lines.extend(
+                [
+                    "",
+                    f"### Search {ordinal}: {item.get('purpose') or 'Bounded investigation search'}",
+                    "",
+                    f"Expected result: {item.get('expected_result') or 'A bounded Splunk result.'}",
+                    "",
+                    "```spl",
+                    str(item.get("spl") or ""),
+                    "```",
+                ]
+            )
+        lines.extend(
+            [
+                "",
+                "Trust receipt: the planning model received schema metadata and no source event "
+                "examples. Pasted samples were replaced with marked synthetic shapes; no raw event "
+                "values or evidence excerpts were supplied. SignalRoom resolved the identifiers and "
+                "emitted the SPL deterministically.",
+                "",
+                "This is trusted for review, not yet for execution. Splunk parser validation and "
+                "an explicitly approved bounded test remain required.",
+            ]
+        )
+        if blocked:
+            lines.extend(
+                [
+                    "",
+                    f"{len(blocked)} additional requested search{'es were' if len(blocked) != 1 else ' was'} "
+                    "withheld because its identifiers could not be proven from this scope.",
+                ]
+            )
+        return "\n".join(lines)
+
+    @staticmethod
+    def _looks_like_spl(value: str) -> bool:
+        normalized = value.strip().lower()
+        return bool(
+            re.match(
+                r"^(?:search\s+)?(?:index\s*=|sourcetype\s*=)|"
+                r"^\|\s*(?:tstats|from|metadata|makeresults|rest)\b",
+                normalized,
+            )
+        )
+
+    @staticmethod
+    def _spl_candidate_details(prefix: str, suffix: str, ordinal: int) -> tuple[str, str, str]:
+        section = prefix.rsplit("```", 1)[-1][-2400:]
+        lines = [line.strip() for line in section.splitlines() if line.strip()][-12:]
+        title = f"Proposed SPL block {ordinal}"
+        title_position = len(section)
+        for line in reversed(lines):
+            heading = re.match(r"^#{1,6}\s+(.+)$", line)
+            bold_heading = re.match(r"^\*\*(?!Purpose:|Expected Result:)(.+?)\*\*$", line, re.I)
+            plain_heading = re.match(r"^(?:Search|Option|Query|SPL)\s+\d+\s*:\s*(.+)$", line, re.I)
+            match = heading or bold_heading or plain_heading
+            if not match:
+                continue
+            value = re.sub(r"[*_`]", "", match.group(1)).strip()
+            value = re.sub(r"^(?:Search|Option|Query|SPL)\s+\d+\s*:\s*", "", value, flags=re.I)
+            if value:
+                title = value[:240]
+                title_position = section.rfind(line)
+                break
+
+        # Models commonly state a block's purpose immediately before or immediately after
+        # its fence. Start at the selected heading so labels belonging to the preceding
+        # candidate cannot leak into this one, then inspect only up to the next code fence.
+        detail_section = section[title_position:] + "\n" + suffix.split("```", 1)[0][:2400]
+
+        def labelled(label: str) -> str:
+            match = re.search(
+                rf"(?im)^\s*(?:\*\*)?{label}(?:\*\*)?\s*:\s*(.+?)\s*$", detail_section
+            )
+            return re.sub(r"[*_`]", "", match.group(1)).strip()[:1000] if match else ""
+
+        purpose = labelled("Purpose")
+        expected = labelled("Expected Result")
+        if not purpose:
+            purpose = (
+                f"Test the response section titled “{title}” against the selected Splunk scope."
+                if title != f"Proposed SPL block {ordinal}"
+                else f"Test proposed SPL block {ordinal} against the selected Splunk scope."
+            )
+        return title, purpose, expected
+
+    @staticmethod
+    def _spl_expected_result(spl: str) -> str:
+        normalized = spl.lower()
+        if "| timechart" in normalized:
+            return "A bounded time-series result suitable for checking trend and timing assumptions."
+        if re.search(r"\|\s*(?:stats|eventstats|chart)\b", normalized):
+            return "A bounded aggregate result suitable for validating the stated hypothesis."
+        if re.search(r"\|\s*(?:table|fields|head)\b", normalized):
+            return "A bounded event sample exposing the fields selected by this search."
+        if re.search(r"\|\s*tstats\b", normalized):
+            return "A bounded accelerated summary from the referenced data model or indexed fields."
+        return "A bounded read-only result that confirms or challenges the response’s stated assumption."
 
     @classmethod
     def _distill_tool_result(cls, value: Any, depth: int = 0) -> Any:
@@ -1647,6 +2237,8 @@ class SecurityAgent:
         mode: str,
         executed_profile: str = "",
         tenant_scope_id: str = "workspace-primary",
+        connection_alias: str = "primary",
+        connection_fingerprint: str = "",
     ) -> list[ModelRecommendation]:
         """Recommend specialist follow-ups only when a search produced usable evidence."""
         provenance = provenance or {}
@@ -1780,7 +2372,14 @@ class SecurityAgent:
             )
 
         retrieval_profile = profiles.get(settings.embedding_model)
-        has_local_context = bool(self.evidence.list(limit=1, tenant_scope_id=tenant_scope_id))
+        has_local_context = bool(
+            self.evidence.list(
+                limit=1,
+                tenant_scope_id=tenant_scope_id,
+                connection_alias=connection_alias,
+                connection_fingerprint=connection_fingerprint,
+            )
+        )
         retrieval_would_help = has_local_context and (
             result_count >= 5 or len(result_text) >= 1400 or mode in {"discovery", "detection", "hunt"}
         )

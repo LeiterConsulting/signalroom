@@ -63,6 +63,43 @@ async def test_local_securebert_does_not_require_token_or_cloud_policy(tmp_path)
     assert config.secret("huggingface_token") == ""
 
 
+async def test_retrieval_is_bound_to_selected_connection_revision(tmp_path):
+    config = ConfigStore(tmp_path / "data")
+    evidence = EvidenceStore(tmp_path / "evidence.db")
+    evidence.add(
+        ArtifactCreate(
+            title="Old revision endpoint map",
+            content="Encoded PowerShell telemetry is stored in index=old_endpoint.",
+            kind="discovery-knowledge",
+            connection_alias="lab-002",
+            connection_fingerprint="a" * 64,
+            tenant_scope_id="tenant-lab-002",
+        )
+    )
+    evidence.add(
+        ArtifactCreate(
+            title="Current revision endpoint map",
+            content="Encoded PowerShell telemetry is stored in index=current_endpoint.",
+            kind="discovery-knowledge",
+            connection_alias="lab-002",
+            connection_fingerprint="b" * 64,
+            tenant_scope_id="tenant-lab-002",
+        )
+    )
+    agent = SecurityAgent(config, evidence, DemoSplunkClient())
+
+    results, mode = await agent._retrieve_evidence(
+        "encoded PowerShell telemetry",
+        tenant_scope_id="tenant-lab-002",
+        connection_fingerprint="b" * 64,
+        connection_alias="lab-002",
+    )
+
+    assert mode == "SQLite FTS5"
+    assert [item.title for item in results] == ["Current revision endpoint map"]
+    assert all(item.connection_fingerprint == "b" * 64 for item in results)
+
+
 def test_huggingface_policy_requires_explicit_query_approval(tmp_path):
     config = ConfigStore(tmp_path / "data")
     settings = config.load()

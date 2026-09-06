@@ -6,9 +6,9 @@
   <meta name="description" content="Local-first Splunk security agent with model routing, discovery, and evidence-backed chat.">
   <title>SignalRoom · Splunk Security Agent</title>
   <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 64 64%22><rect width=%2264%22 height=%2264%22 rx=%2214%22 fill=%22%2314251d%22/><path d=%22M17 40l10-10 8 8 13-15%22 fill=%22none%22 stroke=%22%233ed387%22 stroke-width=%226%22 stroke-linecap=%22round%22 stroke-linejoin=%22round%22/></svg>">
-  <link rel="stylesheet" href="/static/styles.css?v=20260720-estate-review-1">
+  <link rel="stylesheet" href="/static/styles.css?v=20260905-spl-context-engine-1">
 </head>
-<body class="chat-active">
+<body class="chat-active workspace-guided">
   <div class="app-shell">
     <aside class="rail">
       <div class="brand" aria-label="SignalRoom home">
@@ -16,11 +16,13 @@
         <div><strong>SignalRoom</strong><small>Splunk security agent</small></div>
       </div>
       <nav class="nav" aria-label="Primary navigation">
+        <span class="nav-section-label">Work</span>
         <button class="nav-item active" data-view="chat" aria-label="Investigate"><span class="nav-icon">⌁</span><span>Investigate</span></button>
         <button class="nav-item" data-view="discovery" aria-label="Discovery"><span class="nav-icon">◎</span><span>Discovery</span></button>
         <button class="nav-item" data-view="cases" aria-label="Cases"><span class="nav-icon">▰</span><span>Cases</span><em id="caseCount">0</em></button>
+        <span class="nav-section-label">Build &amp; govern</span>
         <button class="nav-item" data-view="detections" aria-label="Detections"><span class="nav-icon">⌾</span><span>Detections</span><em id="detectionCount">0</em></button>
-        <button class="nav-item" data-view="context" aria-label="Context"><span class="nav-icon">▱</span><span>Context</span><em id="artifactCount">0</em></button>
+        <button class="nav-item" data-view="context" aria-label="Knowledge"><span class="nav-icon">▱</span><span>Knowledge</span><em id="artifactCount">0</em></button>
         <button class="nav-item" data-view="models" aria-label="Models"><span class="nav-icon">◇</span><span>Models</span></button>
       </nav>
       <div class="rail-footer">
@@ -33,7 +35,7 @@
           <span class="status-dot" id="connectionDot"></span>
           <div><strong id="connectionLabel">Primary Splunk</strong><small id="connectionDetail">Endpoint missing</small></div>
         </div>
-        <button class="nav-item" id="openSettings" aria-label="Setup"><span class="nav-icon">⚙</span><span>Setup</span></button>
+        <button class="nav-item" id="openSettings" aria-label="Settings and setup"><span class="nav-icon">⚙</span><span>Settings</span></button>
       </div>
     </aside>
 
@@ -55,6 +57,16 @@
           <button class="button ghost" id="newConversation">New investigation</button>
         </div>
       </header>
+
+      <section class="workspace-guide" id="workspaceGuide" aria-labelledby="workspaceGuideTitle" hidden>
+        <header>
+          <div><p class="eyebrow" id="workspaceGuideEyebrow">RECOMMENDED FLOW</p><h2 id="workspaceGuideTitle">Start with the outcome</h2><p id="workspaceGuideSummary"></p></div>
+          <button class="button ghost workspace-mode-toggle" id="workspaceModeToggle" type="button" aria-pressed="false">Show all tools</button>
+        </header>
+        <ol class="workspace-guide-steps" id="workspaceGuideSteps"></ol>
+        <div class="workspace-guide-value" id="workspaceGuideValue"></div>
+        <div class="workspace-guide-tools" id="workspaceGuideTools"></div>
+      </section>
 
       <section class="view active" id="chatView">
         <div class="chat-layout">
@@ -80,6 +92,7 @@
                 <select id="modelSelect" aria-label="Model route"><option value="">Auto-route model</option></select>
                 <button class="evidence-toggle" id="toggleEvidence" type="button">Evidence <span id="mobileEvidenceCount">0</span></button>
                 <span class="read-only">Read-only tools</span>
+                <span class="spl-context-status checking" id="splContextStatus" role="status" title="Checking the active discovery context">SPL context · checking</span>
               </div>
               <div class="composer-row">
                 <textarea id="chatInput" rows="1" placeholder="Ask about the environment, paste SPL, or describe a security hypothesis…" required></textarea>
@@ -120,11 +133,11 @@
             <ol class="operation-steps" id="discoveryProgressSteps"></ol>
             <footer><span id="discoveryJobContract">Durable local job · read-only Splunk lane</span><button class="button danger small" id="cancelDiscoveryJob" type="button">Cancel run</button></footer>
           </article>
-          <article class="wide-card discovery-job-ledger" aria-labelledby="discoveryJobTitle">
+          <article class="wide-card discovery-job-ledger guided-advanced" id="discoveryJobsWorkspace" aria-labelledby="discoveryJobTitle">
             <div class="panel-heading"><div><p class="eyebrow">MANUAL DISCOVERY JOBS</p><h3 id="discoveryJobTitle">Progress that survives refreshes and restarts</h3><p class="panel-intro">Each operator run retains its bounded call count, activity timeline, restart history, and compact result locally.</p></div><span id="discoveryWorker" class="subtle-pill">Loading worker</span></div>
             <div class="discovery-job-history" id="discoveryJobHistory"><div class="empty-inline compact-empty">No durable manual discovery jobs have run yet.</div></div>
           </article>
-          <article class="wide-card estate-comparison" aria-labelledby="estateComparisonTitle">
+          <article class="wide-card estate-comparison guided-advanced" id="estateComparisonWorkspace" aria-labelledby="estateComparisonTitle">
             <header>
               <div><p class="eyebrow">SPLUNK ESTATE COMPARISON</p><h3 id="estateComparisonTitle">Compare retained posture without blending evidence</h3><p>Compare the latest local summaries immediately, or create a durable review packet from the closest completed discovery runs. Every fact remains attached to—and stored within—its source tenant; either path runs zero new Splunk queries or model inference.</p></div>
               <span class="subtle-pill" id="estateComparisonStatus">Two scopes required</span>
@@ -148,7 +161,7 @@
               <div id="estateReviewPackets"><div class="empty-inline compact-empty">No aligned review packets have been created.</div></div>
             </section>
           </article>
-          <article class="wide-card assurance-workspace" aria-labelledby="assuranceTitle">
+          <article class="wide-card assurance-workspace guided-advanced" id="assuranceWorkspace" aria-labelledby="assuranceTitle">
             <div class="panel-heading"><div><p class="eyebrow">CONTINUOUS ASSURANCE</p><h3 id="assuranceTitle">Re-run discovery safely—and know what persists</h3><p class="panel-intro">Opt in to a durable local schedule. SignalRoom separates transient changes from recurring drift, then packages bounded response work without approving or running SPL.</p></div><span id="assuranceWorker" class="subtle-pill">Loading worker</span></div>
             <form id="assuranceForm" class="assurance-policy-form">
               <label class="switch-line assurance-enable"><span><b>Enable scheduled assurance</b><small>Disabled by default; enabling schedules the first run after the selected interval</small></span><input type="checkbox" id="assuranceEnabled"><span class="switch-control" aria-hidden="true"></span></label>
@@ -329,11 +342,11 @@
             <article class="metric accent"><span>COVERAGE</span><strong>—</strong><small>Five security domains</small></article>
           </div>
           <div class="security-posture-grid" id="securityPosture" hidden></div>
-          <article class="wide-card model-assessment" id="discoveryAssessment" hidden>
+          <article class="wide-card model-assessment guided-advanced" id="discoveryAssessment" hidden>
             <div class="panel-heading"><div><p class="eyebrow">LOCAL MODEL TEAM</p><h3>What each specialist found—and what survived reconciliation</h3></div><span id="assessmentModel" class="subtle-pill"></span></div>
             <div id="assessmentContent"></div>
           </article>
-          <article class="wide-card validation-workspace" id="validationWorkspace">
+          <article class="wide-card validation-workspace guided-advanced" id="validationWorkspace">
             <div class="panel-heading"><div><p class="eyebrow">VALIDATION QUEUE</p><h3>Preview, approve, execute, preserve</h3><p class="panel-intro">Discovery proposes bounded read-only checks. Review the exact SPL contract before approval; SignalRoom preserves completed results as evidence.</p></div><span id="validationCount" class="subtle-pill">0 tasks</span></div>
             <section class="validation-candidates-section" aria-labelledby="validationCandidatesTitle">
               <div class="validation-section-heading"><div><span>DISCOVERY PROPOSALS</span><h4 id="validationCandidatesTitle">Checks that can turn findings into observed evidence</h4></div><small>Queueing creates an editable draft. It does not run Splunk.</small></div>
@@ -402,7 +415,7 @@
 
       <section class="view" id="contextView">
         <div class="context-toolbar">
-          <div><p class="eyebrow">MANAGED KNOWLEDGE</p><h2>Evidence library</h2><p>Context gives SignalRoom the local facts, runbooks, threat intelligence, and known-good SPL it can retrieve. Stored items are reusable investigation assets—not automatically trusted conclusions.</p></div>
+          <div><p class="eyebrow">MANAGED KNOWLEDGE</p><h2>Evidence library</h2><p>Knowledge stores the local facts, runbooks, threat intelligence, and known-good SPL SignalRoom can retrieve. Stored items are reusable investigation assets—not automatically trusted conclusions.</p></div>
           <div class="button-row"><button class="button ghost" id="uploadArtifact">Upload text</button><button class="button primary" id="addArtifact">Add artifact</button><input type="file" id="fileInput" hidden accept=".txt,.md,.json,.csv,.log,.spl"></div>
         </div>
         <div class="context-purpose"><b>What can I do here?</b><span>Open an item to inspect its full content and provenance.</span><span>Use it to start an investigation or validation search.</span><span>Search and filter the evidence available to RAG.</span></div>
@@ -417,8 +430,20 @@
           <div><p class="eyebrow">CAPABILITY ROUTING</p><h2>Specialists, not just model names.</h2><p>Each profile declares what it is trusted to do. Auto-routing sends security reasoning, retrieval, evidence reranking, and entity extraction to the right model.</p></div>
           <div class="button-row"><button class="button ghost" id="checkModelUpdates">Check for updates</button><button class="button primary" id="configureModels">Configure profiles</button></div>
         </div>
+        <nav class="model-lifecycle-nav guided-advanced" id="modelLifecycleNav" aria-label="Model lifecycle sections">
+          <button type="button" data-model-section="modelLifecycleStatus"><span>1</span>Readiness</button>
+          <button type="button" data-model-section="modelTrustPanel"><span>2</span>Sources &amp; trust</button>
+          <button type="button" data-model-section="modelInstalledProfiles"><span>3</span>Installed</button>
+          <button type="button" data-model-section="modelCandidateStaging"><span>4</span>Stage</button>
+          <button type="button" data-model-section="modelTournamentWorkspace"><span>5</span>Evaluate</button>
+          <button type="button" data-model-section="candidateModels"><span>6</span>Specialists</button>
+        </nav>
+        <section class="model-lifecycle-overview" id="modelLifecycleStatus" aria-labelledby="modelLifecycleTitle">
+          <header><div><span>MODEL LIFECYCLE</span><h3 id="modelLifecycleTitle">Know what is ready, trusted, and current</h3><p>Runtime availability, exact artifact approval, and publisher freshness are independent controls. A failure in one does not imply failure in the others.</p></div><span id="modelLifecycleDecision" class="subtle-pill">Loading</span></header>
+          <div class="model-lifecycle-axes" id="modelLifecycleAxes" aria-live="polite"><div class="empty-inline compact-empty">Observing local model controls…</div></div>
+        </section>
         <section class="model-freshness" id="modelFreshness" aria-live="polite" hidden></section>
-        <section class="model-trust-panel" id="modelTrustPanel" aria-labelledby="modelTrustTitle">
+        <section class="model-trust-panel guided-advanced" id="modelTrustPanel" aria-labelledby="modelTrustTitle">
           <header>
             <div><span>LOCAL MODEL SUPPLY CHAIN</span><h3 id="modelTrustTitle">Approve the artifact you actually evaluated</h3><p>SignalRoom observes immutable Hub revisions and local content digests, then binds an explicit operator approval to that exact artifact with a local Ed25519 signature.</p></div>
             <span id="modelTrustMode" class="subtle-pill">Loading policy</span>
@@ -431,14 +456,26 @@
           <div class="model-trust-profiles" id="modelTrustProfiles" aria-live="polite"><div class="empty-inline compact-empty">Observing local model artifacts…</div></div>
           <details class="model-trust-contract"><summary>What this signature does—and does not—prove</summary><p id="modelTrustContract">A SignalRoom signature proves local operator approval of an exact observed artifact. It is not a publisher signature or a software-vulnerability verdict.</p><p>Enforcement fails closed for model activation, accepted golden baselines, tournament promotion, and rollback. A changed digest must be evaluated and approved again.</p></details>
         </section>
-        <div class="routing-map"><span>Operator question</span><b aria-hidden="true">→</b><span>Task router</span><b aria-hidden="true">→</b><div><em>General agent</em><em>Security reasoning</em><em>Cyber retrieval</em><em>Evidence reranking</em><em>Entity extraction</em></div></div>
-        <div class="model-grid" id="modelGrid"></div>
-        <section class="evaluation-suites" aria-labelledby="evaluationSuitesTitle">
+        <section class="model-installed-section" id="modelInstalledProfiles" aria-label="Installed and configured model profiles">
+          <div class="routing-map"><span>Operator question</span><b aria-hidden="true">→</b><span>Task router</span><b aria-hidden="true">→</b><div><em>General agent</em><em>Security reasoning</em><em>Cyber retrieval</em><em>Evidence reranking</em><em>Entity extraction</em></div></div>
+          <div class="model-grid" id="modelGrid"></div>
+        </section>
+        <section class="model-candidate-staging" id="modelCandidateStaging" aria-labelledby="modelCandidateStagingTitle">
+          <header><div><span>SAFE LOCAL STAGING</span><h3 id="modelCandidateStagingTitle">Evaluate an installed Ollama model without changing routing</h3><p>Staging creates a temporary local profile. The active general and security routes remain unchanged until a passing tournament, blind review, and explicit promotion.</p></div><span id="candidateStagingStatus" class="subtle-pill">No candidates</span></header>
+          <form id="candidateStagingForm" class="candidate-staging-form">
+            <label><span>Installed, unconfigured model</span><select id="candidateInstalledModel" required><option value="">Check Ollama first</option></select><small>No download is started by this action.</small></label>
+            <label><span>Evaluation route</span><select id="candidateTask"><option value="chat">General investigation</option><option value="security_reasoning">Security reasoning</option></select><small>Determines which current route becomes the control candidate.</small></label>
+            <label><span>Profile label <em>optional</em></span><input id="candidateLabel" maxlength="160" placeholder="Evaluation · model name"><small>Visible only inside this workspace until promotion.</small></label>
+            <button class="button primary" type="submit">Stage local candidate</button>
+          </form>
+          <div class="staged-candidate-grid" id="stagedCandidateProfiles"><div class="empty-inline compact-empty">No temporary evaluation profiles are staged.</div></div>
+        </section>
+        <section class="evaluation-suites guided-advanced" id="modelEvaluationSuites" aria-labelledby="evaluationSuitesTitle">
           <header><div><span>ORGANIZATION EVALUATION SUITES</span><h3 id="evaluationSuitesTitle">Test the analyst outcomes your environment requires</h3><p>Add synthetic fixtures and explicit tool, evidence, conclusion, and safety expectations to the immutable SignalRoom core gate. Published versions are exact and durable; configured Splunk and hosted inference are never contacted.</p></div><button class="button primary" id="newEvaluationSuite" type="button">New evaluation suite</button></header>
           <div class="evaluation-suite-grid" id="evaluationSuiteGrid"><div class="empty-inline compact-empty">Loading local evaluation authority…</div></div>
           <details class="evaluation-suite-contract"><summary>Authoring and execution boundaries</summary><ul><li>The five built-in safety controls always run first and cannot be replaced.</li><li>Fixtures must be synthetic and free of credentials or live investigation data.</li><li>Drafts are editable with revision checks; every published version is immutable.</li><li>Only local Ollama inference, an isolated evidence store, and instrumented demo tools are used.</li></ul></details>
         </section>
-        <section class="model-tournament" aria-labelledby="modelTournamentTitle">
+        <section class="model-tournament guided-advanced" id="modelTournamentWorkspace" aria-labelledby="modelTournamentTitle">
           <header><div><span>LOCAL MODEL TOURNAMENT</span><h3 id="modelTournamentTitle">Prove a routing change before promoting it</h3><p>Run selected Ollama profiles through identical synthetic investigations, compare the two finalists without model labels, and bind the reviewed winner to an exact promotion fingerprint. Configured Splunk and Hugging Face are never contacted.</p></div><span id="tournamentStatus" class="subtle-pill">No tournament yet</span></header>
           <div class="tournament-controls">
             <label><span>Routing assignment</span><select id="tournamentTarget"><option value="security_reasoning_model">Security reasoning route</option><option value="default_chat_model">General investigation route</option></select><small id="tournamentCurrentAssignment">Loading current assignment…</small></label>
@@ -456,7 +493,7 @@
           <details class="tournament-contract"><summary>Promotion and rollback authority</summary><ul><li>Every candidate receives the same versioned evidence and tool fixtures.</li><li>The two highest-ranked complete runs receive one blind comparison for every evaluated scenario.</li><li>Promotion requires the reviewed winner, unchanged model revision, unchanged route, current suite and prompt versions, and the exact fingerprint.</li><li>Rollback is allowed only while the promoted route and accepted suite baseline remain unchanged.</li></ul></details>
           <section class="tournament-history"><div class="validation-section-heading"><div><span>DURABLE TOURNAMENT HISTORY</span><h4>Reviewed comparisons and routing decisions</h4></div></div><div id="tournamentRunHistory"></div></section>
         </section>
-        <section class="golden-benchmarks" aria-labelledby="goldenBenchmarksTitle">
+        <section class="golden-benchmarks guided-advanced" id="modelGoldenGate" aria-labelledby="goldenBenchmarksTitle">
           <header><div><span>LOCAL GOLDEN INVESTIGATIONS</span><h3 id="goldenBenchmarksTitle">Promotion gate for models and prompts</h3><p>Run versioned synthetic investigations through the real agent, local model, evidence retrieval, and instrumented tool planner. Configured Splunk is never contacted.</p></div><span id="goldenSuiteVersion" class="subtle-pill">Loading suite</span></header>
           <div class="golden-controls"><label><span>Candidate profile</span><select id="goldenProfile"></select></label><label><span>Evaluation suite</span><select id="goldenSuite"></select></label><div><button class="button primary" id="runGoldenBenchmark" type="button">Run five-scenario gate</button><small>Sequential local inference · 640-token comparison ceiling · zero external Splunk calls</small></div></div>
           <article class="operation-card golden-operation" id="goldenProgress" aria-live="polite" hidden>
@@ -469,8 +506,8 @@
           <details class="golden-suite-contract"><summary>Review the five golden contracts</summary><div id="goldenScenarioCatalog" class="golden-scenario-catalog"></div></details>
           <section class="golden-history"><div class="validation-section-heading"><div><span>DURABLE COMPARISON HISTORY</span><h4>Candidate runs and accepted baseline</h4></div></div><div id="goldenRunHistory"></div></section>
         </section>
-        <section class="model-benchmarks" aria-labelledby="modelBenchmarksTitle"><header><div><span>ANALYST OUTCOME SCOREBOARD</span><h3 id="modelBenchmarksTitle">Local model value by task</h3><p>Direct analyst feedback is stored locally and separated by model profile and investigation mode. Small samples are marked directional.</p></div><span id="feedbackTotal" class="subtle-pill">0 ratings</span></header><div id="modelBenchmarkGrid" class="model-benchmark-grid"><div class="empty-inline compact-empty">Rate an Investigate response to start a local quality baseline.</div></div></section>
-        <section class="splunk-models-panel" aria-labelledby="splunkModelsTitle">
+        <section class="model-benchmarks guided-advanced" id="modelOutcomeBenchmarks" aria-labelledby="modelBenchmarksTitle"><header><div><span>ANALYST OUTCOME SCOREBOARD</span><h3 id="modelBenchmarksTitle">Local model value by task</h3><p>Direct analyst feedback is stored locally and separated by model profile and investigation mode. Small samples are marked directional.</p></div><span id="feedbackTotal" class="subtle-pill">0 ratings</span></header><div id="modelBenchmarkGrid" class="model-benchmark-grid"><div class="empty-inline compact-empty">Rate an Investigate response to start a local quality baseline.</div></div></section>
+        <section class="splunk-models-panel guided-advanced" id="splunkModelInventory" aria-labelledby="splunkModelsTitle">
           <header>
             <div><span>SPLUNK-NATIVE MODELS</span><h3 id="splunkModelsTitle">MLTK inventory and dependency drift</h3><p>Inspect model definitions stored in Splunk with the read-only <code>listmodels</code> command. SignalRoom records definition drift and compares declared Ollama dependencies without changing Splunk.</p></div>
             <button class="button ghost" id="scanSplunkModels">Scan MLTK models</button>
@@ -484,7 +521,7 @@
           <div class="splunk-model-summary" id="splunkModelSummary" aria-live="polite"></div>
           <div class="splunk-model-grid" id="splunkModelGrid"></div>
         </section>
-        <section class="candidate-models" id="candidateModels"></section>
+        <section class="candidate-models guided-advanced" id="candidateModels"></section>
       </section>
     </main>
   </div>
@@ -510,17 +547,18 @@
 
   <div class="modal-backdrop" id="settingsModal" hidden>
     <section class="modal" role="dialog" aria-modal="true" aria-labelledby="settingsTitle">
-      <header><div><p class="eyebrow" id="settingsEyebrow">SETTINGS · CONNECTIONS</p><h2 id="settingsTitle">Splunk MCP</h2><small id="settingsPosition">Section 1 of 9 · connection and trust boundary</small></div><button class="icon-button" id="closeSettings" aria-label="Close settings">×</button></header>
+      <header><div><p class="eyebrow" id="settingsEyebrow">SETTINGS · CONNECTIONS</p><h2 id="settingsTitle">Splunk MCP</h2><small id="settingsPosition">Essential 1 of 3 · connection and trust boundary</small></div><button class="icon-button" id="closeSettings" aria-label="Close settings">×</button></header>
       <nav class="settings-navigator" id="settingsNavigator" aria-label="Settings sections">
         <button type="button" class="active" data-settings-target="settingsSplunk" aria-current="true"><span>01</span>Splunk</button>
         <button type="button" data-settings-target="settingsConnections"><span>02</span>Instances</button>
         <button type="button" data-settings-target="settingsModels"><span>03</span>Models</button>
-        <button type="button" data-settings-target="settingsRepository"><span>04</span>Repository</button>
-        <button type="button" data-settings-target="accessControlSection"><span>05</span>Access</button>
-        <button type="button" data-settings-target="recoverySection"><span>06</span>Recovery</button>
-        <button type="button" data-settings-target="workloadPolicySection"><span>07</span>Workload</button>
-        <button type="button" data-settings-target="settingsAgent"><span>08</span>Agent</button>
-        <button type="button" data-settings-target="settingsRelease"><span>09</span>Release</button>
+        <button type="button" class="guided-advanced" data-settings-target="settingsRepository"><span>04</span>Repository</button>
+        <button type="button" class="guided-advanced" data-settings-target="accessControlSection"><span>05</span>Access</button>
+        <button type="button" class="guided-advanced" data-settings-target="recoverySection"><span>06</span>Recovery</button>
+        <button type="button" class="guided-advanced" data-settings-target="workloadPolicySection"><span>07</span>Workload</button>
+        <button type="button" class="guided-advanced" data-settings-target="settingsAgent"><span>08</span>Agent</button>
+        <button type="button" class="guided-advanced" data-settings-target="settingsRelease"><span>09</span>Release</button>
+        <button type="button" class="settings-more-toggle" id="settingsAdvancedToggle" aria-pressed="false"><span>+</span>Platform administration</button>
       </nav>
       <form id="settingsForm">
         <div class="form-section" id="settingsSplunk" data-settings-section="settingsSplunk" data-settings-title="Splunk MCP" data-settings-eyebrow="SETTINGS · CONNECTIONS" data-settings-description="connection and trust boundary"><h3>Splunk MCP</h3><p>Connect a compatible Splunk MCP endpoint. The optional guided demo uses isolated sample responses and never searches Splunk.</p>
@@ -611,7 +649,7 @@
             <label class="full"><span>Hugging Face cloud usage policy</span><select id="hfPolicy"><option value="disabled">Disabled · never send evidence to hosted inference</option><option value="ask">Ask · require approval for every cloud question</option><option value="allow">Allowed · use hosted specialists automatically</option></select><small class="field-help">This policy applies only when the cloud runtime is selected. Local SecureBERT inference does not require cloud approval.</small></label>
           </div>
         </div>
-        <div class="form-section" id="settingsRepository" data-settings-section="settingsRepository" data-settings-title="Detection repository" data-settings-eyebrow="SETTINGS · CHANGE HANDOFF" data-settings-description="reviewed local Git workflow"><h3>Detection repository handoff</h3><p>Optionally move approved detections into a local Git repository through an exact diff preview. Repository writes, remote pushes, and draft pull requests each require a separate analyst action.</p>
+        <div class="form-section guided-advanced" id="settingsRepository" data-settings-section="settingsRepository" data-settings-title="Detection repository" data-settings-eyebrow="SETTINGS · CHANGE HANDOFF" data-settings-description="reviewed local Git workflow"><h3>Detection repository handoff</h3><p>Optionally move approved detections into a local Git repository through an exact diff preview. Repository writes, remote pushes, and draft pull requests each require a separate analyst action.</p>
           <label class="switch-line"><span><b>Enable local repository handoff</b><small>Creates an isolated branch and commit only after approval; the primary checkout remains untouched</small></span><input type="checkbox" id="repositoryEnabled"><span class="switch-control" aria-hidden="true"></span></label>
           <div class="form-grid" id="repositorySettings">
             <label class="full"><span>Absolute repository root</span><input id="repositoryPath" placeholder="C:\security\detections or /srv/security/detections"><small class="field-help">SignalRoom requires the Git repository root—not a parent or nested directory.</small></label>
@@ -625,7 +663,7 @@
           </div>
           <div class="connection-test-row"><button class="button ghost small" type="button" id="testRepository">Inspect repository</button><span class="test-result" id="repositoryTestResult"></span></div>
         </div>
-        <div class="form-section access-control-section" id="accessControlSection" data-settings-section="accessControlSection" data-settings-title="Access control" data-settings-eyebrow="SETTINGS · IDENTITY" data-settings-description="optional named access and enterprise identity">
+        <div class="form-section access-control-section guided-advanced" id="accessControlSection" data-settings-section="accessControlSection" data-settings-title="Access control" data-settings-eyebrow="SETTINGS · IDENTITY" data-settings-description="optional named access and enterprise identity">
           <h3>Access control · optional</h3>
           <p id="accessControlSummary">SignalRoom is in local single-user mode. This keeps evaluation and guided-demo setup frictionless; keep the service bound to localhost until named access is enabled.</p>
           <div class="access-mode-banner" id="accessModeBanner"><span>LOCAL OPERATOR</span><div><b>No login required on this host</b><small>Local mode has administrator authority. Enable RBAC before sharing the service.</small></div></div>
@@ -696,7 +734,7 @@
           </div>
           <p class="access-read-only-note" id="accessReadOnlyNote" hidden>Only a SignalRoom administrator can change workspace or access policy. These settings are shown read-only.</p>
         </div>
-        <div class="form-section recovery-section" id="recoverySection" data-settings-section="recoverySection" data-settings-title="Recovery and retention" data-settings-eyebrow="SETTINGS · RESILIENCE" data-settings-description="encrypted recovery and governed cleanup">
+        <div class="form-section recovery-section guided-advanced" id="recoverySection" data-settings-section="recoverySection" data-settings-title="Recovery and retention" data-settings-eyebrow="SETTINGS · RESILIENCE" data-settings-description="encrypted recovery and governed cleanup">
           <div class="recovery-heading"><div><h3>Encrypted control-plane recovery</h3><p>Back up SignalRoom settings, encrypted credentials, Splunk connection identities, access policy, and paired model-trust authority without copying investigation data.</p></div><span class="subtle-pill">ADMIN · LOCAL FILE</span></div>
           <div class="recovery-contract" role="note"><b>Inspect first. Restore on restart.</b><span>Every package is password-derived AES-256-GCM encrypted and integrity checked. Inspection is read only. A compatible restore creates an encrypted rollback checkpoint, freezes configuration changes, and applies before services open on the next process start.</span></div>
           <section class="operational-acceptance-panel" aria-labelledby="operationalAcceptanceTitle">
@@ -735,7 +773,7 @@
             <div class="retention-preview" id="retentionPreview" aria-live="polite"><div class="empty-inline compact-empty">Loading the local cleanup inventory…</div></div>
           </section>
         </div>
-        <div class="form-section" id="workloadPolicySection" data-settings-section="workloadPolicySection" data-settings-title="Workload protection" data-settings-eyebrow="SETTINGS · SPLUNK SAFETY" data-settings-description="admission, concurrency, and budgets">
+        <div class="form-section guided-advanced" id="workloadPolicySection" data-settings-section="workloadPolicySection" data-settings-title="Workload protection" data-settings-eyebrow="SETTINGS · SPLUNK SAFETY" data-settings-description="admission, concurrency, and budgets">
           <h3>Splunk workload protection</h3>
           <p>One admission controller protects the configured Splunk instance across Investigate, Discovery, Validation, Assurance, and MLTK inventory. Audit mode is the evaluation-safe default; concurrency limits still prevent local request bursts.</p>
           <div class="workload-mode-banner audit" id="workloadModeBanner" aria-live="polite"><span>AUDIT</span><div><b>Thresholds are visible, not blocking</b><small>Read-only guardrails and concurrency limits remain active.</small></div></div>
@@ -751,8 +789,8 @@
           <section class="workload-live" id="workloadLive"><div><b>Live admission state</b><span>Loading…</span></div><div class="workload-meter"><i></i></div><small>SignalRoom units are a deterministic preflight comparison—not predicted scan bytes or Splunk scheduler cost.</small></section>
           <details class="workload-history"><summary>Recent admission decisions</summary><div id="workloadEvents"><div class="empty-inline compact-empty">No workload events have been recorded.</div></div></details>
         </div>
-        <div class="form-section" id="settingsAgent" data-settings-section="settingsAgent" data-settings-title="Agent execution" data-settings-eyebrow="SETTINGS · TOOL AUTHORITY" data-settings-description="read-only and write-capable boundaries"><h3>Agent execution policy</h3><label class="switch-line"><span><b>Allow write-capable Splunk tools</b><small>Keep disabled for analyst workspaces; repository handoff has its own narrower controls above.</small></span><input type="checkbox" id="allowWrites" disabled><span class="switch-control" aria-hidden="true"></span></label></div>
-        <div class="form-section release-readiness-section" id="settingsRelease" data-settings-section="settingsRelease" data-settings-title="Release readiness" data-settings-eyebrow="SETTINGS · ACCEPTANCE GATE" data-settings-description="source-bound quality evidence">
+        <div class="form-section guided-advanced" id="settingsAgent" data-settings-section="settingsAgent" data-settings-title="Agent execution" data-settings-eyebrow="SETTINGS · TOOL AUTHORITY" data-settings-description="read-only and write-capable boundaries"><h3>Agent execution policy</h3><label class="switch-line"><span><b>Allow write-capable Splunk tools</b><small>Keep disabled for analyst workspaces; repository handoff has its own narrower controls above.</small></span><input type="checkbox" id="allowWrites" disabled><span class="switch-control" aria-hidden="true"></span></label></div>
+        <div class="form-section release-readiness-section guided-advanced" id="settingsRelease" data-settings-section="settingsRelease" data-settings-title="Release readiness" data-settings-eyebrow="SETTINGS · ACCEPTANCE GATE" data-settings-description="source-bound quality evidence">
           <div class="release-readiness-heading"><div><h3>Release-candidate gate</h3><p>Measure the shipped interface, function ownership, and exact-source verification receipt before promoting a build.</p></div><button class="button ghost small" type="button" id="refreshReleaseReadiness">Run static checks</button></div>
           <div class="release-readiness" id="releaseReadiness" aria-live="polite"><div class="empty-inline compact-empty">Evaluating the current source-bound release checks…</div></div>
           <section class="upgrade-readiness-panel" aria-labelledby="upgradeReadinessTitle">
@@ -792,6 +830,13 @@
   <div class="modal-backdrop" id="artifactModal" hidden>
     <section class="modal compact" role="dialog" aria-modal="true" aria-labelledby="artifactTitle"><header><div><p class="eyebrow" id="artifactModalEyebrow">ADD TO CONTEXT</p><h2 id="artifactTitle">New evidence artifact</h2></div><button class="icon-button close-artifact" aria-label="Close">×</button></header><form id="artifactForm"><div class="form-grid"><label class="full"><span>Title</span><input id="newArtifactTitle" required></label><label><span>Type</span><select id="newArtifactKind"><option value="runbook">Runbook</option><option value="threat-intel">Threat intelligence</option><option value="spl">SPL library</option><option value="reference">Reference</option></select></label><label><span>Tags</span><input id="newArtifactTags" placeholder="identity, triage, windows"></label><label class="full"><span>Content</span><textarea id="newArtifactContent" rows="10" required></textarea></label></div><footer><button type="button" class="button ghost close-artifact">Cancel</button><button class="button primary" id="artifactSubmit" type="submit">Index artifact</button></footer></form></section>
   </div>
+  <div class="modal-backdrop" id="splCandidateModal" hidden>
+    <section class="modal spl-candidate-modal" role="dialog" aria-modal="true" aria-labelledby="splCandidateModalTitle">
+      <header><div><p class="eyebrow">MODEL-PROPOSED · NOT YET EXECUTED</p><h2 id="splCandidateModalTitle">Choose SPL to try in Splunk</h2><small>Compare every detected block. Each draft remains bound to the response’s exact Splunk identity and must be approved before MCP execution.</small></div><button class="icon-button close-spl-candidate" aria-label="Close SPL chooser">×</button></header>
+      <div class="spl-candidate-body"><div class="spl-candidate-summary"><b id="splCandidateCount">0 blocks detected</b><span>SignalRoom checks read-only syntax, workload policy, retained-result reuse, time bounds, and row limits before a draft can be created.</span></div><div class="spl-candidate-list" id="splCandidateList" aria-live="polite"></div></div>
+      <footer class="detail-actions"><span>Creating a draft does not run SPL.</span><button class="button ghost close-spl-candidate" type="button">Cancel</button></footer>
+    </section>
+  </div>
   <div class="modal-backdrop" id="validationModal" hidden>
     <section class="modal compact" role="dialog" aria-modal="true" aria-labelledby="validationModalTitle">
       <header><div><p class="eyebrow">READ-ONLY SPL CONTRACT</p><h2 id="validationModalTitle">Review validation draft</h2></div><button class="icon-button close-validation" aria-label="Close">×</button></header>
@@ -804,7 +849,8 @@
           <label><span>Latest time</span><input id="validationLatest" required maxlength="64" value="now"></label>
           <label><span>Maximum rows</span><input id="validationRowLimit" type="number" required min="1" max="500" value="100"></label>
           <label><span>Evidence references</span><input id="validationEvidenceRefs" readonly></label>
-        </div><section class="query-intelligence" id="queryIntelligence" aria-live="polite"><header><b>Execution intelligence</b><span>Analyzing contract…</span></header><p>SignalRoom will explain scan risk, reuse, and a safer staged contract before approval.</p></section></div>
+        </div><section class="query-intelligence" id="queryIntelligence" aria-live="polite"><header><b>Execution intelligence</b><span>Analyzing contract…</span></header><p>SignalRoom will explain scan risk, reuse, and a safer staged contract before approval.</p></section>
+        <section class="validation-preflight" id="validationPreflight" aria-live="polite"><header><div><b>Splunk validation adapter</b><span>Not checked for this exact query</span></div><button class="button ghost small" id="runValidationPreflight" type="button">Validate with Splunk</button></header><p>Checks for a native Splunk parser without running the search. If available, an optional SAIA critique receives only the SPL and bounds—never event rows.</p><label class="plain-check"><input id="validationUseSaia" type="checkbox"><span>Include optional Splunk AI Assistant critique when this instance advertises it</span></label><div class="validation-preflight-checks"></div></section></div>
         <footer><button type="button" class="button ghost close-validation">Cancel</button><button class="button primary" type="submit">Save draft</button></footer>
       </form>
     </section>
@@ -873,6 +919,6 @@
     </aside>
   </div>
   <div class="toast" id="toast" role="status"></div>
-  <script src="/static/app.js?v=20260720-estate-review-1" defer></script>
+  <script src="/static/app.js?v=20260905-spl-context-engine-1" defer></script>
 </body>
 </html>

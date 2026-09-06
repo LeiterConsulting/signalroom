@@ -6,7 +6,7 @@ current state legible, preserves deliberate operator authority, and distinguishe
 
 ## Safe operator sequence
 
-1. Open Setup → **Recovery** and refresh local evidence. This reads only SignalRoom state and makes no Splunk call.
+1. Open **Settings → Platform administration → Recovery** and refresh local evidence. This reads only SignalRoom state and makes no Splunk call.
 2. Run live diagnostics on Primary and every additional Splunk instance. Each click binds the result to the exact
    current endpoint/TLS/tenant fingerprint and exercises configuration, DNS, TCP, TLS, MCP authentication, and tool
    compatibility. Correct the named failing stage before rerunning it.
@@ -23,6 +23,9 @@ current state legible, preserves deliberate operator authority, and distinguishe
 6. Capture the assessment. The retained receipt contains the five statuses, immutable connection fingerprints,
    application version, operator, timestamp, and canonical state digest. It contains no endpoint tokens, SPL,
    evidence, cases, model prompts, or raw diagnostic payloads.
+
+The administration sections are intentionally outside guided setup. Opening the Recovery path reveals the full
+Settings workspace; this is a presentation change and does not begin a drill or grant administrative authority.
 
 Any connection revision, route, access, worker, or rehearsal change produces a different state digest. A prior
 receipt remains history and is never presented as the current state.

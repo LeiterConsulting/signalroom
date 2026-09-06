@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 InvestigationMode = Literal["auto", "general", "discovery", "detection", "hunt", "triage", "spl", "brief"]
 
@@ -33,6 +33,8 @@ class ModelProfile(BaseModel):
     provenance: str = ""
     context_window: int = 8192
     max_output_tokens: int | None = Field(default=None, ge=64, le=8192)
+    lifecycle: Literal["active", "candidate"] = "active"
+    staged_at: str | None = None
 
 
 class DetectionRepositorySettings(BaseModel):
@@ -71,6 +73,16 @@ class AppSettings(BaseModel):
     demo_mode: bool = False
     time_series_runtime: TimeSeriesRuntimeSettings = Field(default_factory=TimeSeriesRuntimeSettings)
     detection_repository: DetectionRepositorySettings = Field(default_factory=DetectionRepositorySettings)
+
+    @model_validator(mode="after")
+    def candidate_profiles_are_not_routed(self) -> AppSettings:
+        candidates = {profile.id for profile in self.models if profile.lifecycle == "candidate"}
+        routed = candidates & {self.default_chat_model, self.security_reasoning_model}
+        if routed:
+            raise ValueError(
+                "A staged evaluation candidate cannot be routed before tournament promotion"
+            )
+        return self
 
 
 class SettingsUpdate(BaseModel):
@@ -318,6 +330,21 @@ class ModelActivateRequest(BaseModel):
     unload_other_signalroom_models: bool = True
 
 
+class OllamaCandidateStageRequest(BaseModel):
+    model: str = Field(min_length=1, max_length=500)
+    label: str = Field(default="", max_length=160)
+    task: Literal["chat", "security_reasoning"] = "chat"
+    endpoint: str = Field(default="", max_length=2048)
+
+
+class ModelIntakeStageRequest(BaseModel):
+    model: str = Field(
+        min_length=3,
+        max_length=500,
+        pattern=r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$",
+    )
+
+
 class CodeVulnerabilityScreenRequest(BaseModel):
     code: str = Field(min_length=20, max_length=50_000)
     language: Literal["c", "cpp", "python"]
@@ -432,6 +459,41 @@ class ResultEnrichment(BaseModel):
     notes: list[str] = Field(default_factory=list)
 
 
+class ChatSplCandidate(BaseModel):
+    """One proposed SPL block, preserved with its provenance and execution boundary."""
+
+    id: str
+    ordinal: int = Field(ge=1, le=8)
+    title: str = Field(min_length=1, max_length=240)
+    purpose: str = Field(min_length=1, max_length=1000)
+    expected_result: str = Field(min_length=1, max_length=1000)
+    spl: str = Field(min_length=1, max_length=20000)
+    earliest_time: str = Field(default="-24h", min_length=2, max_length=64)
+    latest_time: str = Field(default="now", min_length=1, max_length=64)
+    row_limit: int = Field(default=100, ge=1, le=500)
+    evidence_refs: list[str] = Field(default_factory=list, max_length=16)
+    safety: Literal["reviewable", "blocked", "already-executed"] = "reviewable"
+    safety_reason: str = Field(default="", max_length=1000)
+    origin: Literal["model", "context-compiler", "saia"] = "model"
+    trust_status: Literal[
+        "model-proposed",
+        "context-grounded",
+        "needs-context-validation",
+        "context-compiled",
+        "blocked",
+        "already-executed",
+    ] = "model-proposed"
+    trust_reason: str = Field(default="", max_length=1000)
+    context_revision: str = Field(default="", max_length=64)
+    source_run_id: str = Field(default="", max_length=160)
+    data_exposure: str = Field(default="not-attested", max_length=120)
+    trust_checks: list[dict[str, str]] = Field(default_factory=list, max_length=16)
+    result_contract: dict[str, Any] = Field(default_factory=dict)
+    connection_alias: str = Field(default="primary", min_length=1, max_length=120)
+    connection_fingerprint: str = Field(default="", max_length=64)
+    tenant_scope_id: str = Field(default="workspace-primary", min_length=1, max_length=160)
+
+
 class ChatResponse(BaseModel):
     conversation_id: str
     message: str
@@ -448,6 +510,7 @@ class ChatResponse(BaseModel):
     suggested_actions: list[str] = Field(default_factory=list)
     model_recommendations: list[ModelRecommendation] = Field(default_factory=list)
     enrichment: ResultEnrichment = Field(default_factory=ResultEnrichment)
+    spl_candidates: list[ChatSplCandidate] = Field(default_factory=list)
     generated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     connection_alias: str = "primary"
     connection_fingerprint: str = ""
@@ -863,6 +926,7 @@ class ValidationTaskCreate(BaseModel):
     expires_at: str | None = None
     assurance_package_id: str = Field(default="", max_length=120)
     approval_scope: Literal["single-execution"] = "single-execution"
+    result_contract: dict[str, Any] = Field(default_factory=dict)
     connection_alias: str = Field(default="primary", min_length=1, max_length=120)
     connection_fingerprint: str = Field(default="", max_length=64)
     tenant_scope_id: str = Field(default="workspace-primary", min_length=1, max_length=160)
@@ -877,6 +941,10 @@ class ValidationTaskUpdate(BaseModel):
     row_limit: int | None = Field(default=None, ge=1, le=500)
     evidence_refs: list[str] | None = Field(default=None, max_length=16)
     case_id: str | None = Field(default=None, max_length=120)
+
+
+class ValidationPreflightRequest(BaseModel):
+    include_saia: bool = False
 
 
 class QueryIntelligenceRequest(BaseModel):
@@ -1011,6 +1079,8 @@ class ValidationTaskRecord(ValidationTaskCreate):
     query_fingerprint: str
     result_count: int = 0
     result_preview: list[Any] = Field(default_factory=list)
+    preflight_receipt: dict[str, Any] = Field(default_factory=dict)
+    execution_receipt: dict[str, Any] = Field(default_factory=dict)
     artifact_id: str = ""
     error: str = ""
     approved_at: str | None = None

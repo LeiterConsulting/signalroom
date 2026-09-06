@@ -11,7 +11,7 @@ The upstream Splunk Discovery Tool was reviewed as a source of proven patterns. 
 | Encrypted configuration | Non-secret JSON plus separate Fernet vault |
 | Deterministic + agentic chat | Deterministic inventory/SPL routes before model synthesis |
 | Optional capabilities | Explicit task-bound model profiles |
-| Unified workspace | Focused Investigate, Discovery, Context, and Models surfaces |
+| Unified workspace | Guided Investigate, Discovery, Cases, Detections, Knowledge, and Models surfaces with the full capability set one action away |
 
 Single-issuer OIDC/MFA-claim admission and host-only local recovery now extend optional local RBAC. Deferred
 capabilities include SCIM-style identity lifecycle, hard multi-tenant data boundaries, external token

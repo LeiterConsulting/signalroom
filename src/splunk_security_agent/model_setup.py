@@ -28,10 +28,227 @@ OLLAMA_DOWNLOAD_URL = "https://ollama.com/download"
 HF_TOKEN_URL = "https://huggingface.co/settings/tokens"
 LOCAL_RUNTIME_PACKAGES = (
     "huggingface-hub>=0.27,<2",
-    "sentence-transformers>=3.4,<6",
+    "sentence-transformers>=3.4,<7",
     "torch>=2.5",
     "transformers>=4.48,<6",
 )
+
+MODEL_CATALOG_REVIEW: dict[str, Any] = {
+    "reviewed_at": "2026-09-05",
+    "status": "current-with-research-candidate",
+    "summary": (
+        "The shipped Foundation-Sec, SecureBERT 2.0, and Cisco Time Series Model choices "
+        "remain current. Antares 1B is the only newly published Cisco-family model with a "
+        "strong SignalRoom mission fit, but it requires a separate read-only repository workflow."
+    ),
+    "findings": [
+        {
+            "label": "Foundation-Sec chat specialists",
+            "status": "current",
+            "detail": (
+                "Reasoning remains the security-analysis default; 1.1 Instruct remains the "
+                "optional extraction and instruction-following profile."
+            ),
+            "source_url": "https://huggingface.co/fdtn-ai/Foundation-Sec-8B-Reasoning",
+        },
+        {
+            "label": "SecureBERT 2.0 specialists",
+            "status": "current",
+            "detail": (
+                "The bi-encoder, cross-encoder, NER, and bounded code classifier remain the "
+                "publisher's task-specific cybersecurity suite."
+            ),
+            "source_url": "https://huggingface.co/cisco-ai/SecureBERT2.0-biencoder",
+        },
+        {
+            "label": "Cisco Time Series Model",
+            "status": "current",
+            "detail": (
+                "Version 1.0 remains the latest release and supersedes the deprecated 1.0-preview "
+                "checkpoint. SignalRoom already uses 1.0 through its isolated local service."
+            ),
+            "source_url": "https://huggingface.co/cisco-ai/cisco-time-series-model-1.0",
+        },
+        {
+            "label": "Antares 1B",
+            "status": "evaluate",
+            "detail": (
+                "New gated vulnerability-localization model. It is cataloged for a future "
+                "immutable, read-only repository-analysis workflow and is not routed today."
+            ),
+            "source_url": "https://huggingface.co/fdtn-ai/antares-1b",
+        },
+    ],
+}
+
+PUBLISHER_CATALOGS: tuple[str, ...] = ("cisco-ai", "fdtn-ai")
+
+
+def _reviewed_model(
+    revision: str,
+    pipeline_tag: str,
+    decision: str,
+    purpose: str,
+    *,
+    gated: bool | str = False,
+    license_id: str = "not-declared",
+) -> dict[str, Any]:
+    """Build one immutable publisher-intake decision."""
+    return {
+        "reviewed_revision": revision,
+        "reviewed_at": MODEL_CATALOG_REVIEW["reviewed_at"],
+        "pipeline_tag": pipeline_tag,
+        "gated": gated,
+        "license": license_id,
+        "decision": decision,
+        "purpose": purpose,
+    }
+
+
+# Repository names alone are not an adequate supply-chain review boundary. A new commit can
+# change weights, code, a model card, access terms, or a declared task without changing the ID.
+REVIEWED_PUBLISHER_MODELS: dict[str, dict[str, Any]] = {
+    "cisco-ai/pase": _reviewed_model(
+        "31b1cf14f41d4d7a1a469eaa45ce235825d900f0",
+        "audio-to-audio",
+        "out-of-scope",
+        "Speech enhancement is not part of SignalRoom's Splunk security mission.",
+    ),
+    "cisco-ai/stupase": _reviewed_model(
+        "539963f425ae201ac8c379b6480e3b182a4840ad",
+        "audio-to-audio",
+        "out-of-scope",
+        "Speech enhancement is not part of SignalRoom's Splunk security mission.",
+    ),
+    "cisco-ai/SecureBERT2.0-biencoder": _reviewed_model(
+        "b42d43ac3167e9e4d6ec6afb4f27cba791a2f6a0",
+        "sentence-similarity",
+        "admitted",
+        "Local cybersecurity evidence embeddings and RAG retrieval.",
+    ),
+    "cisco-ai/mini-bart-g2p": _reviewed_model(
+        "0fbbf8c590f9db920939a2bc4befbaac26eebc4c",
+        "text-generation",
+        "out-of-scope",
+        "Grapheme-to-phoneme generation does not improve the analyst workflow.",
+    ),
+    "cisco-ai/cisco-time-series-model-1.0": _reviewed_model(
+        "038831104abace772bd50bffe76da0c77c364c51",
+        "time-series-forecasting",
+        "admitted-preview",
+        "Bounded local forecasting of explicitly selected Splunk time series.",
+    ),
+    "cisco-ai/cisco-time-series-model-1.0-preview": _reviewed_model(
+        "bf56b7946c42912ddb05dbf14aabc59f0974d31b",
+        "time-series-forecasting",
+        "superseded",
+        "Retained in the inventory only to detect drift from the superseded preview.",
+    ),
+    "cisco-ai/SecureBERT2.0-base": _reviewed_model(
+        "7f7c16d1b2316c5046759667ed97f527aa1b7709",
+        "fill-mask",
+        "supporting-model",
+        "Publisher base model; SignalRoom uses bounded task-specific descendants instead.",
+    ),
+    "cisco-ai/SecureBERT2.0-NER": _reviewed_model(
+        "792db5b533118afee8c3fab86db119d09ab77ff6",
+        "token-classification",
+        "admitted",
+        "Evidence-bounded cybersecurity entity candidates.",
+    ),
+    "cisco-ai/SecureBERT2.0-cross_encoder": _reviewed_model(
+        "960b9235bd165911babab7d312fc7f252cdc9d6d",
+        "sentence-similarity",
+        "admitted",
+        "Local reranking of retrieved evidence.",
+    ),
+    "cisco-ai/SecureBERT2.0-code-vuln-detection": _reviewed_model(
+        "f260674279f97f85d75be257defa62484aa0239c",
+        "text-classification",
+        "admitted-preview",
+        "Opt-in source-code review prioritization with explicit input boundaries.",
+    ),
+    "fdtn-ai/antares-350m": _reviewed_model(
+        "cdf6d054fa5f491553ccb1704269cbd1954c6c6e",
+        "text-generation",
+        "research-candidate",
+        "Gated vulnerability localization candidate; no automatic routing.",
+        gated="auto",
+    ),
+    "fdtn-ai/antares-1b": _reviewed_model(
+        "10417eb35641b32e7141157db19c76eb545193b6",
+        "text-generation",
+        "research-candidate",
+        "Preferred Antares candidate for a future immutable repository workflow.",
+        gated="auto",
+    ),
+    "fdtn-ai/Foundation-Sec-8B-Reasoning-Q4_K_M-GGUF": _reviewed_model(
+        "4a04f7b19513ff9f672169b8fe4288000ab87b07",
+        "text-generation",
+        "admitted",
+        "Default local security-reasoning artifact.",
+    ),
+    "fdtn-ai/Foundation-Sec-8B-Reasoning-Q8_0-GGUF": _reviewed_model(
+        "010378322d06cccff4cb64ad62997411f2bd511f",
+        "text-generation",
+        "compatible-alternative",
+        "Higher-memory quantization of the admitted security-reasoning model.",
+    ),
+    "fdtn-ai/Foundation-Sec-8B-Reasoning": _reviewed_model(
+        "63c930c82d7646226d33502bec5870019738400e",
+        "text-generation",
+        "upstream-source",
+        "Upstream weights for the admitted reasoning GGUF artifacts.",
+    ),
+    "fdtn-ai/Foundation-Sec-1.1-8B-Instruct-Q4_K_M-GGUF": _reviewed_model(
+        "0b58da4736f799f3cb5bbaffb8a39025f1c4e5df",
+        "text-generation",
+        "admitted",
+        "Optional local security extraction and concise instruction following.",
+    ),
+    "fdtn-ai/Foundation-Sec-1.1-8B-Instruct": _reviewed_model(
+        "243b27655e01c87cc04fdb88632be7cd9e55ac1f",
+        "text-generation",
+        "upstream-source",
+        "Upstream weights for the admitted 1.1 Instruct GGUF artifact.",
+    ),
+    "fdtn-ai/Foundation-Sec-1.1-8B-Instruct-Q8_0-GGUF": _reviewed_model(
+        "02a3d8902fa521a170e98158642c6029f78c2392",
+        "text-generation",
+        "compatible-alternative",
+        "Higher-memory quantization of the admitted 1.1 Instruct model.",
+    ),
+    "fdtn-ai/Foundation-Sec-8B-Instruct-Q8_0-GGUF": _reviewed_model(
+        "16deb1934d4b1d28769f7020c15ae018aa537d1f",
+        "text-generation",
+        "superseded-family",
+        "Reviewed predecessor retained for publisher-inventory drift detection.",
+    ),
+    "fdtn-ai/Foundation-Sec-8B-Q4_K_M-GGUF": _reviewed_model(
+        "0f21603d7793fdc62134345f018296d870714688",
+        "text-generation",
+        "superseded-family",
+        "Reviewed predecessor retained for publisher-inventory drift detection.",
+    ),
+    "fdtn-ai/Foundation-Sec-8B-Q8_0-GGUF": _reviewed_model(
+        "5036b13833f928dd3a4e23e66abd0150b2c23fe6",
+        "text-generation",
+        "superseded-family",
+        "Reviewed predecessor retained for publisher-inventory drift detection.",
+    ),
+    "fdtn-ai/Foundation-Sec-8B-Instruct": _reviewed_model(
+        "aa13cb996e7fc700e7efd6b7367992f14cf349c0",
+        "text-generation",
+        "superseded-family",
+        "Reviewed predecessor retained for publisher-inventory drift detection.",
+    ),
+    "fdtn-ai/Foundation-Sec-8B": _reviewed_model(
+        "9e6bb1f70b402e55bbf68cfd7abf88458daf09b3",
+        "text-generation",
+        "superseded-family",
+        "Reviewed predecessor retained for publisher-inventory drift detection.",
+    ),
+}
 
 EVALUATED_MODEL_CANDIDATES: tuple[dict[str, Any], ...] = (
     {
@@ -145,6 +362,73 @@ EVALUATED_MODEL_CANDIDATES: tuple[dict[str, Any], ...] = (
         ],
         "source_url": "https://huggingface.co/cisco-ai/cisco-time-series-model-1.0",
     },
+    {
+        "id": "antares-vulnerability-localization",
+        "label": "Antares 1B repository vulnerability localization",
+        "model": "fdtn-ai/antares-1b",
+        "owner": "Foundation AI at Cisco",
+        "status": "research-candidate",
+        "runtime": "dedicated-repository-agent",
+        "profile_id": "",
+        "purpose": (
+            "Localize files that deserve vulnerability review inside an immutable source-code "
+            "snapshot using a small, cybersecurity-specialized read-only terminal agent."
+        ),
+        "constraint": (
+            "The publisher repository is gated and no SignalRoom runtime adapter exists yet. "
+            "Candidate paths are triage evidence, not vulnerability findings. Automatic chat, "
+            "Splunk, write, network, and remediation access are prohibited."
+        ),
+        "input_contract": (
+            "Immutable read-only repository snapshot · explicit vulnerability description or CWE · "
+            "bounded grep/find/cat-style tools only"
+        ),
+        "output_contract": (
+            "Evidence-linked candidate file paths, observed commands, confidence, limitations, and "
+            "a reviewable SARIF-compatible result"
+        ),
+        "automatic_use": False,
+        "admission_gates": [
+            {
+                "name": "First-party source and license",
+                "status": "pass",
+                "detail": "Foundation AI at Cisco · Apache-2.0 model card · 1B parameter checkpoint",
+            },
+            {
+                "name": "SignalRoom mission fit",
+                "status": "pass",
+                "detail": (
+                    "Repository-scale vulnerability localization can enrich detection engineering "
+                    "and incident follow-up without treating the model as a generic chat agent"
+                ),
+            },
+            {
+                "name": "Access and immutable artifact provenance",
+                "status": "blocked",
+                "detail": (
+                    "Publisher access is gated; explicit license acceptance, token handling, revision "
+                    "pinning, and local artifact approval must be implemented"
+                ),
+            },
+            {
+                "name": "Read-only repository sandbox",
+                "status": "blocked",
+                "detail": (
+                    "Needs a dedicated adapter with an immutable snapshot, bounded file tools, no "
+                    "shell or network escape, timeouts, and a complete action transcript"
+                ),
+            },
+            {
+                "name": "SignalRoom benchmark and analyst output",
+                "status": "blocked",
+                "detail": (
+                    "Requires representative repository cases, false-positive measurement, evidence "
+                    "links, SARIF export, and explicit analyst disposition before admission"
+                ),
+            },
+        ],
+        "source_url": "https://huggingface.co/fdtn-ai/antares-1b",
+    },
 )
 
 
@@ -176,6 +460,15 @@ def _models_match(requested: str, actual: str) -> bool:
     return _model_installed(requested, [actual])
 
 
+def _candidate_runtime_installed(runtime: str) -> bool:
+    """Report only runtimes SignalRoom can actually execute today."""
+    if runtime == "local-transformers":
+        return local_runtime_available()
+    if runtime == "dedicated-time-series":
+        return importlib.util.find_spec("cisco_tsm") is not None
+    return False
+
+
 class ModelSetupService:
     """Readiness checks and explicit, profile-scoped local model downloads."""
 
@@ -191,6 +484,7 @@ class ModelSetupService:
         self.jobs: dict[str, dict[str, Any]] = {}
         self.context_index_job: dict[str, Any] = {"status": "idle"}
         self.revision_state_path = self.config.root / "model_revisions.json"
+        self.intake_queue_path = self.config.root / "model_intake.json"
 
     def catalog(self) -> dict[str, Any]:
         """Describe shipped capabilities and researched candidates without overstating support."""
@@ -201,20 +495,179 @@ class ModelSetupService:
             candidate = json.loads(json.dumps(item))
             profile_id = str(candidate.get("profile_id") or "")
             candidate["configured"] = bool(profile_id and profile_id in configured)
-            candidate["runtime_installed"] = (
-                local_runtime_available()
-                if candidate["runtime"] == "local-transformers"
-                else importlib.util.find_spec("cisco_tsm") is not None
+            candidate["runtime_installed"] = _candidate_runtime_installed(
+                str(candidate.get("runtime") or "")
             )
             candidates.append(candidate)
         return {
             "configured": [profile.model_dump(mode="json") for profile in settings.models],
             "evaluated_candidates": candidates,
+            "publisher_review": json.loads(json.dumps(MODEL_CATALOG_REVIEW)),
+            "reviewed_publisher_models": len(REVIEWED_PUBLISHER_MODELS),
+            "intake_queue": self._load_intake_queue(),
             "policy": (
                 "Every model must pass source, runtime, input, output, evaluation, and routing gates. "
                 "A useful publisher model is not treated as a SignalRoom capability until its exact "
                 "analyst workflow is bounded and testable."
             ),
+        }
+
+    def _load_intake_queue(self) -> list[dict[str, Any]]:
+        if not self.intake_queue_path.exists():
+            return []
+        try:
+            value = json.loads(self.intake_queue_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return []
+        return value if isinstance(value, list) else []
+
+    def _save_intake_queue(self, values: list[dict[str, Any]]) -> None:
+        self.intake_queue_path.write_text(
+            json.dumps(values, indent=2, sort_keys=True), encoding="utf-8"
+        )
+
+    async def stage_publisher_intake(self, model: str) -> dict[str, Any]:
+        """Create a durable, read-only review item for one first-party Hub repository."""
+        publisher = model.split("/", 1)[0]
+        if publisher not in PUBLISHER_CATALOGS:
+            raise ValueError("Only monitored Cisco and Foundation AI publishers can be staged")
+        try:
+            async with httpx.AsyncClient(timeout=12) as client:
+                metadata = await self._hub_metadata(client, model)
+        except (httpx.HTTPError, ValueError) as exc:
+            raise RuntimeError(f"The first-party model source could not be observed: {exc}") from exc
+        reviewed = REVIEWED_PUBLISHER_MODELS.get(model, {})
+        entry = {
+            "model": model,
+            "status": "pending-review",
+            "staged_at": datetime.now(UTC).isoformat(),
+            "reviewed_revision": str(reviewed.get("reviewed_revision") or ""),
+            **metadata,
+            "review_checklist": [
+                "Confirm publisher, access terms, license, and immutable revision.",
+                "Define one bounded analyst input and output contract.",
+                "Implement synthetic evaluation controls before routing.",
+                "Require exact local artifact approval before promotion.",
+            ],
+            "downloads_started": 0,
+        }
+        queue = [item for item in self._load_intake_queue() if item.get("model") != model]
+        queue.insert(0, entry)
+        self._save_intake_queue(queue[:50])
+        return entry
+
+    def discard_publisher_intake(self, model: str) -> dict[str, Any]:
+        queue = self._load_intake_queue()
+        retained = [item for item in queue if item.get("model") != model]
+        if len(retained) == len(queue):
+            raise KeyError(f"Model intake item not found: {model}")
+        self._save_intake_queue(retained)
+        return {"model": model, "discarded": True, "intake_queue": retained}
+
+    @staticmethod
+    def _normalized_ollama_endpoint(value: str) -> str:
+        endpoint = (value or "http://localhost:11434").rstrip("/")
+        for suffix in ("/api/chat", "/api/tags", "/v1"):
+            if endpoint.endswith(suffix):
+                endpoint = endpoint[: -len(suffix)]
+        return endpoint
+
+    async def stage_ollama_candidate(
+        self,
+        model: str,
+        *,
+        label: str = "",
+        task: str = "chat",
+        endpoint: str = "",
+    ) -> dict[str, Any]:
+        """Stage an installed Ollama model without changing a routed assignment."""
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,499}", model):
+            raise ValueError("The Ollama model name contains unsupported characters")
+        if task not in {"chat", "security_reasoning"}:
+            raise ValueError("Candidates must target chat or security reasoning")
+        settings = self.config.load()
+        ollama_profiles = [item for item in settings.models if item.provider == "ollama"]
+        configured_endpoints = {_ollama_base(item) for item in ollama_profiles}
+        selected_endpoint = self._normalized_ollama_endpoint(
+            endpoint or (_ollama_base(ollama_profiles[0]) if ollama_profiles else "")
+        )
+        if configured_endpoints and selected_endpoint not in configured_endpoints:
+            raise ValueError("Candidate staging is limited to a configured Ollama endpoint")
+        existing = next(
+            (item for item in ollama_profiles if _models_match(model, item.model)), None
+        )
+        if existing is not None:
+            qualifier = "already staged" if existing.lifecycle == "candidate" else "already configured"
+            raise ValueError(f"{model} is {qualifier} as {existing.id}")
+        try:
+            async with httpx.AsyncClient(timeout=8) as client:
+                response = await client.get(f"{selected_endpoint}/api/tags")
+                response.raise_for_status()
+            values = [
+                item
+                for item in response.json().get("models", [])
+                if isinstance(item, dict) and str(item.get("name") or "")
+            ]
+        except (httpx.HTTPError, ValueError) as exc:
+            raise RuntimeError(f"The configured Ollama inventory is unavailable: {exc}") from exc
+        installed = next(
+            (item for item in values if _models_match(model, str(item.get("name") or ""))),
+            None,
+        )
+        if installed is None:
+            raise ValueError("Only a model already installed at the configured Ollama endpoint can be staged")
+        canonical_model = str(installed.get("name") or model)
+        slug = re.sub(r"[^a-z0-9]+", "-", canonical_model.lower()).strip("-")[:48]
+        suffix = hashlib.sha256(canonical_model.lower().encode()).hexdigest()[:8]
+        profile_id = f"candidate-{slug or 'ollama'}-{suffix}"
+        if any(item.id == profile_id for item in settings.models):
+            raise ValueError(f"{canonical_model} is already staged as {profile_id}")
+        staged_at = datetime.now(UTC).isoformat()
+        profile = ModelProfile(
+            id=profile_id,
+            label=label.strip() or f"Evaluation · {canonical_model}",
+            provider="ollama",
+            model=canonical_model,
+            task=task,
+            endpoint=selected_endpoint,
+            description=(
+                "Temporary local evaluation profile. It cannot affect investigation routing until "
+                "it wins a reviewed SignalRoom tournament and is explicitly promoted."
+            ),
+            provenance="Operator-staged installed Ollama model",
+            lifecycle="candidate",
+            staged_at=staged_at,
+        )
+        settings.models.append(profile)
+        self.config.save(settings)
+        return {
+            "profile": profile.model_dump(mode="json"),
+            "settings": self.config.public_payload(),
+            "routing_unchanged": {
+                "default_chat_model": settings.default_chat_model,
+                "security_reasoning_model": settings.security_reasoning_model,
+            },
+            "local_digest": str(installed.get("digest") or ""),
+        }
+
+    def discard_ollama_candidate(self, profile_id: str) -> dict[str, Any]:
+        settings = self.config.load()
+        profile = next((item for item in settings.models if item.id == profile_id), None)
+        if profile is None:
+            raise KeyError(f"Unknown model profile: {profile_id}")
+        if profile.lifecycle != "candidate":
+            raise ValueError("Only a staged evaluation candidate can be discarded")
+        if profile_id in {settings.default_chat_model, settings.security_reasoning_model}:
+            raise ValueError("A routed model cannot be discarded; promote or roll back another model first")
+        settings.models = [item for item in settings.models if item.id != profile_id]
+        self.config.save(settings)
+        state = self._load_revision_state()
+        state.setdefault("profiles", {}).pop(profile_id, None)
+        self._save_revision_state(state)
+        return {
+            "profile_id": profile_id,
+            "discarded": True,
+            "settings": self.config.public_payload(),
         }
 
     @staticmethod
@@ -349,10 +802,15 @@ class ModelSetupService:
         response = await client.get(f"https://huggingface.co/api/models/{repo}", headers=headers)
         response.raise_for_status()
         metadata = response.json()
+        card_data = metadata.get("cardData")
+        if not isinstance(card_data, dict):
+            card_data = {}
         return {
             "revision": str(metadata.get("sha") or ""),
             "last_modified": metadata.get("lastModified"),
             "pipeline_tag": metadata.get("pipeline_tag"),
+            "gated": metadata.get("gated", False),
+            "license": str(card_data.get("license") or "not-declared"),
             "source_url": f"https://huggingface.co/{repo}",
         }
 
@@ -371,6 +829,9 @@ class ModelSetupService:
         repos.update(str(item["model"]) for item in EVALUATED_MODEL_CANDIDATES)
         hub_metadata: dict[str, dict[str, Any]] = {}
         hub_errors: dict[str, str] = {}
+        publisher_models: dict[str, list[dict[str, Any]]] = {}
+        publisher_errors: dict[str, str] = {}
+        publisher_incomplete: set[str] = set()
 
         async with httpx.AsyncClient(timeout=12) as client:
             async def load_tags(endpoint: str) -> None:
@@ -390,9 +851,60 @@ class ModelSetupService:
                 except (httpx.HTTPError, ValueError) as exc:
                     hub_errors[repo] = str(exc)
 
+            async def load_publisher(publisher: str) -> None:
+                try:
+                    next_url = "https://huggingface.co/api/models"
+                    params: dict[str, Any] | None = {
+                        "author": publisher,
+                        "limit": 100,
+                        "full": "true",
+                        "sort": "lastModified",
+                        "direction": "-1",
+                    }
+                    observed: list[dict[str, Any]] = []
+                    page_count = 0
+                    while next_url and page_count < 10:
+                        response = await client.get(next_url, params=params)
+                        response.raise_for_status()
+                        values = response.json()
+                        if not isinstance(values, list):
+                            raise ValueError("Publisher catalog returned an unexpected response.")
+                        observed.extend(
+                            {
+                                "model": str(item.get("id") or ""),
+                                "revision": str(item.get("sha") or ""),
+                                "last_modified": item.get("lastModified"),
+                                "pipeline_tag": item.get("pipeline_tag"),
+                                "gated": item.get("gated", False),
+                                "license": str((item.get("cardData") or {}).get("license") or "not-declared"),
+                                "source_url": f"https://huggingface.co/{item.get('id')}",
+                            }
+                            for item in values
+                            if isinstance(item, dict)
+                            and str(item.get("id") or "").startswith(f"{publisher}/")
+                            and not item.get("private", False)
+                        )
+                        page_count += 1
+                        links = getattr(response, "links", {}) or {}
+                        candidate_url = str((links.get("next") or {}).get("url") or "")
+                        next_url = (
+                            candidate_url
+                            if candidate_url.startswith("https://huggingface.co/api/models")
+                            else ""
+                        )
+                        params = None
+                        if not next_url and len(values) >= 100:
+                            publisher_incomplete.add(publisher)
+                    if next_url:
+                        publisher_incomplete.add(publisher)
+                    publisher_models[publisher] = observed
+                except (httpx.HTTPError, ValueError) as exc:
+                    publisher_errors[publisher] = str(exc)
+
             await asyncio.gather(
                 *(load_tags(endpoint) for endpoint in endpoints),
                 *(load_hub(repo) for repo in repos),
+                *(load_publisher(publisher) for publisher in PUBLISHER_CATALOGS),
             )
 
         results: list[dict[str, Any]] = []
@@ -519,11 +1031,119 @@ class ModelSetupService:
                     **remote,
                 }
             )
+        publisher_catalogs = []
+        for publisher in PUBLISHER_CATALOGS:
+            observed = publisher_models.get(publisher, [])
+            observed_by_id = {item["model"]: item for item in observed}
+            observed_ids = {item["model"] for item in observed}
+            reviewed_manifest = {
+                model: review
+                for model, review in REVIEWED_PUBLISHER_MODELS.items()
+                if model.startswith(f"{publisher}/")
+            }
+            reviewed_ids = set(reviewed_manifest)
+            unreviewed = [item for item in observed if item["model"] not in reviewed_ids]
+            missing_reviewed = sorted(reviewed_ids - observed_ids)
+            changed_reviewed = []
+            for model in sorted(reviewed_ids & observed_ids):
+                review = reviewed_manifest[model]
+                current = observed_by_id[model]
+                changes = []
+                comparisons = (
+                    (
+                        "revision",
+                        str(review.get("reviewed_revision") or ""),
+                        str(current.get("revision") or ""),
+                    ),
+                    (
+                        "pipeline_tag",
+                        str(review.get("pipeline_tag") or ""),
+                        str(current.get("pipeline_tag") or ""),
+                    ),
+                    (
+                        "gated",
+                        str(review.get("gated", False)).lower(),
+                        str(current.get("gated", False)).lower(),
+                    ),
+                    (
+                        "license",
+                        str(review.get("license") or "not-declared"),
+                        str(current.get("license") or "not-declared"),
+                    ),
+                )
+                for field, reviewed_value, observed_value in comparisons:
+                    if reviewed_value != observed_value:
+                        changes.append(
+                            {
+                                "field": field,
+                                "reviewed": reviewed_value,
+                                "observed": observed_value,
+                            }
+                        )
+                if changes:
+                    changed_reviewed.append(
+                        {
+                            **current,
+                            "reviewed_revision": review.get("reviewed_revision", ""),
+                            "reviewed_at": review.get("reviewed_at", ""),
+                            "decision": review.get("decision", ""),
+                            "purpose": review.get("purpose", ""),
+                            "changes": changes,
+                        }
+                    )
+            error = publisher_errors.get(publisher, "")
+            if error:
+                status = "error"
+                detail = error
+            elif unreviewed or missing_reviewed or changed_reviewed or publisher in publisher_incomplete:
+                status = "review-required"
+                detail = (
+                    "The publisher inventory differs from SignalRoom's immutable review manifest; "
+                    "stage the exact source revision for review before changing a capability."
+                )
+            else:
+                status = "current"
+                detail = "Publisher catalog revisions and metadata match the dated intake manifest."
+            publisher_catalogs.append(
+                {
+                    "publisher": publisher,
+                    "status": status,
+                    "observed_count": len(observed),
+                    "reviewed_count": len(reviewed_ids),
+                    "complete": publisher not in publisher_incomplete,
+                    "unreviewed_models": unreviewed,
+                    "missing_reviewed_models": missing_reviewed,
+                    "changed_reviewed_models": changed_reviewed,
+                    "detail": detail,
+                }
+            )
+        source_attention = any(item["status"] != "current" for item in publisher_catalogs)
+        runtime_failures = len(endpoint_errors)
         return {
             "checked_at": datetime.now(UTC).isoformat(),
             "profiles": results,
             "candidate_sources": candidate_sources,
+            "publisher_catalogs": publisher_catalogs,
             "counts": counts,
+            "health_axes": {
+                "runtime": {
+                    "status": "offline" if runtime_failures else "ready",
+                    "failures": runtime_failures,
+                    "detail": (
+                        "One or more configured Ollama endpoints are unreachable."
+                        if runtime_failures
+                        else "Configured Ollama endpoints answered the local inventory check."
+                    ),
+                },
+                "upstream": {
+                    "status": "attention" if source_attention else "current",
+                    "detail": (
+                        "At least one publisher inventory requires review."
+                        if source_attention
+                        else "Publisher inventories match the immutable review manifest."
+                    ),
+                },
+            },
             "downloads_started": 0,
             "policy": "Read-only check. SignalRoom never downloads, updates, or swaps a model here.",
         }

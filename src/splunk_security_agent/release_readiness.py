@@ -48,6 +48,20 @@ CONTRAST_PAIRS = (
     ("error text", "#762d27", "#f9e9e7"),
     ("informational text", "#315f80", "#f7faf8"),
 )
+GUIDED_ADVANCED_TARGETS = (
+    "discoveryJobsWorkspace",
+    "estateComparisonWorkspace",
+    "assuranceWorkspace",
+    "discoveryAssessment",
+    "validationWorkspace",
+    "modelTrustPanel",
+    "modelEvaluationSuites",
+    "modelTournamentWorkspace",
+    "modelGoldenGate",
+    "modelOutcomeBenchmarks",
+    "splunkModelInventory",
+    "candidateModels",
+)
 
 
 def _now() -> str:
@@ -248,6 +262,55 @@ class ReleaseReadinessService:
             for label, pattern in forbidden_patterns.items()
         }
         language_hits = {key: value for key, value in language_hits.items() if value}
+        root_readme = (self.root / "README.md").read_text(encoding="utf-8")
+        docs_index_path = self.root / "docs" / "README.md"
+        user_guide_path = self.root / "docs" / "USER_GUIDE.md"
+        docs_index = docs_index_path.read_text(encoding="utf-8") if docs_index_path.is_file() else ""
+        user_guide = user_guide_path.read_text(encoding="utf-8") if user_guide_path.is_file() else ""
+        guided_targets = {
+            target: {
+                "documented": target in javascript,
+                "present": target in parser.ids,
+            }
+            for target in GUIDED_ADVANCED_TARGETS
+        }
+        documentation_links = (
+            "USER_GUIDE.md",
+            "MODEL_ORCHESTRATION_TLDR.md",
+            "DEPLOYMENT.md",
+            "UPGRADES.md",
+            "OPERATIONAL_ACCEPTANCE.md",
+            "RELEASE_CANDIDATE.md",
+            "SECURITY.md",
+            "ARCHITECTURE.md",
+            "CONNECTIONS.md",
+            "MODEL_CATALOG.md",
+            "UPSTREAM_ADOPTION.md",
+        )
+        guided_contract = {
+            "guide_present": "workspaceGuide" in parser.ids,
+            "mode_control_present": "workspaceModeToggle" in parser.ids,
+            "settings_control_present": "settingsAdvancedToggle" in parser.ids,
+            "guided_css": "body.workspace-guided .guided-advanced" in css,
+            "mode_logic": "function setWorkspaceMode(mode" in javascript,
+            "target_logic": "function openWorkspaceTool(target)" in javascript,
+            "targets": guided_targets,
+            "user_guide": user_guide_path.is_file()
+            and "Guided view and full workspace" in user_guide
+            and "presentation only" in user_guide.lower(),
+            "documentation_index": docs_index_path.is_file()
+            and all(link in docs_index for link in documentation_links),
+            "readme_entrypoint": "docs/USER_GUIDE.md" in root_readme
+            and "docs/README.md" in root_readme,
+        }
+        guided_ok = all(
+            value
+            for key, value in guided_contract.items()
+            if key != "targets"
+        ) and all(
+            item["documented"] and item["present"]
+            for item in guided_targets.values()
+        )
         functions = re.findall(
             r"(?m)^(?:async\s+)?function\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*\(", javascript
         )
@@ -368,6 +431,22 @@ class ReleaseReadinessService:
                 if not language_hits
                 else "Developer-facing or unfinished language remains in shipped interface assets.",
                 {"hits": language_hits},
+            ),
+            _check(
+                "guided-workspace",
+                "Guided and full capability workspace",
+                guided_ok,
+                (
+                    "Guided pages explain the outcome and retain one-action routes to every "
+                    "advanced workspace; "
+                    "the user guide and documentation map cover the shipped interface."
+                )
+                if guided_ok
+                else (
+                    "The progressive-disclosure controls, advanced routes, or repository "
+                    "documentation are incomplete."
+                ),
+                guided_contract,
             ),
             _check(
                 "function-ownership",

@@ -14,6 +14,8 @@ FastAPI application ───── outward MCP tools
         ├── SecurityAgent ── mode + capability router ── Ollama / local Transformers / HF cloud
         │        │
         │        ├── hybrid evidence retrieval + evidence ledger
+        │        ├── SPL Context Engine ── schema graph + synthetic shapes
+        │        │                         └── typed intent → deterministic SPL compiler
         │        └── bounded read-only Splunk tool plans
         │
        └── DiscoveryPipeline ── Splunk MCP ── deterministic evidence map + fingerprints
@@ -44,6 +46,18 @@ AssuranceService ── SQLite policy + runs + events + notices
 
 ## Design decisions
 
+### Progressive disclosure is a presentation boundary
+
+The browser defaults to a guided outcome view. It keeps primary actions, a three-step workflow, and role-specific
+value visible while marking high-density operational workspaces as advanced. **Show all tools** removes only that
+presentation filter and can deep-link directly to the requested workspace. The preference is browser-local.
+
+Guided and full views call the same APIs and use the same authorization, immutable connection, workload, model,
+and audit controls. The server does not accept a weaker execution mode from the browser, and no capability is
+deleted, disabled, or granted by changing presentation. Settings uses the same pattern: Splunk, Instances, and
+Models are the essential path; platform administration reveals Repository, Access, Recovery, Workload, Agent, and
+Release.
+
 ### Access control is a promotion, not an installation prerequisite
 
 The durable access policy defaults to `local-single-user`, which represents one trusted loopback operator with
@@ -70,7 +84,7 @@ local/private Python 3.11 service before spending a Splunk query, validates exac
 regularizes one numeric series, reports last-value imputation, withholds known points for a naive-baseline
 backtest, and exposes mean plus p10/p50/p90 forecasts. The bundled sidecar attests the immutable checkpoint
 revision; an existing publisher-compatible service may run forecasts, but missing revision attestation holds
-promotion. Forecast output cannot automatically modify an alert, threshold, capacity decision, Context artifact,
+promotion. Forecast output cannot automatically modify an alert, threshold, capacity decision, Knowledge artifact,
 or case.
 
 `TimeSeriesExperimentStore` retains each completed or data-quality-blocked run as immutable local experiment
@@ -129,6 +143,53 @@ High-confidence asks use deterministic read-only MCP plans capped by `max_agent_
 metadata, and knowledge-object intents may collect several independent results concurrently. Explicit
 SPL is checked against modifying and high-risk commands before execution. Model synthesis happens only
 after results are captured, distilled, and added to the evidence ledger.
+
+Generated responses are scanned deterministically for up to eight distinct SPL code blocks. Each block becomes a
+structured candidate carrying its purpose, expected result, evidence references, and the response's exact alias,
+tenant, and immutable connection revision. The browser analyzes every reviewable candidate through the same query
+intelligence and workload preflight used by the validation queue. A single candidate gets a direct follow-up;
+multiple candidates get a chooser. Selection creates a draft only—approval and MCP execution remain separate.
+
+### SPL authoring is a context-compiler pipeline
+
+SPL creation is a distinct route from explaining supplied SPL or answering a live factual question. Each
+`SecurityAgent` receives a `SplContextEngine` bound to the same alias, immutable connection fingerprint, and
+tenant scope as its Splunk client. The engine reads only the matching latest discovery blueprint; a stale or
+different revision is unavailable rather than silently reused.
+
+The engine derives a bounded catalog of indexes, sourcetypes, Splunk built-in fields, fields referenced by saved
+searches and alerts, data models, macros, and lookups. It retains graph edges such as a knowledge object searching
+an index or referencing a field, but does not place saved-search SPL or filter literals in the modeling packet.
+Fields and edges are ranked against the current request so large estates do not receive an arbitrary alphabetical
+slice. Synthetic examples use reserved domains and documentation address ranges and are explicitly marked as
+synthetic.
+
+Pasted JSON or key/value event-shaped samples pass through deterministic sanitization before model planning.
+SignalRoom retains field names as shape and replaces source values; `_raw`, evidence excerpts, and live result
+values are excluded. A local chat model may then return one to four `SplSearchIntent` objects under a strict JSON
+schema. It cannot return trusted SPL. The compiler resolves identifiers case-insensitively against the full exact-
+scope catalog, applies allowlisted filters, aggregates, grouping, fields, sorting, relative time bounds, and a row
+cap, then runs the existing read-only screen.
+
+The resulting status is `context-compiled`, not `trusted-for-execution`. Each candidate carries its context
+revision, discovery run, authoring data-exposure contract, and individual check results. Splunk parser validation,
+query-intelligence/workload admission, explicit draft approval, bounded MCP execution, and result preservation are
+separate later trust stages. Free-form SPL found in ordinary model output may be context-assessed, but it is not
+misrepresented as compiler-originated.
+
+`SplValidationAdapter` owns the Splunk-specific trust stages. It reopens the draft's immutable connection and tenant
+binding, discovers the live MCP tool schema, and selects only recognized parser and SAIA aliases. A parser call is
+non-executing and receives the SPL plus schema-advertised bounds. Only an explicit valid response becomes `passed`;
+an unrecognized response is `inconclusive`, an absent parser is `unavailable`, and an explicit rejection or tool
+failure blocks the run. Optional SAIA is advisory: it receives the same value-free contract, its response cannot
+replace the staged SPL, and its absence never masquerades as a check.
+
+Approval remains a human boundary and does not follow automatically from preflight. Execution refreshes preflight
+against the exact target, rechecks the immutable binding, and then uses the existing workload-controlled
+`run_query` lane. The compiler attaches a typed result contract to the draft. After the bounded call, the adapter
+profiles only returned field names and primitive types, compares them with the expected operation fields, and
+stores `matched`, `mismatch`, or `inconclusive-zero-rows`. Raw values remain in the separately bounded evidence
+preview and are never copied into the result-shape receipt.
 
 ### Splunk admission is shared and audit-first
 
@@ -598,9 +659,11 @@ requirements are documented in [CONNECTIONS.md](CONNECTIONS.md).
 ### The selected scope is a retrieval and case boundary
 
 The header selector is populated only from executable connection identities. Its alias, immutable
-fingerprint, and tenant scope are attached to chat, discovery, artifact, Context-search, case, and
+fingerprint, and tenant scope are attached to chat, discovery, artifact, Knowledge-search, case, and
 SignalRoom MCP requests. Evidence and case stores migrate legacy blank records once, stamp all new
-records, and apply tenant predicates to reads and mutations. Artifact IDs include the tenant and alias;
+records, and apply tenant predicates to reads and mutations. Chat retrieval additionally requires the exact
+connection alias and revision, so a reconfigured alias cannot feed stale discovery knowledge into a new prompt.
+Artifact IDs include the tenant and alias;
 conversation memory and retrieval caches include the tenant and connection revision. Discovery latest
 files and replacement knowledge documents are revision/scope specific. The case cockpit resolves
 artifact references only inside the case tenant.

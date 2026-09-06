@@ -181,6 +181,8 @@ class MCPServer:
                     arguments["query"],
                     arguments.get("limit", 6),
                     tenant_scope_id=scope["tenant_scope_id"],
+                    connection_alias=scope["alias"],
+                    connection_fingerprint=scope["fingerprint"],
                 )
             ]
         if name == "list_artifacts":
@@ -189,6 +191,8 @@ class MCPServer:
                 for item in self.evidence.list(
                     arguments.get("limit", 50),
                     tenant_scope_id=scope["tenant_scope_id"],
+                    connection_alias=scope["alias"],
+                    connection_fingerprint=scope["fingerprint"],
                 )
             ]
         if name == "save_context":

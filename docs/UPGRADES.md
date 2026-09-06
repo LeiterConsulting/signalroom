@@ -21,6 +21,9 @@ The normal installer runs the same preflight automatically whenever the exact so
 installed manifest. A successful automatic preflight is retained under `data/upgrade/preflight_receipts/`. Only
 after it passes does the lifecycle manager stop a process that it can prove belongs to this SignalRoom workspace.
 
+The guided/full workspace preference is stored in browser local storage. It has no retained-data schema, upgrade,
+rollback, or server-compatibility impact. A refreshed browser defaults to guided view when no preference exists.
+
 ## Admitted matrix
 
 | Starting state | Decision | Installer behavior |

@@ -11,7 +11,7 @@ signalroom-release-check --full --reviewer "Reviewer name" --ui-review "Reviewed
 ```
 
 The command writes `data/release_candidate_receipt.json`. This local receipt is deliberately excluded from Git but
-visible in Setup → **Release readiness**. Any source, test, documentation, installer, or deployment-file change
+visible in **Settings → Platform administration → Release**. Any source, test, documentation, installer, or deployment-file change
 changes the digest and blocks promotion until the full gate runs again.
 
 ## Automated interface contract
@@ -25,6 +25,10 @@ The static gate blocks when any of these contracts fail:
 - the root type scale is 16 px, no declared text is below 12 px, the system font stack is retained, and compact
   responsive behavior exists;
 - critical semantic foreground/background pairs meet WCAG AA 4.5:1;
+- guided Discovery and Models expose their primary outcome and recommended flow before advanced controls, every
+  hidden workspace has a named one-action route, and full view restores the complete capability set;
+- guided Settings presents the three essential areas while Platform administration restores all nine sections and
+  direct administrative links reveal their destination;
 - shipped interface assets contain no unfinished markers, debug surfaces, development-only labels, placeholder
   implementation claims, or vague “click here” instructions;
 - declared interface functions and undecorated source-level backend functions have an explicit call, registration,
@@ -33,6 +37,11 @@ The static gate blocks when any of these contracts fail:
 Automated contrast checks protect the critical semantic palette, not every possible runtime composition. The named
 viewport review remains required to catch clipping, layering, focus order, density, misleading hierarchy, and
 content-dependent contrast that static parsing cannot prove.
+
+The named review must exercise guided and full modes at desktop and compact widths, confirm that the mode survives
+navigation, verify deep links into at least one advanced Discovery and Models workspace, and check the repository
+documentation map against the shipped labels. Guided view must never be accepted as a substitute for testing the
+full capability surface.
 
 ## Function-ownership policy
 

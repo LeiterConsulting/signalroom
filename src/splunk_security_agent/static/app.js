@@ -1,10 +1,11 @@
 const state = {
   settings: null, artifacts: [], modelReadiness: null, conversationId: null, busy: false,
-  connections: null, activeScope: null, tenantIsolation: null,
+  connections: null, activeScope: null, tenantIsolation: null, splContext: null,
   ledger: [], lastDiscovery: null, estateComparison: null, estateReviewPackets: [], activeEstateReviewPacket: null, promptPath: [], contextKind: 'all', cases: [],
   activeCase: null, caseCockpit: null, pendingCaseItem: null, detailActions: [], contextPage: 1, contextPageSize: 9,
   contextItems: [], editingArtifactId: null, editingCaseItemId: null, demoTourStep: -1,
-  modelRecommendations: {}, validations: [], editingValidationId: null,
+  modelRecommendations: {}, splCandidateGroups: {}, activeSplCandidates: [],
+  splCandidateIntelligence: {}, validations: [], editingValidationId: null,
   modelUpdates: null, modelCatalog: null, modelTrust: null, splunkModels: null,
   assurance: null, assurancePolicyDirty: false, connectionDiagnostics: null, queryIntelligence: null,
   workload: null,
@@ -18,7 +19,8 @@ const state = {
   timeSeriesExperiments: null, timeSeriesSchedules: null, timeSeriesScheduleTimer: null,
   workspaceLoaded: false, assuranceTimer: null, discoveryJobs: null,
   activeDiscoveryJob: null, discoveryPollTimer: null, discoveryPollBusy: false,
-  discoveryWatchingJobId: null
+  discoveryWatchingJobId: null,
+  activeView: 'chat', workspaceMode: localStorage.getItem('signalroom-workspace-mode') === 'full' ? 'full' : 'guided'
 };
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => [...document.querySelectorAll(selector)];
@@ -265,6 +267,7 @@ function applyAccessPermissions() {
     '#exportAuditOperations', '#reconcileAuditOperations', '#scanSplunkModels',
     '#runModelTournament', '#runGoldenBenchmark', '#addArtifact', '#uploadArtifact',
     '#newCase', '#newDetection', '#runTimeSeriesForecast',
+    '[data-open-spl-chooser]', '[data-stage-chat-spl]',
     '#timeSeriesScheduleForm input', '#timeSeriesScheduleForm select',
     '#timeSeriesScheduleForm button', '#timeSeriesScheduleHistory button',
     '#timeSeriesReviewQueue form textarea', '#timeSeriesReviewQueue form button',
@@ -284,6 +287,7 @@ function applyAccessPermissions() {
     '#chatInput', '#chatForm .send-button', '#runDiscovery', '#cancelDiscoveryJob',
     '#runConnectionDiagnostics', '#runAssuranceNow', '#reconcileAuditOperations', '#scanSplunkModels',
     '#runTimeSeriesForecast', '#timeSeriesScheduleForm button',
+    '[data-open-spl-chooser]', '[data-stage-chat-spl]',
     '#timeSeriesScheduleHistory button'
   ];
   $$(connectionSelectors.join(',')).forEach(node => {
@@ -305,6 +309,10 @@ function applyAccessPermissions() {
     '#modelTrustPolicyForm input', '#modelTrustPolicyForm select',
     '#modelTrustPolicyForm button', '[data-approve-model-artifact]',
     '[data-revoke-model-attestation]',
+    '#candidateStagingForm input', '#candidateStagingForm select',
+    '#candidateStagingForm button', '[data-stage-model-intake]',
+    '[data-discard-model-intake]', '[data-discard-model-candidate]',
+    '[data-evaluate-model-candidate]',
     '#timeSeriesRuntimeForm input', '#timeSeriesRuntimeForm button',
     '#startBundledTimeSeries',
     '[data-rollback-promotion]', '[data-preview-repository]', '[data-apply-repository]',
@@ -644,26 +652,139 @@ async function copyDetailLink() {
   catch (_) { toast(value); }
 }
 
+const WORKSPACE_GUIDES = {
+  discovery: {
+    eyebrow:'RECOMMENDED DISCOVERY FLOW', title:'Understand what Splunk can see before you investigate.',
+    summary:'Discovery converts read-only Splunk inventory into reusable security context. Start with the connection, run the standard profile, then review material findings before opening deeper operational tools.',
+    steps:[['1','Confirm access','Verify the selected Splunk connection and required read-only tools.'],['2','Build context','Run Standard discovery for telemetry, detection, and model-assisted assessment.'],['3','Act on evidence','Review prioritized findings, then investigate or preserve only what matters.']],
+    roles:[['Engineer','Validate collection and inspect exact evidence.'],['Lead','Prioritize gaps, owners, and follow-up work.'],['Executive','Review material posture and decisions—not raw inventory.']],
+    tools:[['Run history','discoveryJobsWorkspace'],['Compare Splunk instances','estateComparisonWorkspace'],['Continuous assurance','assuranceWorkspace'],['Model-team assessment · after discovery','discoveryAssessment'],['SPL validation queue','validationWorkspace']]
+  },
+  cases: {
+    eyebrow:'RECOMMENDED CASE FLOW', title:'Keep an investigation understandable across shifts.',
+    summary:'Cases turn temporary analysis into an owned, chronological record. Preserve the evidence, record what remains uncertain, and leave the next analyst a clear decision path.',
+    steps:[['1','Open the record','Select an existing case or create one from a meaningful finding.'],['2','Preserve reasoning','Record observations, hypotheses, decisions, and source references.'],['3','Hand off clearly','Set ownership and status, then export a reviewable timeline when needed.']],
+    roles:[['Engineer','Preserve technical evidence and validation state.'],['Lead','Track ownership, severity, and unresolved decisions.'],['Executive','Consume the concise case summary and impact.']], tools:[]
+  },
+  detections: {
+    eyebrow:'RECOMMENDED DETECTION FLOW', title:'Turn validated evidence into reviewable detection content.',
+    summary:'Detection projects begin with preserved validation evidence. SignalRoom versions every change, binds review to the exact content, and exports packages disabled by default.',
+    steps:[['1','Choose evidence','Start from a completed, preserved validation result.'],['2','Build and review','Draft the SPL and document requirements, limits, and tests.'],['3','Handoff safely','Approve the exact version, then export or send it through the governed repository flow.']],
+    roles:[['Engineer','Author, test, and version detection logic.'],['Lead','Review coverage, quality, and ownership.'],['Executive','See delivery state without implementation noise.']],
+    tools:[['Repository handoff settings','settingsRepository']]
+  },
+  context: {
+    eyebrow:'RECOMMENDED KNOWLEDGE FLOW', title:'Control the evidence SignalRoom can reuse.',
+    summary:'Knowledge is the local evidence base behind retrieval. Search first, inspect provenance and freshness, then add or update only material runbooks, SPL, intelligence, and references.',
+    steps:[['1','Find what exists','Search and filter the tenant-scoped evidence library.'],['2','Check provenance','Inspect source, scope, freshness, and full content before relying on it.'],['3','Reuse deliberately','Start an investigation or validation, or curate the item for future retrieval.']],
+    roles:[['Engineer','Maintain technical runbooks and known-good SPL.'],['Lead','Curate shared operating knowledge and ownership.'],['Executive','Rely on distilled conclusions with visible provenance.']], tools:[]
+  },
+  models: {
+    eyebrow:'RECOMMENDED MODEL FLOW', title:'Keep local AI useful without making it mysterious.',
+    summary:'Treat models as task-specific capabilities. Confirm the runtime, review installed profiles, stage an already-installed candidate, and promote it only after comparative evaluation.',
+    steps:[['1','Check readiness','Separate runtime availability, artifact approval, and publisher freshness.'],['2','Stage safely','Create a non-routed candidate profile from an installed Ollama model.'],['3','Prove the change','Evaluate against the current route, review blindly, then explicitly promote or rollback.']],
+    roles:[['Engineer','Install, test, and diagnose exact model artifacts.'],['Lead','Review outcome evidence and approve routing changes.'],['Executive','See whether AI capability is ready, governed, and improving.']],
+    tools:[['Artifact trust','modelTrustPanel'],['Evaluation suites','modelEvaluationSuites'],['Model tournament','modelTournamentWorkspace'],['Promotion gate','modelGoldenGate'],['Analyst outcome scores','modelOutcomeBenchmarks'],['Splunk MLTK inventory','splunkModelInventory'],['Publisher candidates','candidateModels']]
+  }
+};
+
+function renderWorkspaceGuide(name = state.activeView) {
+  const holder = $('#workspaceGuide'); const guide = WORKSPACE_GUIDES[name];
+  if (!holder || !guide) { if (holder) holder.hidden = true; return; }
+  holder.hidden = false;
+  $('#workspaceGuideEyebrow').textContent = guide.eyebrow;
+  $('#workspaceGuideTitle').textContent = guide.title;
+  $('#workspaceGuideSummary').textContent = guide.summary;
+  $('#workspaceGuideSteps').innerHTML = guide.steps.map(([number,title,detail]) => `<li><span>${escapeHtml(number)}</span><div><b>${escapeHtml(title)}</b><small>${escapeHtml(detail)}</small></div></li>`).join('');
+  $('#workspaceGuideValue').innerHTML = guide.roles.map(([role,value]) => `<div><b>${escapeHtml(role)}</b><span>${escapeHtml(value)}</span></div>`).join('');
+  $('#workspaceGuideTools').innerHTML = guide.tools.length
+    ? `<span>Additional capabilities</span><div>${guide.tools.map(([label,target]) => `<button class="workspace-tool-link" type="button" data-workspace-tool="${escapeHtml(target)}">${escapeHtml(label)}</button>`).join('')}</div>`
+    : '<span>Everything for this workflow is already visible below.</span>';
+  const button = $('#workspaceModeToggle'); const full = state.workspaceMode === 'full';
+  button.textContent = full ? 'Use guided view' : `Show all tools${guide.tools.length ? ` (${guide.tools.length})` : ''}`;
+  button.setAttribute('aria-pressed', String(full));
+}
+
+function setWorkspaceMode(mode, announce = true) {
+  state.workspaceMode = mode === 'full' ? 'full' : 'guided';
+  document.body.classList.toggle('workspace-guided', state.workspaceMode === 'guided');
+  document.body.classList.toggle('workspace-full', state.workspaceMode === 'full');
+  localStorage.setItem('signalroom-workspace-mode', state.workspaceMode);
+  const settingsToggle = $('#settingsAdvancedToggle');
+  if (settingsToggle) {
+    const full = state.workspaceMode === 'full';
+    settingsToggle.innerHTML = `<span>${full ? '−' : '+'}</span>${full ? 'Use guided setup' : 'Platform administration'}`;
+    settingsToggle.setAttribute('aria-pressed', String(full));
+  }
+  renderWorkspaceGuide();
+  if (!$('#settingsModal')?.hidden) requestAnimationFrame(syncSettingsSection);
+  if (announce) toast(state.workspaceMode === 'full' ? 'All tools are visible' : 'Guided view restored · no capabilities were removed');
+}
+
+function openWorkspaceTool(target) {
+  setWorkspaceMode('full', false);
+  const settingsSection = SETTINGS_SECTIONS.includes(target);
+  if (settingsSection) { openSettings(target); return; }
+  const section = $(`#${CSS.escape(target)}`); if (!section) return;
+  if (section.hidden) {
+    toast('This capability appears after Standard or Deep discovery produces model-team results');
+    $('#runDiscovery')?.focus();
+    $('#runDiscovery')?.scrollIntoView({behavior:'smooth', block:'center'});
+    return;
+  }
+  requestAnimationFrame(() => section.scrollIntoView({behavior:'smooth', block:'start'}));
+}
+
 function setView(name) {
   const titles = {
     chat: ['INVESTIGATION WORKSPACE', 'Ask, inspect, verify.'],
-    discovery: ['ENVIRONMENT DISCOVERY', 'Map the security surface.'],
-    cases: ['INVESTIGATION OPERATIONS', 'Preserve the case record.'],
-    detections: ['DETECTION ENGINEERING', 'Prove, review, package.'],
-    context: ['RAG & ARTIFACTS', 'Curate the evidence base.'],
-    models: ['MODEL CAPABILITIES', 'Route work to specialists.']
+    discovery: ['ENVIRONMENT DISCOVERY', 'Understand what Splunk can see.'],
+    cases: ['INVESTIGATION OPERATIONS', 'Preserve and hand off the investigation.'],
+    detections: ['DETECTION ENGINEERING', 'Turn evidence into reviewed detections.'],
+    context: ['KNOWLEDGE & EVIDENCE', 'Manage reusable evidence.'],
+    models: ['LOCAL AI CAPABILITIES', 'Keep models ready and governed.']
   };
+  state.activeView = name;
   $$('.nav-item[data-view]').forEach(node => node.classList.toggle('active', node.dataset.view === name));
   $$('.view').forEach(node => node.classList.remove('active'));
   $(`#${name}View`).classList.add('active');
   document.body.classList.toggle('chat-active', name === 'chat');
   $('#viewEyebrow').textContent = titles[name][0]; $('#viewTitle').textContent = titles[name][1];
   $('#newConversation').hidden = name !== 'chat';
+  renderWorkspaceGuide(name);
   if (name === 'context') loadArtifacts();
   if (name === 'cases') loadCases();
   if (name === 'detections') loadDetections();
-  if (name === 'models') { renderModels(); loadFeedbackBenchmarks(); loadGoldenBenchmarks(); }
+  if (name === 'models') { renderModels(); renderModelLifecycle(); renderCandidateStaging(); loadFeedbackBenchmarks(); loadGoldenBenchmarks(); requestAnimationFrame(syncModelLifecycleSection); }
   if (name === 'discovery') loadValidations();
+}
+
+const MODEL_LIFECYCLE_SECTIONS = [
+  'modelLifecycleStatus', 'modelTrustPanel', 'modelInstalledProfiles',
+  'modelCandidateStaging', 'modelTournamentWorkspace', 'candidateModels'
+];
+
+function setModelLifecycleSection(sectionId) {
+  $$('#modelLifecycleNav [data-model-section]').forEach(button => {
+    const active = button.dataset.modelSection === sectionId;
+    button.classList.toggle('active', active);
+    if (active) button.setAttribute('aria-current', 'location'); else button.removeAttribute('aria-current');
+  });
+}
+
+function syncModelLifecycleSection() {
+  if (!$('#modelsView')?.classList.contains('active')) return;
+  const sections = MODEL_LIFECYCLE_SECTIONS.map(id => $(`#${id}`)).filter(Boolean);
+  if (!sections.length) return;
+  let active = sections[0];
+  sections.forEach(section => { if (section.getBoundingClientRect().top <= 88) active = section; });
+  setModelLifecycleSection(active.id);
+}
+
+function navigateModelLifecycleSection(sectionId) {
+  const section = $(`#${CSS.escape(sectionId)}`); if (!section) return;
+  setModelLifecycleSection(sectionId);
+  section.scrollIntoView({behavior:'smooth', block:'start'});
 }
 
 function showDemoTourStep(index) {
@@ -709,11 +830,12 @@ const SETTINGS_SECTIONS = [
 
 function setSettingsSection(section) {
   if (!section) return;
-  const index = SETTINGS_SECTIONS.indexOf(section.id);
+  const visibleSections = SETTINGS_SECTIONS.map(id => $(`#${id}`)).filter(item => item && (state.workspaceMode === 'full' || !item.classList.contains('guided-advanced')));
+  const index = visibleSections.indexOf(section);
   if (index < 0) return;
   $('#settingsEyebrow').textContent = section.dataset.settingsEyebrow || 'SETTINGS';
   $('#settingsTitle').textContent = section.dataset.settingsTitle || 'SignalRoom settings';
-  $('#settingsPosition').textContent = `Section ${index + 1} of ${SETTINGS_SECTIONS.length} · ${section.dataset.settingsDescription || 'workspace controls'}`;
+  $('#settingsPosition').textContent = `${state.workspaceMode === 'guided' ? 'Essential' : 'Section'} ${index + 1} of ${visibleSections.length} · ${section.dataset.settingsDescription || 'workspace controls'}`;
   $$('#settingsNavigator [data-settings-target]').forEach(button => {
     const active = button.dataset.settingsTarget === section.id;
     button.classList.toggle('active', active);
@@ -723,7 +845,7 @@ function setSettingsSection(section) {
 
 function syncSettingsSection() {
   const form = $('#settingsForm');
-  const sections = SETTINGS_SECTIONS.map(id => $(`#${id}`)).filter(Boolean);
+  const sections = SETTINGS_SECTIONS.map(id => $(`#${id}`)).filter(item => item && (state.workspaceMode === 'full' || !item.classList.contains('guided-advanced')));
   if (!sections.length) return;
   const top = form.getBoundingClientRect().top + 36;
   let active = sections[0];
@@ -734,6 +856,7 @@ function syncSettingsSection() {
 
 function navigateSettingsSection(sectionId, behavior = 'smooth') {
   const section = $(`#${CSS.escape(sectionId)}`); if (!section) return;
+  if (section.classList.contains('guided-advanced') && state.workspaceMode !== 'full') setWorkspaceMode('full', false);
   setSettingsSection(section);
   section.scrollIntoView({behavior, block:'start'});
 }
@@ -765,7 +888,7 @@ function hydrateSettings() {
   $('#repositoryAllowPush').checked = Boolean(repository.allow_push);
   $('#repositoryAllowPullRequest').checked = Boolean(repository.allow_draft_pull_request);
   updateRepositoryControls();
-  const chatProfiles = settings.models.filter(model => ['chat', 'security_reasoning'].includes(model.task));
+  const chatProfiles = settings.models.filter(model => ['chat', 'security_reasoning'].includes(model.task) && model.lifecycle !== 'candidate');
   for (const selector of ['#defaultModel', '#securityModel']) {
     $(selector).innerHTML = chatProfiles.map(model => `<option value="${escapeHtml(model.id)}">${escapeHtml(model.label)}</option>`).join('');
   }
@@ -1250,8 +1373,25 @@ async function switchScope(key) {
   state.activeScope = next;
   state.activeCase = null; state.caseCockpit = null; state.lastDiscovery = null;
   resetConversation();
-  await Promise.all([loadArtifacts(), loadCases(), loadLatestDiscovery(), loadDiscoveryJobs()]);
+  await Promise.all([loadArtifacts(), loadCases(), loadLatestDiscovery(), loadDiscoveryJobs(), loadSplContext()]);
   toast(`Active Splunk scope · ${scopeLabel(next)}`);
+}
+
+async function loadSplContext() {
+  const node = $('#splContextStatus'); if (!node) return;
+  node.className = 'spl-context-status checking'; node.textContent = 'SPL context · checking';
+  try {
+    state.splContext = await api(scopedUrl('/api/spl-context', {summary:true}));
+    const ready = state.splContext.status === 'ready';
+    node.className = `spl-context-status ${ready ? 'ready' : 'attention'}`;
+    node.textContent = ready ? 'SPL context · ready' : 'SPL context · discovery needed';
+    node.title = ready
+      ? `${Number(state.splContext.catalog_counts?.indexes || 0)} indexes · ${Number(state.splContext.catalog_counts?.sourcetypes || 0)} sourcetypes · ${Number(state.splContext.catalog_counts?.fields || 0)} context-known fields · source event rows excluded`
+      : (state.splContext.reason || 'Run Discovery for this exact Splunk revision before asking SignalRoom to author SPL.');
+  } catch (error) {
+    state.splContext = null; node.className = 'spl-context-status attention';
+    node.textContent = 'SPL context · unavailable'; node.title = error.message;
+  }
 }
 
 function shortFingerprint(value = '') {
@@ -2006,16 +2146,17 @@ function renderModelReadiness() {
 }
 
 async function loadModelReadiness() {
-  try { state.modelReadiness = await api('/api/model-setup/readiness'); renderModelReadiness(); renderModels(); }
-  catch (error) { readinessBadge($('#ollamaReadiness'), 'Check failed', 'warn'); toast(error.message); }
+  try { state.modelReadiness = await api('/api/model-setup/readiness'); renderModelReadiness(); renderModels(); renderModelLifecycle(); renderCandidateStaging(); }
+  catch (error) { readinessBadge($('#ollamaReadiness'), 'Check failed', 'warn'); renderModelLifecycle(); toast(error.message); }
 }
 
 async function loadModelCatalog() {
   try {
     state.modelCatalog = await api('/api/model-setup/catalog');
-    renderModelCatalog();
+    renderModelCatalog(); renderModelLifecycle();
   } catch (error) {
     state.modelCatalog = null;
+    renderModelLifecycle();
   }
 }
 
@@ -2038,6 +2179,7 @@ async function checkModelUpdates(button) {
     state.modelUpdates = await api('/api/model-setup/updates');
     renderModelFreshness();
     renderModels();
+    renderModelLifecycle();
     await loadModelTrust(true);
   } catch (error) {
     panel.innerHTML = `<div><b>Freshness check failed</b><span>${escapeHtml(error.message)}</span></div>`;
@@ -2046,15 +2188,157 @@ async function checkModelUpdates(button) {
   }
 }
 
+function lifecycleAxis(status, label, title, detail) {
+  return `<article class="lifecycle-axis ${escapeHtml(status)}"><i aria-hidden="true"></i><div><span>${escapeHtml(label)}</span><b>${escapeHtml(title)}</b><small>${escapeHtml(detail)}</small></div></article>`;
+}
+
+function renderModelLifecycle() {
+  const holder = $('#modelLifecycleAxes'); if (!holder) return;
+  const readiness = state.modelReadiness;
+  const ollama = readiness?.ollama;
+  const runtimeStatus = !readiness ? 'unchecked' : ollama?.ok ? 'ready' : 'offline';
+  const runtimeTitle = !readiness ? 'Runtime not checked' : ollama?.ok ? `Ollama ${ollama.version || 'ready'}` : 'Ollama is unreachable';
+  const runtimeDetail = !readiness
+    ? 'Run the local readiness check before evaluating a model.'
+    : ollama?.ok
+    ? `${(ollama.models || []).length} installed · ${(ollama.loaded_models || []).length} currently loaded · local endpoint only`
+    : `${ollama?.endpoint || 'Configured endpoint'} did not answer. Publisher currency and saved approvals remain separate.`;
+
+  const trust = state.modelTrust;
+  const routedIds = new Set([state.settings?.default_chat_model, state.settings?.security_reasoning_model].filter(Boolean));
+  const routedTrust = (trust?.profiles || []).filter(item => routedIds.has(item.profile_id));
+  const trustedRoutes = routedTrust.filter(item => item.trusted).length;
+  const enforcement = trust?.policy?.mode === 'enforce';
+  const trustBlocked = Boolean(trust && enforcement && routedTrust.some(item => !item.trusted));
+  const trustStatus = !trust ? 'unchecked' : trustBlocked ? 'blocked' : routedTrust.length && trustedRoutes === routedTrust.length ? 'ready' : 'attention';
+  const trustTitle = !trust ? 'Artifact trust not checked' : trustBlocked ? 'A routed artifact is blocked' : enforcement ? 'Exact artifact enforcement active' : 'Artifact trust is audit-only';
+  const trustDetail = !trust
+    ? 'Observe the exact local digests and approval policy.'
+    : `${trustedRoutes}/${routedTrust.length || 2} routed artifacts approved · ${enforcement ? 'fail-closed enforcement' : 'drift is reported without blocking'}`;
+
+  const catalogs = state.modelUpdates?.publisher_catalogs || [];
+  const sourceErrors = catalogs.filter(item => item.status === 'error').length;
+  const sourceAttention = catalogs.filter(item => item.status === 'review-required').length;
+  const sourceStatus = !state.modelUpdates ? 'unchecked' : sourceErrors || sourceAttention ? 'attention' : 'ready';
+  const sourceTitle = !state.modelUpdates ? 'Publisher check is due' : sourceErrors ? 'Publisher inventory unavailable' : sourceAttention ? 'Publisher review required' : 'Publisher revisions match';
+  const sourceDetail = !state.modelUpdates
+    ? 'The check is read-only and never downloads or swaps a model.'
+    : sourceErrors
+    ? `${sourceErrors} publisher catalog${sourceErrors === 1 ? '' : 's'} could not be verified.`
+    : sourceAttention
+    ? `${sourceAttention} publisher catalog${sourceAttention === 1 ? '' : 's'} differs from the immutable review manifest.`
+    : `${catalogs.reduce((total,item) => total + Number(item.observed_count || 0), 0)} first-party repositories match their reviewed revisions.`;
+
+  holder.innerHTML = lifecycleAxis(runtimeStatus, 'Local runtime', runtimeTitle, runtimeDetail)
+    + lifecycleAxis(trustStatus, 'Artifact trust', trustTitle, trustDetail)
+    + lifecycleAxis(sourceStatus, 'Upstream currency', sourceTitle, sourceDetail);
+  const attention = ['offline','blocked','attention','unchecked'].includes(runtimeStatus)
+    || ['blocked','attention','unchecked'].includes(trustStatus)
+    || ['attention','unchecked'].includes(sourceStatus);
+  const decision = $('#modelLifecycleDecision');
+  decision.textContent = runtimeStatus === 'offline' || trustStatus === 'blocked' ? 'Action required' : attention ? 'Review recommended' : 'Lifecycle ready';
+  decision.className = `subtle-pill ${attention ? 'attention' : 'ready'}`;
+}
+
+function ollamaModelKey(value = '') {
+  const lowered = String(value).trim().toLowerCase();
+  return lowered.endsWith(':latest') ? lowered.slice(0, -7) : lowered;
+}
+
+function renderCandidateStaging() {
+  const select = $('#candidateInstalledModel'); const holder = $('#stagedCandidateProfiles');
+  if (!select || !holder || !state.settings) return;
+  const prior = select.value;
+  const configuredKeys = new Set(state.settings.models.filter(item => item.provider === 'ollama').map(item => ollamaModelKey(item.model)));
+  const available = [...new Set(state.modelReadiness?.ollama?.models || [])].filter(model => !configuredKeys.has(ollamaModelKey(model)));
+  select.innerHTML = available.length
+    ? `<option value="">Choose an installed model</option>${available.map(model => `<option value="${escapeHtml(model)}">${escapeHtml(model)}</option>`).join('')}`
+    : `<option value="">${state.modelReadiness?.ollama?.ok ? 'All installed models are already configured' : 'Ollama is not reachable'}</option>`;
+  if (available.includes(prior)) select.value = prior;
+  select.disabled = !available.length;
+  const submit = $('#candidateStagingForm button[type="submit"]'); if (submit) submit.disabled = !available.length;
+  const candidates = state.settings.models.filter(item => item.lifecycle === 'candidate');
+  $('#candidateStagingStatus').textContent = candidates.length ? `${candidates.length} staged` : 'No candidates';
+  holder.innerHTML = candidates.length ? candidates.map(profile => {
+    const target = profile.task === 'security_reasoning' ? 'security_reasoning_model' : 'default_chat_model';
+    const currentId = state.settings[target];
+    const current = state.settings.models.find(item => item.id === currentId);
+    const readiness = state.modelReadiness?.ollama?.profiles?.find(item => item.id === profile.id);
+    return `<article class="staged-candidate-card"><header><div><span>NON-ROUTED · ${escapeHtml(profile.task.replaceAll('_',' '))}</span><h4>${escapeHtml(profile.label)}</h4></div><b>${readiness?.installed ? 'LOCAL' : 'MISSING'}</b></header><code>${escapeHtml(profile.model)}</code><p>Control: ${escapeHtml(current?.label || currentId || 'route unavailable')}. Staged ${escapeHtml(profile.staged_at ? new Date(profile.staged_at).toLocaleString() : 'locally')}.</p><footer><span>Routing unchanged</span><div class="staged-candidate-actions"><button class="button ghost small" type="button" data-discard-model-candidate="${escapeHtml(profile.id)}">Discard</button><button class="button primary small" type="button" data-evaluate-model-candidate="${escapeHtml(profile.id)}" ${readiness?.installed ? '' : 'disabled'}>Evaluate against current route</button></div></footer></article>`;
+  }).join('') : '<div class="empty-inline compact-empty">No temporary evaluation profiles are staged.</div>';
+  applyAccessPermissions();
+}
+
+async function stageOllamaCandidate(event) {
+  event.preventDefault();
+  const form = event.currentTarget; if (!form.reportValidity()) return;
+  const button = form.querySelector('button[type="submit"]'); const original = button.textContent;
+  button.disabled = true; button.textContent = 'Staging…';
+  try {
+    const result = await api('/api/model-lifecycle/candidates', {method:'POST', body:JSON.stringify({model:$('#candidateInstalledModel').value,label:$('#candidateLabel').value.trim(),task:$('#candidateTask').value,endpoint:state.modelReadiness?.ollama?.endpoint || ''})});
+    state.settings = result.settings; hydrateSettings(); $('#candidateLabel').value = '';
+    await Promise.all([loadModelReadiness(), loadModelTrust(true), loadGoldenBenchmarks()]);
+    renderCandidateStaging(); toast('Local candidate staged · active routing is unchanged');
+  } catch (error) { toast(error.message); }
+  finally { button.textContent = original; renderCandidateStaging(); }
+}
+
+async function discardOllamaCandidate(profileId) {
+  const profile = state.settings?.models?.find(item => item.id === profileId); if (!profile) return;
+  if (!confirm(`Discard the non-routed evaluation profile “${profile.label}”? Installed Ollama files and durable tournament history will not be deleted.`)) return;
+  try {
+    const result = await api(`/api/model-lifecycle/candidates/${encodeURIComponent(profileId)}`, {method:'DELETE'});
+    state.settings = result.settings; hydrateSettings();
+    await Promise.all([loadModelReadiness(), loadModelTrust(), loadGoldenBenchmarks()]);
+    renderCandidateStaging(); toast('Evaluation profile discarded · Ollama model retained');
+  } catch (error) { toast(error.message); }
+}
+
+async function evaluateOllamaCandidate(profileId) {
+  const profile = state.settings?.models?.find(item => item.id === profileId); if (!profile) return;
+  const target = profile.task === 'security_reasoning' ? 'security_reasoning_model' : 'default_chat_model';
+  const controlId = state.settings[target];
+  if (!controlId || controlId === profileId) { toast('A distinct current route is required as the control'); return; }
+  if (!state.goldenBenchmarks) await loadGoldenBenchmarks();
+  setWorkspaceMode('full', false);
+  $('#tournamentTarget').value = target; renderModelTournaments();
+  $$('#tournamentProfiles input').forEach(input => { input.checked = [controlId, profileId].includes(input.value); });
+  $('#modelTournamentWorkspace').scrollIntoView({behavior:'smooth', block:'start'});
+  if (!confirm(`Run the local evaluation suite for ${profile.label} and the current routed control? This can take several minutes. Splunk and hosted inference will not be contacted.`)) return;
+  await runModelTournament();
+}
+
 function renderModelFreshness() {
   const value = state.modelUpdates; const panel = $('#modelFreshness');
   if (!value) { panel.hidden = true; return; }
   const counts = value.counts || {};
+  const publisherCatalogs = value.publisher_catalogs || [];
+  const publisherAdditions = publisherCatalogs.reduce((total, item) => total + (item.unreviewed_models || []).length, 0);
+  const publisherMissing = publisherCatalogs.reduce((total, item) => total + (item.missing_reviewed_models || []).length, 0);
+  const publisherChanged = publisherCatalogs.reduce((total, item) => total + (item.changed_reviewed_models || []).length, 0);
+  const publisherErrors = publisherCatalogs.filter(item => item.status === 'error').length;
+  const incompleteCatalogs = publisherCatalogs.filter(item => item.complete === false).length;
+  const intakeModels = new Set((state.modelCatalog?.intake_queue || []).map(item => item.model));
+  const publisherDetail = publisherCatalogs.length
+    ? `${publisherCatalogs.reduce((total, item) => total + (item.observed_count || 0), 0)} publisher models observed · ${publisherAdditions} new · ${publisherChanged} revised · ${publisherMissing} no longer observable${publisherErrors ? ` · ${publisherErrors} catalog errors` : ''}${incompleteCatalogs ? ` · ${incompleteCatalogs} incomplete inventories` : ''}`
+    : 'Publisher catalog inventory unavailable';
   const checked = new Date(value.checked_at).toLocaleString();
+  const groupHtml = publisherCatalogs.filter(item => item.status !== 'current').map(catalog => {
+    const additions = (catalog.unreviewed_models || []).map(item => `<article class="publisher-change"><div><b>${escapeHtml(item.model)}</b><span>New publisher repository · ${escapeHtml(item.pipeline_tag || 'task not declared')} · revision ${escapeHtml(shortDigest(item.revision || ''))}</span><small>${item.gated ? `Access: ${escapeHtml(String(item.gated))}` : 'Public source'} · ${escapeHtml(item.last_modified ? new Date(item.last_modified).toLocaleDateString() : 'modified date unavailable')}</small></div><div class="publisher-change-actions"><a href="${escapeHtml(item.source_url)}" target="_blank" rel="noopener">Review source ↗</a><button class="button ghost small" type="button" data-stage-model-intake="${escapeHtml(item.model)}" ${intakeModels.has(item.model) ? 'disabled' : ''}>${intakeModels.has(item.model) ? 'Review staged' : 'Stage intake review'}</button></div></article>`).join('');
+    const changed = (catalog.changed_reviewed_models || []).map(item => {
+      const changes = (item.changes || []).map(change => `${change.field}: ${change.reviewed || 'none'} → ${change.observed || 'none'}`).join(' · ');
+      return `<article class="publisher-change"><div><b>${escapeHtml(item.model)}</b><span>Reviewed source changed · ${escapeHtml(changes)}</span><small>Prior decision: ${escapeHtml(item.decision || 'reviewed')} · reviewed ${escapeHtml(item.reviewed_at || 'date unavailable')}</small></div><div class="publisher-change-actions"><a href="${escapeHtml(item.source_url)}" target="_blank" rel="noopener">Compare source ↗</a><button class="button ghost small" type="button" data-stage-model-intake="${escapeHtml(item.model)}" ${intakeModels.has(item.model) ? 'disabled' : ''}>${intakeModels.has(item.model) ? 'Review staged' : 'Stage intake review'}</button></div></article>`;
+    }).join('');
+    const missing = (catalog.missing_reviewed_models || []).map(model => `<article class="publisher-change missing"><div><b>${escapeHtml(model)}</b><span>Reviewed repository was not present in the publisher inventory.</span><small>SignalRoom will not infer whether it was renamed, gated, made private, or removed.</small></div></article>`).join('');
+    const error = catalog.status === 'error' ? `<article class="publisher-change missing"><div><b>Catalog check failed</b><span>${escapeHtml(catalog.detail || 'The publisher inventory was unavailable.')}</span></div></article>` : '';
+    const incomplete = catalog.complete === false ? '<article class="publisher-change"><div><b>Inventory completeness not proven</b><span>The publisher returned a full page without a usable continuation link. Treat this comparison as incomplete.</span></div></article>' : '';
+    return `<details class="publisher-change-group" open><summary>${escapeHtml(catalog.publisher)} · ${escapeHtml(catalog.status.replaceAll('-',' '))}</summary><div>${additions}${changed}${missing}${error}${incomplete}</div></details>`;
+  }).join('');
   panel.hidden = false;
-  panel.innerHTML = `<div><b>Model source check complete</b><span>${escapeHtml(value.policy)}</span></div>
-    <div class="freshness-counts"><span class="current"><b>${counts.current || 0}</b> current</span><span class="update"><b>${counts['update-available'] || 0}</b> updates</span><span><b>${counts.untracked || 0}</b> untracked</span><span><b>${counts.error || 0}</b> errors</span></div>
-    <time datetime="${escapeHtml(value.checked_at)}">${escapeHtml(checked)}</time>`;
+  panel.classList.toggle('has-details', Boolean(groupHtml));
+  panel.innerHTML = `<div class="model-freshness-summary"><div><b>Model source and publisher catalog check complete</b><span>${escapeHtml(value.policy)}</span><small>${escapeHtml(publisherDetail)}</small></div><time datetime="${escapeHtml(value.checked_at)}">${escapeHtml(checked)}</time></div>
+    <div class="freshness-counts"><span class="current"><b>${counts.current || 0}</b> installed sources current</span><span class="update"><b>${counts['update-available'] || 0}</b> installed updates</span><span><b>${counts.untracked || 0}</b> provenance untracked</span><span><b>${counts.error || 0}</b> profile check errors</span><span class="${publisherAdditions || publisherChanged || publisherMissing || publisherErrors || incompleteCatalogs ? 'update' : 'current'}"><b>${publisherAdditions + publisherChanged + publisherMissing + publisherErrors + incompleteCatalogs}</b> publisher attention</span></div>
+    ${groupHtml ? `<div class="publisher-change-groups">${groupHtml}</div>` : ''}`;
 }
 
 function shortDigest(value = '') {
@@ -2083,6 +2367,7 @@ function renderModelTrust() {
       <footer><span>Identity <code title="${escapeHtml(item.identity_fingerprint || '')}">${escapeHtml(shortDigest(item.identity_fingerprint))}</code></span>${action}</footer>
     </article>`;
   }).join('') || '<div class="empty-inline compact-empty">No enabled model profiles were found.</div>';
+  renderModelLifecycle();
   applyAccessPermissions();
 }
 
@@ -2093,7 +2378,7 @@ async function loadModelTrust(verifyFiles = false) {
   } catch (error) {
     state.modelTrust = {policy:{mode:'unavailable'},profiles:[],error:error.message};
     $('#modelTrustProfiles').innerHTML = `<div class="empty-inline compact-empty">Model trust check failed: ${escapeHtml(error.message)}</div>`;
-    renderModelCatalog();
+    renderModelCatalog(); renderModelLifecycle();
   }
 }
 
@@ -2132,7 +2417,20 @@ function renderModelCatalog() {
   const panel = $('#candidateModels'); const candidates = state.modelCatalog?.evaluated_candidates || [];
   if (!candidates.length) { panel.innerHTML = ''; return; }
   const localProfiles = state.modelReadiness?.local_transformers?.profiles || [];
+  const publisherReview = state.modelCatalog?.publisher_review;
+  const liveCatalogs = state.modelUpdates?.publisher_catalogs || [];
+  const publisherAttention = liveCatalogs.some(item => item.status !== 'current');
+  const publisherStatus = publisherAttention ? 'attention required' : String(publisherReview?.status || 'reviewed').replaceAll('-', ' ');
+  const intakeQueue = state.modelCatalog?.intake_queue || [];
+  const intakeQueueHtml = intakeQueue.length ? `<section class="model-intake-queue"><span>PENDING SOURCE REVIEWS · ${intakeQueue.length}</span><div class="model-intake-list">${intakeQueue.map(item => `<article class="model-intake-item"><div><b>${escapeHtml(item.model)}</b><small>Revision ${escapeHtml(shortDigest(item.revision || ''))} · staged ${escapeHtml(item.staged_at ? new Date(item.staged_at).toLocaleString() : 'locally')} · no download</small></div><button class="button ghost small" type="button" data-discard-model-intake="${escapeHtml(item.model)}">Remove from queue</button></article>`).join('')}</div></section>` : '';
+  const publisherReviewPanel = publisherReview ? `<aside class="publisher-model-review ${publisherAttention ? 'attention' : ''}">
+    <header><div><span>PUBLISHER CATALOG REVIEW</span><b>${escapeHtml(publisherStatus)}</b></div><time datetime="${escapeHtml(publisherReview.reviewed_at)}">Manifest reviewed ${escapeHtml(publisherReview.reviewed_at)}</time></header>
+    <p>${escapeHtml(publisherAttention ? 'A live publisher check differs from the immutable intake manifest. Review the exact changes above before installing, routing, or approving anything.' : publisherReview.summary || '')}</p>
+    <details><summary>See model-by-model decisions</summary><ul>${(publisherReview.findings || []).map(finding => `<li class="${escapeHtml(finding.status)}"><span><b>${escapeHtml(finding.label)}</b><small>${escapeHtml(finding.detail)}</small></span><a href="${escapeHtml(finding.source_url)}" target="_blank" rel="noopener">Source ↗</a></li>`).join('')}</ul></details>
+    ${intakeQueueHtml}
+  </aside>` : '';
   panel.innerHTML = `<header><div><span>CAPABILITY ADMISSION</span><h3>Useful publisher models, bounded by the job they can safely do</h3></div><p>${escapeHtml(state.modelCatalog.policy || '')}</p></header>
+    ${publisherReviewPanel}
     <div class="candidate-model-grid">${candidates.map(item => {
       const readiness = localProfiles.find(profile => profile.id === item.profile_id);
       const trust = (state.modelTrust?.profiles || []).find(profile => profile.profile_id === item.profile_id);
@@ -2159,6 +2457,8 @@ function renderModelCatalog() {
           : `<span class="candidate-actions"><button class="button ghost small" type="button" data-open-code-screen>Review workflow</button><button class="button primary small" type="button" data-pull-profile="${escapeHtml(item.profile_id)}">Install local classifier</button></span>`
         : item.id === 'cisco-time-series-1'
         ? `<button class="button ${state.timeSeriesStatus?.ok ? 'primary' : 'ghost'} small" type="button" data-open-time-series>${state.timeSeriesStatus?.ok ? 'Forecast a Splunk series' : 'Configure local forecast runtime'}</button>`
+        : item.id === 'antares-vulnerability-localization'
+        ? `<button class="button ghost small" type="button" data-stage-model-intake="${escapeHtml(item.model)}" ${(state.modelCatalog?.intake_queue || []).some(entry => entry.model === item.model) ? 'disabled' : ''}>${(state.modelCatalog?.intake_queue || []).some(entry => entry.model === item.model) ? 'Admission review staged' : 'Stage admission review'}</button>`
         : '';
       const stage = item.id === 'securebert-code-vulnerability' && runnable
         ? 'runnable local'
@@ -2180,6 +2480,24 @@ function renderModelCatalog() {
       </article>`;
     }).join('')}</div>`;
   applyAccessPermissions();
+}
+
+async function stageModelIntake(model) {
+  if (!confirm(`Stage ${model} for a source and capability review? This records the current first-party revision and checklist locally. It will not download, install, or route the model.`)) return;
+  try {
+    await api('/api/model-lifecycle/intake', {method:'POST', body:JSON.stringify({model})});
+    await loadModelCatalog(); renderModelFreshness();
+    toast('Model source staged for bounded intake review · no download started');
+  } catch (error) { toast(error.message); }
+}
+
+async function discardModelIntake(model) {
+  if (!confirm(`Remove ${model} from the pending intake queue? This does not change the reviewed release manifest.`)) return;
+  try {
+    await api('/api/model-lifecycle/intake', {method:'DELETE', body:JSON.stringify({model})});
+    await loadModelCatalog(); renderModelFreshness();
+    toast('Pending model intake item removed');
+  } catch (error) { toast(error.message); }
 }
 
 function openTimeSeriesWorkbench() {
@@ -3092,16 +3410,17 @@ function renderModels() {
     const capabilityLabel = ['embedding','ner','reranking','classification'].includes(model.task) ? 'Test capability' : 'Test generation';
     const update = state.modelUpdates?.profiles?.find(item => item.profile_id === model.id);
     const updateLabels = { current:'CURRENT', 'update-available':'UPDATE AVAILABLE', 'not-installed':'NOT INSTALLED', untracked:'PROVENANCE UNTRACKED', 'check-unavailable':'MANUAL REFRESH', error:'CHECK ERROR' };
+    const stagedCandidate = model.lifecycle === 'candidate';
     return `
-    <article class="model-card">
-      <header><span class="provider">${escapeHtml(providerLabel)} · ${escapeHtml(model.task.replace('_',' '))}</span><i class="model-status ${readiness?.loaded ? 'active' : readiness?.installed ? 'ok' : ''}" id="status-${escapeHtml(model.id)}"></i></header>
+    <article class="model-card ${stagedCandidate ? 'evaluation-candidate' : ''}">
+      <header><span class="provider">${stagedCandidate ? 'EVALUATION CANDIDATE · ' : ''}${escapeHtml(providerLabel)} · ${escapeHtml(model.task.replace('_',' '))}</span><i class="model-status ${readiness?.loaded ? 'active' : readiness?.installed ? 'ok' : ''}" id="status-${escapeHtml(model.id)}"></i></header>
       <h3>${escapeHtml(model.label)}</h3><div class="model-id">${escapeHtml(model.model)}</div>
-      <p>${escapeHtml(model.description)}</p><div class="tags"><span>${escapeHtml(model.provenance || 'Operator supplied')}</span><span>${Number(model.context_window).toLocaleString()} ctx</span>${readiness?.loaded ? '<span class="active-model-tag">LOADED IN OLLAMA</span>' : ''}${isLocalSpecialist && readiness?.installed ? '<span class="active-model-tag">LOCAL · NO CLOUD INFERENCE</span>' : ''}</div>
+      <p>${escapeHtml(model.description)}</p><div class="tags"><span>${escapeHtml(model.provenance || 'Operator supplied')}</span><span>${Number(model.context_window).toLocaleString()} ctx</span>${stagedCandidate ? '<span class="candidate-model-tag">NON-ROUTED</span>' : ''}${readiness?.loaded ? '<span class="active-model-tag">LOADED IN OLLAMA</span>' : ''}${isLocalSpecialist && readiness?.installed ? '<span class="active-model-tag">LOCAL · NO CLOUD INFERENCE</span>' : ''}</div>
       ${update ? `<div class="model-update ${escapeHtml(update.status)}"><b>${escapeHtml(updateLabels[update.status] || update.status)}</b><span>${escapeHtml(update.detail || '')}</span>${update.last_modified ? `<time>Source updated ${escapeHtml(new Date(update.last_modified).toLocaleDateString())}</time>` : ''}</div>` : ''}
-      <footer><span>${model.enabled ? 'ENABLED' : 'DISABLED'}</span><div class="model-actions">${model.provider === 'ollama' && readiness?.installed && !readiness?.loaded ? `<button data-activate-model="${escapeHtml(model.id)}">Activate</button>` : ''}${model.provider === 'ollama' && !readiness?.installed ? `<button data-pull-profile="${escapeHtml(model.id)}">Download</button>` : ''}${isLocalSpecialist && !readiness?.installed ? `<button data-pull-profile="${escapeHtml(model.id)}">Install locally</button>` : ''}${update && ['update-available','untracked','check-unavailable'].includes(update.status) && readiness?.installed ? `<button data-pull-profile="${escapeHtml(model.id)}">Refresh explicitly</button>` : ''}<button data-test-model="${escapeHtml(model.id)}">${capabilityLabel}</button></div></footer>
+      <footer><span>${stagedCandidate ? 'STAGED · NOT ROUTED' : model.enabled ? 'ENABLED' : 'DISABLED'}</span><div class="model-actions">${model.provider === 'ollama' && readiness?.installed && !readiness?.loaded ? `<button data-activate-model="${escapeHtml(model.id)}">Activate</button>` : ''}${model.provider === 'ollama' && !readiness?.installed && !stagedCandidate ? `<button data-pull-profile="${escapeHtml(model.id)}">Download</button>` : ''}${isLocalSpecialist && !readiness?.installed ? `<button data-pull-profile="${escapeHtml(model.id)}">Install locally</button>` : ''}${update && ['update-available','untracked','check-unavailable'].includes(update.status) && readiness?.installed ? `<button data-pull-profile="${escapeHtml(model.id)}">Refresh explicitly</button>` : ''}<button data-test-model="${escapeHtml(model.id)}">${capabilityLabel}</button></div></footer>
     </article>`;
   }).join('');
-  renderModelCatalog();
+  renderModelCatalog(); renderCandidateStaging(); renderModelLifecycle();
 }
 
 function evaluationSuites() {
@@ -3362,7 +3681,7 @@ function renderModelTournaments() {
   if ([...suiteSelect.options].some(option => option.value === priorSuite)) suiteSelect.value = priorSuite;
   updateTournamentAssignmentHelp();
   const selectedProfiles = new Set($$('#tournamentProfiles input:checked').map(node => node.value));
-  $('#tournamentProfiles').innerHTML = profiles.map(profile => `<label><input type="checkbox" value="${escapeHtml(profile.id)}" ${selectedProfiles.size ? selectedProfiles.has(profile.id) ? 'checked' : '' : 'checked'}><span><b>${escapeHtml(profile.label)}</b><small>${escapeHtml(profile.model)}</small></span></label>`).join('');
+  $('#tournamentProfiles').innerHTML = profiles.map(profile => `<label class="${profile.lifecycle === 'candidate' ? 'candidate' : ''}"><input type="checkbox" value="${escapeHtml(profile.id)}" ${selectedProfiles.size ? selectedProfiles.has(profile.id) ? 'checked' : '' : 'checked'}><span><b>${escapeHtml(profile.label)}${profile.lifecycle === 'candidate' ? ' · staged' : ''}</b><small>${escapeHtml(profile.model)}</small></span></label>`).join('');
   const tournaments = (overview.tournaments || []).filter(item => item.suite_id === suiteSelect.value);
   const selected = tournaments.find(item => item.id === state.selectedTournamentId) || tournaments[0];
   if (selected) state.selectedTournamentId = selected.id;
@@ -3461,7 +3780,7 @@ function renderGoldenBenchmarks() {
 }
 
 async function loadGoldenBenchmarks() {
-  try { state.goldenBenchmarks = await api('/api/benchmarks'); renderGoldenBenchmarks(); }
+  try { state.goldenBenchmarks = await api('/api/benchmarks'); renderGoldenBenchmarks(); renderCandidateStaging(); }
   catch (error) { $('#goldenBenchmarkLatest').innerHTML = `<div class="empty-inline compact-empty">${escapeHtml(error.message)}</div>`; }
 }
 
@@ -3568,6 +3887,169 @@ function renderResultEnrichment(value = {}) {
   </section>`;
 }
 
+function splCandidateScope(candidate = {}) {
+  return {
+    alias:candidate.connection_alias || 'primary',
+    fingerprint:candidate.connection_fingerprint || '',
+    tenant_scope_id:candidate.tenant_scope_id || 'workspace-primary'
+  };
+}
+
+function renderSplCandidateFollowup(items = [], groupId = '') {
+  if (!items.length || !groupId) return '';
+  state.splCandidateGroups[groupId] = items;
+  const reviewable = items.filter(item => item.safety === 'reviewable');
+  const blocked = items.filter(item => item.safety === 'blocked');
+  const alreadyExecuted = items.filter(item => item.safety === 'already-executed');
+  const contextCompiled = items.filter(item => item.trust_status === 'context-compiled');
+  if (!reviewable.length) {
+    if (blocked.length) return `<section class="spl-followup blocked" aria-label="SPL execution follow-up"><div><span>SPL SCREENED</span><b>${blocked.length} proposed block${blocked.length === 1 ? '' : 's'} cannot be staged</b><small>${escapeHtml(blocked[0].safety_reason)}</small></div></section>`;
+    return '';
+  }
+  const target = splCandidateScope(reviewable[0]);
+  const label = reviewable.length === 1 ? 'Try this SPL in Splunk' : `Choose SPL to try (${reviewable.length})`;
+  const detail = items.length > 1
+    ? `${items.length} SPL blocks detected · ${contextCompiled.length} context-compiled · compare intent first`
+    : contextCompiled.length
+      ? 'Context-compiled from the active schema · review the execution contract'
+      : 'Review execution intelligence, time bounds, and row cap first';
+  return `<section class="spl-followup" aria-label="SPL execution follow-up">
+    <div><span>SMART SPL FOLLOW-UP</span><b>${escapeHtml(detail)}</b><small>${escapeHtml(target.alias)} · ${escapeHtml(target.tenant_scope_id)} · revision ${escapeHtml(shortFingerprint(target.fingerprint))}${alreadyExecuted.length ? ` · ${alreadyExecuted.length} already ran` : ''}</small></div>
+    <button class="button primary small" type="button" data-open-spl-chooser="${escapeHtml(groupId)}">${escapeHtml(label)}</button>
+    <p>Creates an editable, read-only validation draft. Context compilation is not execution approval; SignalRoom will not run SPL until you approve the exact contract.</p>
+  </section>`;
+}
+
+function renderSplCandidateChooser() {
+  const candidates = state.activeSplCandidates || [];
+  const list = $('#splCandidateList'); if (!list) return;
+  $('#splCandidateCount').textContent = `${candidates.length} block${candidates.length === 1 ? '' : 's'} detected`;
+  list.innerHTML = candidates.map(candidate => {
+    const intelligence = state.splCandidateIntelligence[candidate.id];
+    const scope = splCandidateScope(candidate);
+    const changedScope = scopeKey(scope) !== scopeKey(state.activeScope || {});
+    const blocked = candidate.safety !== 'reviewable' || changedScope || intelligence?.risk === 'blocked' || intelligence?.workload?.decision === 'block' || intelligence?.error;
+    const status = changedScope
+      ? 'Scope changed · return to this response’s Splunk target'
+      : candidate.safety === 'already-executed'
+        ? 'Already executed for this response'
+        : candidate.safety === 'blocked'
+          ? candidate.safety_reason
+          : intelligence?.error
+            ? intelligence.error
+            : intelligence
+              ? `${String(intelligence.risk || 'reviewable').toUpperCase()} · score ${Number(intelligence.score || 0)}/100 · ${intelligence.workload?.decision?.replaceAll('-', ' ') || 'workload checked'}`
+              : 'Analyzing read-only and workload controls…';
+    const controls = intelligence?.positive_controls || [];
+    const trustChecks = candidate.trust_checks || [];
+    const trustCounts = trustChecks.reduce((result, item) => {
+      const key = item.status || 'pending'; result[key] = (result[key] || 0) + 1; return result;
+    }, {});
+    const trustLabel = String(candidate.trust_status || 'model-proposed').replaceAll('-', ' ').toUpperCase();
+    const originLabel = candidate.origin === 'context-compiler' ? 'SIGNALROOM COMPILER' : candidate.origin === 'saia' ? 'SPLUNK SAIA' : 'MODEL PROPOSAL';
+    return `<article class="spl-candidate ${blocked ? 'blocked' : 'reviewable'}">
+      <header><div><span>SPL BLOCK ${Number(candidate.ordinal)} · ${escapeHtml(originLabel)}</span><h3>${escapeHtml(candidate.title)}</h3></div><b>${escapeHtml(candidate.safety === 'reviewable' ? trustLabel : candidate.safety.replaceAll('-', ' ').toUpperCase())}</b></header>
+      <p>${escapeHtml(candidate.purpose)}</p>
+      <div class="spl-candidate-outcome"><b>Expected result</b><span>${escapeHtml(candidate.expected_result)}</span></div>
+      <pre><code>${escapeHtml(candidate.spl)}</code></pre>
+      <div class="spl-candidate-contract"><span>${escapeHtml(candidate.earliest_time)} → ${escapeHtml(candidate.latest_time)}</span><span>Maximum ${Number(candidate.row_limit).toLocaleString()} rows</span><span>${escapeHtml(scope.alias)} · ${escapeHtml(scope.tenant_scope_id)}</span><code>${escapeHtml(shortFingerprint(scope.fingerprint))}</code></div>
+      <details class="spl-trust-receipt" ${candidate.origin === 'context-compiler' ? 'open' : ''}>
+        <summary>Trust receipt · ${escapeHtml(trustLabel)}</summary>
+        <p>${escapeHtml(candidate.trust_reason || candidate.safety_reason || 'No context attestation is available for this model proposal.')}</p>
+        <div><span>Authoring context</span><b>${escapeHtml(String(candidate.data_exposure || 'not-attested').replaceAll('-', ' '))}</b></div>
+        ${candidate.context_revision ? `<div><span>Context revision</span><code>${escapeHtml(shortFingerprint(candidate.context_revision))}</code></div>` : ''}
+        ${candidate.source_run_id ? `<div><span>Discovery run</span><code>${escapeHtml(candidate.source_run_id)}</code></div>` : ''}
+        ${trustChecks.length ? `<ul>${trustChecks.map(item => `<li class="${escapeHtml(item.status || 'pending')}"><b>${escapeHtml(String(item.name || 'check').replaceAll('-', ' '))}</b><span>${escapeHtml(item.detail || '')}</span></li>`).join('')}</ul><small>${Number(trustCounts.passed || 0)} passed · ${Number(trustCounts.pending || 0)} pending · ${Number(trustCounts.blocked || 0)} blocked</small>` : ''}
+      </details>
+      <div class="spl-candidate-safety ${blocked ? 'blocked' : 'ready'}"><b>${escapeHtml(status)}</b>${controls.length ? `<small>${controls.map(value => escapeHtml(value)).join(' · ')}</small>` : ''}</div>
+      <footer><span>${(candidate.evidence_refs || []).length} evidence reference${(candidate.evidence_refs || []).length === 1 ? '' : 's'} carried into the draft</span><button class="button primary small" type="button" data-stage-chat-spl="${escapeHtml(candidate.id)}" ${blocked || !intelligence ? 'disabled' : ''}>Create reviewable draft</button></footer>
+    </article>`;
+  }).join('');
+}
+
+async function openSplCandidateChooser(groupId) {
+  const candidates = state.splCandidateGroups[groupId] || [];
+  if (!candidates.length) return;
+  state.activeSplCandidates = candidates;
+  state.splCandidateIntelligence = {};
+  $('#splCandidateModal').hidden = false;
+  renderSplCandidateChooser();
+  setTimeout(() => $('.close-spl-candidate')?.focus(), 30);
+  await Promise.all(candidates.filter(item => item.safety === 'reviewable').map(async candidate => {
+    try {
+      state.splCandidateIntelligence[candidate.id] = await api('/api/query-intelligence', {
+        method:'POST',
+        body:JSON.stringify({
+          spl:candidate.spl,
+          earliest_time:candidate.earliest_time,
+          latest_time:candidate.latest_time,
+          row_limit:candidate.row_limit,
+          ...bindingPayload(splCandidateScope(candidate))
+        })
+      });
+    } catch (error) {
+      state.splCandidateIntelligence[candidate.id] = {error:error.message};
+    }
+  }));
+  renderSplCandidateChooser();
+}
+
+function closeSplCandidateChooser() {
+  $('#splCandidateModal').hidden = true;
+  state.activeSplCandidates = [];
+  state.splCandidateIntelligence = {};
+}
+
+async function stageChatSplCandidate(candidateId) {
+  const candidate = state.activeSplCandidates.find(item => item.id === candidateId);
+  const intelligence = state.splCandidateIntelligence[candidateId];
+  if (!candidate || candidate.safety !== 'reviewable' || !intelligence) return;
+  const canUseConnection = state.auth?.permissions?.can_use_connection ?? state.auth?.permissions?.can_use_primary_connection;
+  if (state.auth?.enabled && (!state.auth?.permissions?.can_change || !canUseConnection)) {
+    toast('Your role cannot create or execute a Splunk validation draft');
+    return;
+  }
+  if (scopeKey(splCandidateScope(candidate)) !== scopeKey(state.activeScope || {})) {
+    toast('The active Splunk scope changed. Return to the response scope before staging this SPL.');
+    return;
+  }
+  if (intelligence.risk === 'blocked' || intelligence.workload?.decision === 'block' || intelligence.error) {
+    toast(intelligence.blocked_reason || intelligence.workload?.reasons?.join(' · ') || intelligence.error || 'This SPL cannot be staged');
+    return;
+  }
+  try {
+    const created = await api('/api/validations', {
+      method:'POST',
+      body:JSON.stringify({
+        title:candidate.title,
+        rationale:`${candidate.purpose} Expected result: ${candidate.expected_result}`,
+        spl:candidate.spl,
+        earliest_time:candidate.earliest_time,
+        latest_time:candidate.latest_time,
+        row_limit:candidate.row_limit,
+        evidence_refs:candidate.evidence_refs || [],
+        result_contract:candidate.result_contract || {},
+        source_run_id:candidate.id,
+        source_finding_ref:`CHAT-SPL-${candidate.ordinal}`,
+        ...bindingPayload(splCandidateScope(candidate))
+      })
+    });
+    state.validations = [created, ...state.validations.filter(item => item.id !== created.id)];
+    closeSplCandidateChooser();
+    renderValidations();
+    setWorkspaceMode('full', false);
+    setView('discovery');
+    history.replaceState(null, '', `${location.pathname}#discovery`);
+    requestAnimationFrame(() => {
+      const card = document.querySelector(`[data-validation-id="${CSS.escape(created.id)}"]`);
+      (card || $('#validationWorkspace')).scrollIntoView({behavior:'smooth', block:'start'});
+      card?.classList.add('package-focus');
+      if (card) setTimeout(() => card.classList.remove('package-focus'), 2800);
+    });
+    toast('Scope-bound draft created; review, approve, then run it through Splunk MCP');
+  } catch (error) { toast(error.message); }
+}
+
 function appendMessage(role, content, meta = {}) {
   const welcome = $('.welcome-card'); if (welcome) welcome.remove();
   const node = document.createElement('article'); node.className = `message ${role}`;
@@ -3578,10 +4060,12 @@ function appendMessage(role, content, meta = {}) {
     node.dataset.feedbackProfile = meta.profile || '';
     node.dataset.feedbackRoute = meta.route || '';
     node.dataset.feedbackTask = meta.taskType || 'general';
+    const splGroupId = meta.targetId ? `spl:${meta.targetId}` : '';
     node.innerHTML = `<div class="agent-avatar">S</div><div><div class="answer">${renderMarkdown(content)}</div>
-    <div class="answer-meta"><span>Executed · ${escapeHtml(meta.model || 'SignalRoom')}</span>${meta.profile ? `<span>Profile · ${escapeHtml(meta.profile)}</span>` : ''}<span>${escapeHtml(meta.route || 'evidence-led')}</span>${meta.activated ? '<span>Loaded for this request</span>' : ''}</div>
+    <div class="answer-meta"><span>Produced by · ${escapeHtml(meta.model || 'SignalRoom')}</span>${meta.profile ? `<span>Profile · ${escapeHtml(meta.profile)}</span>` : ''}<span>${escapeHtml(meta.route || 'evidence-led')}</span>${meta.activated ? '<span>Loaded for this request</span>' : ''}</div>
     ${renderResultEnrichment(meta.enrichment || {})}
     ${renderModelRecommendations(meta.modelRecommendations || [])}
+    ${renderSplCandidateFollowup(meta.splCandidates || [], splGroupId)}
     <div class="suggestions">${(meta.suggestions || []).map(item => `<button data-prompt="${escapeHtml(item)}">${escapeHtml(item)}</button>`).join('')}</div>
     ${meta.targetId ? '<div class="analyst-feedback"><span>Did this advance the investigation?</span><button data-feedback-rating="useful">Useful</button><button data-feedback-rating="incorrect">Incorrect</button><button data-feedback-rating="missing-evidence">Missing evidence</button><em></em></div>' : ''}</div>`;
   }
@@ -3739,7 +4223,7 @@ async function loadDiscoveryJobs() {
       if (completed?.result_run_id) {
         const result = await api(scopedUrl(`/api/discovery/jobs/${encodeURIComponent(completedId)}/result`));
         renderDiscoveryResult(result);
-        await loadArtifacts();
+        await Promise.all([loadArtifacts(), loadSplContext()]);
         toast(completed.status === 'partial' || completed.status === 'budget-blocked'
           ? 'Discovery retained with collection gaps' : 'Discovery artifacts created');
       } else if (completed) {
@@ -3801,7 +4285,7 @@ async function sendChat(message, options = {}) {
       ...scopePayload()
     }, event => updateOperation($('#agentWork')?.querySelector('.agent-work'), event));
     state.conversationId = result.conversation_id; finishAgentWork();
-    appendMessage('assistant', result.message, { model: result.model, profile: result.model_profile, route: result.route, taskType:result.mode, targetId:`${result.conversation_id}:${result.generated_at}`, activated:result.model_activation?.activated, suggestions: result.suggested_actions, modelRecommendations:result.model_recommendations, enrichment:result.enrichment });
+    appendMessage('assistant', result.message, { model: result.model, profile: result.model_profile, route: result.route, taskType:result.mode, targetId:`${result.conversation_id}:${result.generated_at}`, activated:result.model_activation?.activated, suggestions: result.suggested_actions, modelRecommendations:result.model_recommendations, enrichment:result.enrichment, splCandidates:result.spl_candidates });
     renderEvidence(result.evidence, result.trace, result.ledger);
     $('#approveHf').checked = false;
   } catch (error) { finishAgentWork(); appendMessage('assistant', `The request failed: ${error.message}`); }
@@ -4866,6 +5350,22 @@ function validationStatusLabel(status) {
   return ({ draft:'Draft · not approved', approved:'Approved · ready to run', running:'Running read-only check', complete:'Evidence preserved', error:'Failed · review required', expired:'Expired · no longer executable' })[status] || status;
 }
 
+function validationPreflightLabel(task = {}) {
+  const receipt = task.preflight_receipt || {};
+  if (receipt.query_fingerprint && receipt.query_fingerprint !== task.query_fingerprint) return 'Preflight stale';
+  if (receipt.status === 'passed') return 'Splunk parser passed';
+  if (receipt.status === 'blocked') return 'Splunk preflight blocked';
+  if (receipt.status === 'advisory-only') return receipt.parser?.status === 'inconclusive'
+    ? 'Parser response inconclusive · runtime proof required'
+    : 'Parser unavailable · runtime proof required';
+  return 'Splunk preflight not run';
+}
+
+function validationShapeLabel(task = {}) {
+  const status = task.execution_receipt?.status;
+  return ({ matched:'Expected result shape matched', mismatch:'Result shape mismatch', 'inconclusive-zero-rows':'Zero rows · shape inconclusive', 'observed-no-field-contract':'Result shape observed' })[status] || '';
+}
+
 function renderValidationCandidates(result = state.lastDiscovery) {
   const container = $('#validationCandidates'); if (!container) return;
   const candidates = result?.validation_candidates || [];
@@ -4900,6 +5400,7 @@ function renderValidations() {
     const actions = [];
     if (['draft','error'].includes(task.status)) {
       actions.push(`<button class="button ghost small" data-edit-validation="${escapeHtml(task.id)}">Edit contract</button>`);
+      actions.push(`<button class="button ghost small" data-preflight-validation="${escapeHtml(task.id)}">Check in Splunk</button>`);
       actions.push(`<button class="button primary small" data-approve-validation="${escapeHtml(task.id)}">Approve exact query</button>`);
     }
     if (task.status === 'approved') actions.push(`<button class="button primary small" data-run-validation="${escapeHtml(task.id)}">Run approved validation</button>`);
@@ -4917,12 +5418,15 @@ function renderValidations() {
     }
     if (task.status !== 'running') actions.push(`<button class="button ghost small validation-delete" data-delete-validation="${escapeHtml(task.id)}">Delete</button>`);
     const assuranceMeta = task.assurance_package_id ? `<span>Assurance package <code>${escapeHtml(task.assurance_package_id.slice(0, 8))}</code></span><span>${escapeHtml(task.approval_scope.replaceAll('-', ' '))}</span>${task.expires_at ? `<span>Expires ${escapeHtml(assuranceTime(task.expires_at))}</span>` : ''}` : '';
+    const preflightStatus = String(task.preflight_receipt?.status || 'not-run');
+    const shapeStatus = String(task.execution_receipt?.status || '');
     return `<article class="validation-task ${escapeHtml(task.status)}" data-validation-id="${escapeHtml(task.id)}">
       <header><div><span>${escapeHtml(task.source_finding_ref || 'ANALYST')}</span><h4>${escapeHtml(task.title)}</h4></div><b class="validation-status ${escapeHtml(task.status)}">${escapeHtml(validationStatusLabel(task.status))}</b></header>
       <p>${escapeHtml(task.rationale)}</p>
       <details><summary>Review exact SPL contract</summary><pre><code>${escapeHtml(task.spl)}</code></pre></details>
       <div class="scope-provenance"><span>${escapeHtml(task.connection_alias || 'primary')}</span><code>${escapeHtml(task.tenant_scope_id || 'workspace-primary')}</code><code>${escapeHtml(shortFingerprint(task.connection_fingerprint))}</code></div>
       <div class="validation-contract"><span>${escapeHtml(validationContract(task))}</span><span>Query <code>${escapeHtml(task.query_fingerprint.slice(0, 12))}</code></span><span>${refs || 'No evidence reference'}</span>${assuranceMeta}</div>
+      <div class="validation-trust-line ${escapeHtml(preflightStatus)}"><b>${escapeHtml(validationPreflightLabel(task))}</b>${shapeStatus ? `<span>${escapeHtml(validationShapeLabel(task))}</span>` : '<span>Execution shape has not been observed.</span>'}</div>
       ${preview}<footer>${actions.join('')}</footer>
     </article>`;
   }).join('');
@@ -4944,9 +5448,71 @@ function openValidationEditor(task) {
   $('#validationLatest').value = task.latest_time;
   $('#validationRowLimit').value = task.row_limit;
   $('#validationEvidenceRefs').value = (task.evidence_refs || []).join(', ') || 'None';
+  renderValidationPreflight(task);
   $('#validationModal').hidden = false;
   analyzeValidationContract();
   setTimeout(() => $('#validationTitle').focus(), 50);
+}
+
+function renderValidationPreflight(task = null) {
+  const panel = $('#validationPreflight'); if (!panel) return;
+  const receipt = task?.preflight_receipt || {};
+  const current = Boolean(receipt.query_fingerprint && receipt.query_fingerprint === task?.query_fingerprint);
+  const status = current ? String(receipt.status || 'not-run') : 'not-run';
+  panel.className = `validation-preflight ${escapeHtml(status)}`;
+  const statusNode = panel.querySelector('header span');
+  statusNode.textContent = current ? validationPreflightLabel(task) : 'Not checked for this exact query';
+  const checks = current ? (receipt.checks || []) : [];
+  panel.querySelector('.validation-preflight-checks').innerHTML = checks.length
+    ? `<ul>${checks.map(item => `<li class="${escapeHtml(item.status || 'pending')}"><b>${escapeHtml(String(item.name || 'check').replaceAll('-', ' '))}</b><span>${escapeHtml(item.detail || '')}</span></li>`).join('')}</ul><small>Receipt <code>${escapeHtml(shortFingerprint(receipt.receipt_sha256 || ''))}</code> · ${receipt.checked_at ? new Date(receipt.checked_at).toLocaleString() : 'time unavailable'}</small>`
+    : '<small>No parser or SAIA call has been made for this fingerprint.</small>';
+}
+
+function validationDraftMatchesEditor(task) {
+  return task
+    && task.spl === $('#validationSpl').value.trim()
+    && task.earliest_time === $('#validationEarliest').value.trim()
+    && task.latest_time === $('#validationLatest').value.trim()
+    && Number(task.row_limit) === Number($('#validationRowLimit').value);
+}
+
+function beginValidationPreflightProgress(task) {
+  const card = $('#validationProgress'); card.hidden = false;
+  card.querySelector('.operation-label').textContent = `Preflight · ${task.title}`;
+  card.querySelector('.operation-detail').textContent = 'Discovering parser and optional SAIA tools on the exact Splunk connection.';
+  card.querySelector('.operation-elapsed').textContent = '0s';
+  card.querySelector('.operation-progress i').style.width = '0%';
+  card.querySelector('.operation-progress').setAttribute('aria-valuenow', '0');
+  card.querySelector('.operation-metrics').innerHTML = '';
+  card.querySelector('.operation-steps').innerHTML = '';
+}
+
+async function runValidationPreflight(taskId, includeSaia = false) {
+  const task = state.validations.find(item => item.id === taskId); if (!task) return null;
+  if (state.editingValidationId === taskId && !validationDraftMatchesEditor(task)) {
+    toast('Save the edited SPL contract before validating it with Splunk');
+    return null;
+  }
+  beginValidationPreflightProgress(task);
+  try {
+    const result = await streamApi(
+      scopedUrl(`/api/validations/${encodeURIComponent(taskId)}/preflight/stream`),
+      { include_saia:Boolean(includeSaia) },
+      event => updateOperation($('#validationProgress'), event)
+    );
+    state.validations = state.validations.map(item => item.id === taskId ? result : item);
+    renderValidations();
+    if (state.editingValidationId === taskId) renderValidationPreflight(result);
+    const receipt = result.preflight_receipt || {};
+    toast(receipt.status === 'passed' ? 'Splunk parser preflight passed' : validationPreflightLabel(result));
+    return result;
+  } catch (error) {
+    await loadValidations();
+    const refreshed = state.validations.find(item => item.id === taskId);
+    if (state.editingValidationId === taskId && refreshed) renderValidationPreflight(refreshed);
+    toast(error.message);
+    return null;
+  }
 }
 
 function queryIntelligencePayload(task = null) {
@@ -4998,12 +5564,19 @@ async function queueValidation(candidateId) {
 }
 
 async function approveValidation(taskId) {
-  const task = state.validations.find(item => item.id === taskId); if (!task) return;
+  let task = state.validations.find(item => item.id === taskId); if (!task) return;
   const intelligence = await analyzeValidationContract(task);
   if (!intelligence || intelligence.risk === 'blocked' || intelligence.workload?.decision === 'block') { toast(intelligence?.blocked_reason || intelligence?.workload?.reasons?.join(' · ') || 'Query approval is blocked'); return; }
+  const receipt = task.preflight_receipt || {};
+  if (receipt.query_fingerprint !== task.query_fingerprint || !['passed','advisory-only'].includes(receipt.status)) {
+    task = await runValidationPreflight(taskId, false);
+    if (!task) return;
+  }
+  const preflight = task.preflight_receipt || {};
+  const preflightNote = `\n${validationPreflightLabel(task)}`;
   const reuse = intelligence.reusable_result ? `\n\nA preserved matching result exists from ${new Date(intelligence.reusable_result.completed_at).toLocaleString()}. Approve only if fresher evidence is required.` : '';
   const workload = intelligence.workload ? `\nWorkload: ${intelligence.workload.mode.toUpperCase()} · ${intelligence.workload.decision.replaceAll('-', ' ')} · ${intelligence.workload.estimated_cost_units} relative units` : '';
-  if (!confirm(`Approve this exact read-only SPL contract?\n\nRisk: ${intelligence.risk.toUpperCase()} (${intelligence.score}/100)${workload}\n${intelligence.execution_recommendation}${reuse}\n\n${task.spl}\n\nWindow: ${task.earliest_time} to ${task.latest_time}\nMaximum rows: ${task.row_limit}`)) return;
+  if (!confirm(`Approve this exact read-only SPL contract?\n\nRisk: ${intelligence.risk.toUpperCase()} (${intelligence.score}/100)${workload}${preflightNote}\n${intelligence.execution_recommendation}${reuse}\n\n${task.spl}\n\nWindow: ${task.earliest_time} to ${task.latest_time}\nMaximum rows: ${task.row_limit}`)) return;
   try {
     const approved = await api(scopedUrl(`/api/validations/${encodeURIComponent(taskId)}/approve`), { method:'POST', body:'{}' });
     state.validations = state.validations.map(item => item.id === taskId ? approved : item); renderValidations();
@@ -5039,6 +5612,7 @@ async function runValidation(taskId) {
 
 function openValidationResult(task) {
   const rows = Array.isArray(task.result_preview) ? task.result_preview : [];
+  const shape = task.execution_receipt || {};
   const artifact = state.artifacts.find(item => item.id === task.artifact_id);
   const actions = [
     { label:'Continue investigation', kind:'prompt', mode:'triage', prompt:`Continue the investigation using the preserved validation titled "${task.title}" (${task.source_finding_ref || task.id}). Distinguish what the result observed from what it does not prove, then recommend the next bounded check.` }
@@ -5054,9 +5628,9 @@ function openValidationResult(task) {
   actions.push({ label:'Add result to case', kind:'case-item', item:{ kind:'evidence', title:task.title, content:`Approved SPL:\n${task.spl}\n\nWindow: ${task.earliest_time} to ${task.latest_time}\nRows returned: ${task.result_count}\nArtifact: ${task.artifact_id}`, source:'SignalRoom validation queue', confidence:'high', status:'observed', metadata:{ validation_id:task.id, artifact_id:task.artifact_id, query_fingerprint:task.query_fingerprint, evidence_refs:task.evidence_refs } } });
   showDetail({
     eyebrow:'OBSERVED · APPROVED VALIDATION', title:task.title,
-    summary:`<div class="validation-detail-summary"><strong>${Number(task.result_count).toLocaleString()}</strong><span>rows returned by the approved read-only check and preserved locally.</span></div>`,
-    content:`<h3>Result preview</h3>${rows.length ? `<pre><code>${escapeHtml(JSON.stringify(rows, null, 2))}</code></pre>` : '<p>The search returned no rows. A zero-result observation is still preserved with its exact contract.</p>'}<h3>Approved SPL</h3><pre><code>${escapeHtml(task.spl)}</code></pre>`,
-    provenance:`<h3>Execution contract</h3><dl><div><dt>Time window</dt><dd>${escapeHtml(task.earliest_time)} → ${escapeHtml(task.latest_time)}</dd></div><div><dt>Row cap</dt><dd>${Number(task.row_limit).toLocaleString()}</dd></div><div><dt>Fingerprint</dt><dd><code>${escapeHtml(task.query_fingerprint)}</code></dd></div><div><dt>Evidence references</dt><dd>${escapeHtml((task.evidence_refs || []).join(', ') || 'none')}</dd></div><div><dt>Completed</dt><dd>${task.completed_at ? new Date(task.completed_at).toLocaleString() : 'unknown'}</dd></div></dl>`,
+    summary:`<div class="validation-detail-summary"><strong>${Number(task.result_count).toLocaleString()}</strong><span>rows returned · ${escapeHtml(validationShapeLabel(task) || 'result shape recorded')}</span></div>`,
+    content:`<h3>Result-shape contract</h3><div class="result-shape-receipt ${escapeHtml(shape.status || 'unknown')}"><b>${escapeHtml(validationShapeLabel(task) || 'No typed field contract was supplied')}</b><span>Expected: ${escapeHtml((shape.expected_fields || []).join(', ') || 'not specified')}</span><span>Observed: ${escapeHtml((shape.observed_fields || []).join(', ') || 'no fields observed')}</span>${(shape.missing_fields || []).length ? `<strong>Missing: ${escapeHtml(shape.missing_fields.join(', '))}</strong>` : ''}<small>Shape receipt contains field names and types only; raw values remain confined to the bounded evidence preview.</small></div><h3>Result preview</h3>${rows.length ? `<pre><code>${escapeHtml(JSON.stringify(rows, null, 2))}</code></pre>` : '<p>The search returned no rows. A zero-result observation is preserved, but the expected field shape remains inconclusive.</p>'}<h3>Approved SPL</h3><pre><code>${escapeHtml(task.spl)}</code></pre>`,
+    provenance:`<h3>Execution contract</h3><dl><div><dt>Time window</dt><dd>${escapeHtml(task.earliest_time)} → ${escapeHtml(task.latest_time)}</dd></div><div><dt>Row cap</dt><dd>${Number(task.row_limit).toLocaleString()}</dd></div><div><dt>Fingerprint</dt><dd><code>${escapeHtml(task.query_fingerprint)}</code></dd></div><div><dt>Splunk preflight</dt><dd>${escapeHtml(validationPreflightLabel(task))}</dd></div><div><dt>Result shape</dt><dd>${escapeHtml(shape.status || 'not assessed')}</dd></div><div><dt>Evidence references</dt><dd>${escapeHtml((task.evidence_refs || []).join(', ') || 'none')}</dd></div><div><dt>Completed</dt><dd>${task.completed_at ? new Date(task.completed_at).toLocaleString() : 'unknown'}</dd></div></dl>`,
     actions
   });
 }
@@ -5927,7 +6501,8 @@ function closeDetail() {
 }
 
 function resetConversation() {
-  state.conversationId = null; state.promptPath = [];
+  state.conversationId = null; state.promptPath = []; state.splCandidateGroups = {};
+  if (!$('#splCandidateModal').hidden) closeSplCandidateChooser();
   $('#messages').innerHTML = '<article class="welcome-card"><p class="eyebrow">EVIDENCE-FIRST SECURITY ANALYSIS</p><h2>What are we looking for?</h2><p>Choose a role and workflow. SignalRoom will stage a reviewable prompt before it runs any tools.</p><div class="prompt-explorer" id="promptExplorer" aria-live="polite"></div></article>';
   renderPromptTree([]); renderEvidence([], [], []);
 }
@@ -6094,6 +6669,11 @@ document.addEventListener('click', async event => {
     return;
   }
   const nav = event.target.closest('[data-view]'); if (nav) navigateView(nav.dataset.view);
+  const splChooser = event.target.closest('[data-open-spl-chooser]');
+  if (splChooser) { await openSplCandidateChooser(splChooser.dataset.openSplChooser); return; }
+  const stageChatSpl = event.target.closest('[data-stage-chat-spl]');
+  if (stageChatSpl) { await stageChatSplCandidate(stageChatSpl.dataset.stageChatSpl); return; }
+  if (event.target.closest('.close-spl-candidate')) { closeSplCandidateChooser(); return; }
   const queueValidationButton = event.target.closest('[data-queue-validation]');
   if (queueValidationButton && !queueValidationButton.disabled) { await queueValidation(queueValidationButton.dataset.queueValidation); return; }
   const editValidationButton = event.target.closest('[data-edit-validation]');
@@ -6104,6 +6684,8 @@ document.addEventListener('click', async event => {
   }
   const approveValidationButton = event.target.closest('[data-approve-validation]');
   if (approveValidationButton) { await approveValidation(approveValidationButton.dataset.approveValidation); return; }
+  const preflightValidationButton = event.target.closest('[data-preflight-validation]');
+  if (preflightValidationButton) { await runValidationPreflight(preflightValidationButton.dataset.preflightValidation, false); return; }
   const runValidationButton = event.target.closest('[data-run-validation]');
   if (runValidationButton) { await runValidation(runValidationButton.dataset.runValidation); return; }
   const inspectValidationButton = event.target.closest('[data-inspect-validation]');
@@ -6261,6 +6843,7 @@ document.addEventListener('click', async event => {
   if (archiveForecastSchedule) { await archiveTimeSeriesSchedule(archiveForecastSchedule); return; }
   if (event.target.closest('[data-review-model-trust]')) {
     if (!$('#detailModal').hidden) closeDetail();
+    setWorkspaceMode('full', false);
     $('#modelTrustPanel').scrollIntoView({behavior:'smooth', block:'start'});
     toast('Review and approve the exact installed artifact in the local supply-chain panel');
   }
@@ -6297,6 +6880,14 @@ document.addEventListener('click', async event => {
   if (pull) pullModel(pull.dataset.pullProfile, pull);
   const activate = event.target.closest('[data-activate-model]');
   if (activate) activateModel(activate.dataset.activateModel, activate);
+  const stageIntake = event.target.closest('[data-stage-model-intake]');
+  if (stageIntake) await stageModelIntake(stageIntake.dataset.stageModelIntake);
+  const discardIntake = event.target.closest('[data-discard-model-intake]');
+  if (discardIntake) await discardModelIntake(discardIntake.dataset.discardModelIntake);
+  const discardCandidate = event.target.closest('[data-discard-model-candidate]');
+  if (discardCandidate) await discardOllamaCandidate(discardCandidate.dataset.discardModelCandidate);
+  const evaluateCandidate = event.target.closest('[data-evaluate-model-candidate]');
+  if (evaluateCandidate) await evaluateOllamaCandidate(evaluateCandidate.dataset.evaluateModelCandidate);
   if (event.target.closest('#checkModelUpdates')) checkModelUpdates(event.target.closest('#checkModelUpdates'));
   const contextKind = event.target.closest('[data-context-kind]');
   if (contextKind) {
@@ -6446,6 +7037,12 @@ $('#publishEvaluationSuite').addEventListener('click', publishEvaluationSuite);
 $('#archiveEvaluationSuite').addEventListener('click', archiveEvaluationSuite);
 $('#deleteEvaluationSuite').addEventListener('click', deleteEvaluationSuite);
 $('#runModelTournament').addEventListener('click', runModelTournament);
+$('#candidateStagingForm').addEventListener('submit', stageOllamaCandidate);
+$('#modelLifecycleNav').addEventListener('click', event => {
+  const button = event.target.closest('[data-model-section]');
+  if (button) navigateModelLifecycleSection(button.dataset.modelSection);
+});
+window.addEventListener('scroll', syncModelLifecycleSection, {passive:true});
 $('#tournamentTarget').addEventListener('change', updateTournamentAssignmentHelp);
 $('#tournamentSuite').addEventListener('change', renderModelTournaments);
 $('#runGoldenBenchmark').addEventListener('click', runGoldenBenchmark);
@@ -6461,6 +7058,16 @@ $('#refreshUpgradeReadiness').addEventListener('click', loadUpgradeReadiness);
 $('#settingsNavigator').addEventListener('click', event => {
   const button = event.target.closest('[data-settings-target]');
   if (button) navigateSettingsSection(button.dataset.settingsTarget);
+});
+$('#workspaceModeToggle').addEventListener('click', () => setWorkspaceMode(state.workspaceMode === 'full' ? 'guided' : 'full'));
+$('#workspaceGuideTools').addEventListener('click', event => {
+  const button = event.target.closest('[data-workspace-tool]');
+  if (button) openWorkspaceTool(button.dataset.workspaceTool);
+});
+$('#settingsAdvancedToggle').addEventListener('click', () => {
+  const guided = state.workspaceMode === 'full';
+  setWorkspaceMode(guided ? 'guided' : 'full');
+  if (guided) navigateSettingsSection('settingsSplunk', 'auto');
 });
 $('#settingsForm').addEventListener('scroll', syncSettingsSection, {passive:true});
 $('#retentionPreview').addEventListener('click', event => {
@@ -6511,6 +7118,10 @@ $('#validationForm').addEventListener('submit', async event => {
     state.editingValidationId = null; $('#validationModal').hidden = true; renderValidations(); toast('Draft saved and fingerprint refreshed');
   } catch (error) { toast(error.message); }
 });
+$('#runValidationPreflight').addEventListener('click', async () => {
+  const taskId = state.editingValidationId;
+  if (taskId) await runValidationPreflight(taskId, $('#validationUseSaia').checked);
+});
 let queryIntelligenceTimer;
 ['#validationSpl','#validationEarliest','#validationLatest','#validationRowLimit'].forEach(selector => $(selector).addEventListener('input', () => {
   clearTimeout(queryIntelligenceTimer);
@@ -6545,6 +7156,7 @@ document.addEventListener('keydown', event => {
   if (event.key !== 'Escape') return;
   if (!$('#demoTour').hidden) finishDemoTour();
   else if (!$('#detailModal').hidden) closeDetail();
+  else if (!$('#splCandidateModal').hidden) closeSplCandidateChooser();
   else if (!$('#validationModal').hidden) { $('#validationModal').hidden = true; state.editingValidationId = null; }
   else if (!$('#casePickerModal').hidden) { $('#casePickerModal').hidden = true; state.pendingCaseItem = null; }
   else if (!$('#caseItemModal').hidden) { $('#caseItemModal').hidden = true; state.pendingCaseItem = null; state.editingCaseItemId = null; }
@@ -6557,7 +7169,12 @@ const accessObserver = new MutationObserver(() => {
 accessObserver.observe(document.body, { childList:true, subtree:true });
 
 async function loadWorkspace() {
-  await Promise.all([loadSettings(), loadWorkload(), loadArtifacts(), loadCases(), loadLatestDiscovery(), loadDiscoveryJobs(), loadEstateReviewPackets(), loadValidations(), loadDetections(), loadModelCatalog(), loadTimeSeriesStatus(), loadModelTrust(), loadSplunkModels(), loadAssurance(), loadConnectionDiagnostics(), loadFeedbackBenchmarks(), loadGoldenBenchmarks(), loadRecovery(), loadOperationalAcceptance(), loadRetention(), loadReleaseReadiness(), loadUpgradeReadiness()]);
+  // Establish the selected immutable Splunk identity before any scoped loader runs.
+  // Starting these together allowed the initial requests to race ahead with an
+  // empty connection fingerprint, which could briefly mix legacy/stale context
+  // into an otherwise scope-bound workspace.
+  await loadSettings();
+  await Promise.all([loadWorkload(), loadArtifacts(), loadCases(), loadLatestDiscovery(), loadDiscoveryJobs(), loadSplContext(), loadEstateReviewPackets(), loadValidations(), loadDetections(), loadModelCatalog(), loadTimeSeriesStatus(), loadModelTrust(), loadSplunkModels(), loadAssurance(), loadConnectionDiagnostics(), loadFeedbackBenchmarks(), loadGoldenBenchmarks(), loadRecovery(), loadOperationalAcceptance(), loadRetention(), loadReleaseReadiness(), loadUpgradeReadiness()]);
   renderPromptTree(); renderValidations(); renderDetections(); handleDeepLink(); renderAuth();
   state.workspaceLoaded = true;
   if (!state.assuranceTimer) state.assuranceTimer = setInterval(() => {
@@ -6567,6 +7184,7 @@ async function loadWorkspace() {
 
 async function initialize() {
   try {
+    setWorkspaceMode(state.workspaceMode, false);
     await loadAuthStatus();
     const authQuery = new URLSearchParams(location.search);
     const authError = authQuery.get('auth_error');

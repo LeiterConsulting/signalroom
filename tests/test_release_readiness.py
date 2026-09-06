@@ -25,6 +25,11 @@ def test_static_release_gate_measures_ui_quality_and_function_ownership(tmp_path
     assert all(item["status"] == "pass" for item in checks.values())
     assert checks["settings-density"]["evidence"]["controls_by_section"]["accessControlSection"] <= 32
     assert checks["contrast"]["evidence"]["failures"] == []
+    assert checks["guided-workspace"]["status"] == "pass"
+    assert all(
+        item["present"] and item["documented"]
+        for item in checks["guided-workspace"]["evidence"]["targets"].values()
+    )
     assert checks["function-ownership"]["evidence"]["orphan_candidates"] == []
     assert checks["function-ownership"]["evidence"]["declared_interface_functions"] > 300
     assert checks["function-ownership"]["evidence"]["backend_modules_scanned"] > 50
@@ -69,4 +74,4 @@ def test_admin_release_readiness_api_is_live_and_not_cacheable(
     assert response.status_code == 200
     assert response.headers["cache-control"] == "no-store"
     assert response.json()["decision"] == "blocked"
-    assert response.json()["counts"]["passed"] == 8
+    assert response.json()["counts"]["passed"] == 9

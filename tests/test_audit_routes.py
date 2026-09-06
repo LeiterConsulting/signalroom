@@ -4,6 +4,7 @@ import importlib
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -69,6 +70,7 @@ async def test_gets_do_not_create_mutation_audits_and_write_routes_do(monkeypatc
         validations=SimpleNamespace(
             update=lambda task_id, request: validation,
             approve=lambda task_id: validation,
+            ensure_preflight=AsyncMock(return_value=validation),
         ),
         cases=SimpleNamespace(
             get=lambda case_id: case,

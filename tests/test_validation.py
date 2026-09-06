@@ -23,6 +23,12 @@ def task_value(**updates):
         "evidence_refs": ["D2"],
         "source_run_id": "run-123",
         "source_finding_ref": "D2",
+        "result_contract": {
+            "contract": "signalroom.spl-result-shape.v1",
+            "operation": "events",
+            "expected_fields": ["sourcetype", "age_hours"],
+            "allow_zero_rows": True,
+        },
     }
     value.update(updates)
     return ValidationTaskCreate(**value)
@@ -72,6 +78,9 @@ async def test_validation_service_requires_approval_and_preserves_bounded_result
     assert completed.status == "complete"
     assert completed.result_count == 1
     assert completed.result_preview[0]["sourcetype"] == "audit"
+    assert completed.preflight_receipt["status"] == "advisory-only"
+    assert completed.execution_receipt["status"] == "matched"
+    assert completed.execution_receipt["raw_values_included"] is False
     assert completed.artifact_id
     assert splunk.calls[0][0] == "run_query"
     assert splunk.calls[0][1]["row_limit"] == 100
@@ -79,6 +88,71 @@ async def test_validation_service_requires_approval_and_preserves_bounded_result
     saved_case = cases.get(case.id)
     assert saved_case is not None
     assert saved_case.items[0].metadata["validation_task_id"] == completed.id
+
+
+def test_editing_spl_invalidates_preflight_and_typed_result_contract(tmp_path):
+    store = ValidationStore(tmp_path / "validations.db")
+    created = store.create(task_value())
+    store.set_preflight(
+        created.id,
+        {
+            "status": "passed",
+            "query_fingerprint": created.query_fingerprint,
+            "connection_fingerprint": created.connection_fingerprint,
+        },
+    )
+
+    updated = store.update(
+        created.id,
+        ValidationTaskUpdate(spl="search index=security | stats count as event_count"),
+    )
+
+    assert updated is not None
+    assert updated.preflight_receipt == {}
+    assert updated.execution_receipt == {}
+    assert updated.result_contract == {}
+
+
+async def test_parser_rejection_prevents_execution(tmp_path):
+    class ParserRejectingSplunk:
+        def __init__(self):
+            self.calls = []
+
+        async def list_tools(self):
+            return [
+                {
+                    "name": "splunk_validate_spl",
+                    "inputSchema": {
+                        "properties": {"query": {"type": "string"}},
+                    },
+                },
+                {"name": "splunk_run_query", "inputSchema": {}},
+            ]
+
+        async def call(self, name, arguments):
+            self.calls.append((name, arguments))
+            if name == "splunk_validate_spl":
+                return {"valid": False, "message": "Unknown search command."}
+            raise AssertionError("Rejected SPL must never be executed")
+
+    splunk = ParserRejectingSplunk()
+    store = ValidationStore(tmp_path / "validations.db")
+    service = ValidationService(
+        store,
+        splunk,
+        EvidenceStore(tmp_path / "evidence.db"),
+        CaseStore(tmp_path / "cases.db", tmp_path / "exports"),
+    )
+    created = service.create(task_value())
+    service.approve(created.id)
+
+    with pytest.raises(ValueError, match="Unknown search command"):
+        await service.execute(created.id)
+
+    assert [name for name, _ in splunk.calls] == ["splunk_validate_spl"]
+    failed = store.get(created.id)
+    assert failed is not None and failed.status == "error"
+    assert failed.preflight_receipt["status"] == "blocked"
 
 
 async def test_validation_service_surfaces_mcp_error_payloads(tmp_path):
@@ -213,7 +287,12 @@ async def test_validation_execution_uses_its_bound_splunk_scope(tmp_path):
             "alias": "east",
             "fingerprint": "a" * 64,
             "tenant_scope_id": "tenant-east",
-        }
+        },
+        {
+            "alias": "east",
+            "fingerprint": "a" * 64,
+            "tenant_scope_id": "tenant-east",
+        },
     ]
     artifact = service.evidence.get(completed.artifact_id, "tenant-east")
     assert artifact is not None

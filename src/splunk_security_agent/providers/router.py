@@ -81,6 +81,11 @@ class ModelRouter:
     ) -> tuple[str, str]:
         settings = self.config.load()
         if requested:
+            profile = self.profile(requested)
+            if profile.lifecycle == "candidate":
+                raise ValueError(
+                    "A staged model can run only inside the isolated evaluation workspace until promotion"
+                )
             return requested, "operator-selected"
         tokens = {token.strip(".,:;!?()[]{}").lower() for token in message.split()}
         resolved_mode = self.classify_mode(message, mode)

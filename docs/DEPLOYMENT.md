@@ -31,7 +31,7 @@ An automatic installer preflight writes a content-addressed receipt before stopp
 
 ## Optional model bootstrap
 
-Setup contains independent readiness panels for three execution paths:
+**Settings → Models** contains independent readiness panels for three execution paths:
 
 - **Ollama:** detects the configured service, lists installed profiles, and starts an explicit background download with progress. The default security profile pulls the official Foundation-Sec Q4_K_M GGUF directly from Hugging Face through Ollama.
 - **Local Transformers (recommended):** installs the runtime and SecureBERT snapshots only after an explicit click. The completed snapshot is pinned to the resolved publisher revision and stored under `data/models`; inference then stays on the SignalRoom host.
@@ -49,7 +49,7 @@ For a terminal-driven deployment:
 ./install.sh --install-ollama --pull-models
 ```
 
-External installation and model downloads are always opt-in. Local SecureBERT installation is initiated from Setup so the operator sees the exact profile, purpose, and progress. On macOS, `--install-ollama` opens the signed app download; finish the app installation and rerun with `--pull-models`.
+External installation and model downloads are always opt-in. Local SecureBERT installation is initiated from Settings so the operator sees the exact profile, purpose, and progress. On macOS, `--install-ollama` opens the signed app download; finish the app installation and rerun with `--pull-models`.
 
 For a non-mutating model-preparation audit on Linux or macOS, run:
 
@@ -73,7 +73,7 @@ so one trusted operator can evaluate demo mode, connect Splunk, and validate mod
 
 Before allowing another person or host to reach the service:
 
-1. Open **Setup → Access control · optional**.
+1. Open **Settings → Platform administration → Access**.
 2. Create the first named administrator with a password of at least 12 characters.
 3. Add viewer, analyst, or admin identities and independently assign Primary or any admitted additional Splunk aliases.
 4. Put SignalRoom behind a controlled HTTPS reverse proxy and verify the browser observes HTTPS.
@@ -88,10 +88,10 @@ TLS; keep named access behind a controlled HTTPS reverse proxy.
 
 ### Optional enterprise OIDC
 
-After local RBAC is active, a SignalRoom administrator can configure one provider under **Setup → Access control →
+After local RBAC is active, a SignalRoom administrator can configure one provider under **Settings → Platform administration → Access →
 Enterprise identity**:
 
-1. Register the exact callback URI shown in Setup: `/api/auth/oidc/callback` on the externally visible HTTPS origin.
+1. Register the exact callback URI shown in Settings: `/api/auth/oidc/callback` on the externally visible HTTPS origin.
 2. Provide the provider's exact issuer URL, client ID, and confidential-client secret.
 3. Configure the provider claim names and, where applicable, exact allowed tenant values and admitted groups.
 4. Map analyst and administrator groups independently from connection authority.
@@ -131,7 +131,7 @@ instances where complete process, credential, control-plane, or audit-authority 
 
 ## Splunk TLS certificates
 
-Setup exposes a **Verify TLS certificates** toggle for the Splunk MCP connection. Verification is enabled by default and should remain enabled for production connections.
+**Settings → Splunk** exposes a **Verify TLS certificates** toggle for the Splunk MCP connection. Verification is enabled by default and should remain enabled for production connections.
 
 Changing the endpoint, demo/live mode, TLS verification, or private-CA trust advances the immutable
 Primary connection revision. Existing continuous-assurance and shadow-forecast schedules will require
@@ -139,7 +139,7 @@ an administrator to rebind them in Settings and will be paused during that rebin
 discovery work. This prevents a durable workflow approved for one Splunk instance from silently
 running against another.
 
-For an internal certificate authority, keep verification enabled and provide the CA bundle path in Setup. For a trusted development endpoint using a self-signed certificate, verification can be disabled explicitly. Disabling verification preserves transport encryption but does not validate the server certificate or identity.
+For an internal certificate authority, keep verification enabled and provide the CA bundle path in Settings. For a trusted development endpoint using a self-signed certificate, verification can be disabled explicitly. Disabling verification preserves transport encryption but does not validate the server certificate or identity.
 
 ## Outbound response webhook
 
@@ -363,7 +363,7 @@ purging data removes the job history and retained results.
 
 ## Encrypted control-plane recovery
 
-Use Setup → **Encrypted control-plane recovery** while signed in as an administrator. Create a unique 16-character
+Use **Settings → Platform administration → Recovery** while signed in as an administrator. Create a unique 16-character
 or longer package password, download the resulting `.signalroom-recovery` file, move it to an approved backup
 store, and delete the extra local export. Store the password through a separate approved channel.
 
@@ -402,7 +402,7 @@ state, and paired model-trust state. It does not restore investigation data, que
 models, generated artifacts, environment variables, external service state, or private CA files. A restored CA
 path must exist and be independently trusted on the destination host.
 
-Use Setup → **Recovery and multi-instance acceptance** before promotion and after a connection, tenant route,
+Use **Settings → Platform administration → Recovery → Recovery and multi-instance acceptance** before promotion and after a connection, tenant route,
 access-policy, runtime-bind, or worker lifecycle change. Refresh is local-only. Splunk diagnostics and the encrypted
 recovery rehearsal are separate explicit actions. The assessment deliberately blocks local single-user mode when
 the recorded runtime host is `0.0.0.0` or `::`; enable RBAC or return the process to loopback. Follow
@@ -460,7 +460,7 @@ The published port is bound to localhost by default and `./data` is mounted for 
 `SIGNALROOM_BIND_ADDRESS=0.0.0.0` only for an explicitly governed LAN deployment. The image build excludes the
 host data directory and lifecycle secrets; retained state enters only through the runtime volume. Compose also
 provides a health check and graceful-stop window. When Ollama runs on the host, configure its endpoint as
-`http://host.docker.internal:11434` in Setup.
+`http://host.docker.internal:11434` in Settings.
 
 The Cisco Time Series Model runtime is optional and remains stopped unless its profile is selected. The easiest
 process-install path is **Models → Cisco Time Series Model → Build and start bundled local runtime**. SignalRoom

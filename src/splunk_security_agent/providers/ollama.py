@@ -71,7 +71,10 @@ class OllamaProvider(BaseModelProvider):
             "messages": messages,
             "stream": False,
             "keep_alive": keep_alive,
-            "options": {"temperature": temperature},
+            "options": {
+                "temperature": temperature,
+                "num_ctx": self.profile.context_window,
+            },
         }
         if max_output_tokens is not None:
             payload["options"]["num_predict"] = max_output_tokens
@@ -152,6 +155,7 @@ class OllamaProvider(BaseModelProvider):
                 "prompt": "",
                 "stream": False,
                 "keep_alive": "15m",
+                "options": {"num_ctx": self.profile.context_window},
             },
         )
         response.raise_for_status()

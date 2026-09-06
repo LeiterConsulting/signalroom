@@ -34,9 +34,9 @@ def test_mobile_navigation_keeps_accessible_names_and_discovery_contains_width()
         "Discovery",
         "Cases",
         "Detections",
-        "Context",
+        "Knowledge",
         "Models",
-        "Setup",
+        "Settings and setup",
     ):
         assert f'aria-label="{label}"' in INDEX_HTML
     assert ".discovery-grid>*,.purpose-grid>*" in STYLES_CSS
@@ -153,6 +153,43 @@ def test_model_artifact_trust_is_explicit_and_audit_first() -> None:
     assert ".model-trust-card.approved" in STYLES_CSS
 
 
+def test_model_lifecycle_workspace_separates_health_and_safe_staging() -> None:
+    assert 'id="modelLifecycleNav"' in INDEX_HTML
+    assert 'id="modelLifecycleAxes"' in INDEX_HTML
+    assert 'id="modelCandidateStaging"' in INDEX_HTML
+    assert 'id="candidateStagingForm"' in INDEX_HTML
+    assert "function renderModelLifecycle()" in APP_JS
+    assert "async function stageOllamaCandidate(event)" in APP_JS
+    assert "Evaluate against current route" in APP_JS
+    assert "Routing unchanged" in APP_JS
+    assert "data-stage-model-intake" in APP_JS
+    assert ".model-lifecycle-nav" in STYLES_CSS
+    assert ".lifecycle-axis.offline" in STYLES_CSS
+
+
+def test_guided_workspace_preserves_advanced_capabilities() -> None:
+    assert '<body class="chat-active workspace-guided">' in INDEX_HTML
+    assert 'id="workspaceGuide"' in INDEX_HTML
+    assert 'id="workspaceModeToggle"' in INDEX_HTML
+    assert 'id="settingsAdvancedToggle"' in INDEX_HTML
+    assert "const WORKSPACE_GUIDES" in APP_JS
+    assert "function setWorkspaceMode(mode" in APP_JS
+    assert "function openWorkspaceTool(target)" in APP_JS
+    assert "Guided view restored · no capabilities were removed" in APP_JS
+    assert "body.workspace-guided .guided-advanced" in STYLES_CSS
+    for target in (
+        "discoveryJobsWorkspace",
+        "estateComparisonWorkspace",
+        "assuranceWorkspace",
+        "validationWorkspace",
+        "modelTrustPanel",
+        "modelTournamentWorkspace",
+        "modelGoldenGate",
+        "splunkModelInventory",
+    ):
+        assert f'id="{target}"' in INDEX_HTML
+
+
 def test_splunk_workload_policy_is_explainable_and_audit_first() -> None:
     assert 'id="workloadPolicySection"' in INDEX_HTML
     assert '<option value="audit">Audit only' in INDEX_HTML
@@ -179,7 +216,7 @@ def test_operator_evaluation_suites_expose_safe_versioned_authoring() -> None:
 
 
 def test_investigation_columns_scroll_independently() -> None:
-    assert '<body class="chat-active">' in INDEX_HTML
+    assert '<body class="chat-active workspace-guided">' in INDEX_HTML
     assert "document.body.classList.toggle('chat-active', name === 'chat')" in APP_JS
     assert "body.chat-active{overflow:hidden}" in STYLES_CSS
     assert (
@@ -207,6 +244,57 @@ def test_splunk_scope_selector_is_global_and_readable() -> None:
     assert "function scopedUrl(path, params = {})" in APP_JS
     assert ".scope-selector select{" in STYLES_CSS
     assert "@media(max-width:1100px){.chat-layout{grid-template-columns:1fr}" in STYLES_CSS
+
+
+def test_chat_spl_followup_handles_multiple_blocks_and_preserves_approval_gate() -> None:
+    assert 'id="splCandidateModal"' in INDEX_HTML
+    assert 'aria-labelledby="splCandidateModalTitle"' in INDEX_HTML
+    assert "Choose SPL to try in Splunk" in INDEX_HTML
+    assert "Creating a draft does not run SPL." in INDEX_HTML
+    assert "function renderSplCandidateChooser()" in APP_JS
+    assert "Choose SPL to try (${reviewable.length})" in APP_JS
+    assert "data-open-spl-chooser" in APP_JS
+    assert "data-stage-chat-spl" in APP_JS
+    assert "Create reviewable draft" in APP_JS
+    assert "SignalRoom will not run SPL until you approve the exact contract." in APP_JS
+    assert "Trust receipt · ${escapeHtml(trustLabel)}" in APP_JS
+    assert "Authoring context" in APP_JS
+    assert ".spl-trust-receipt{" in STYLES_CSS
+    assert 'id="splContextStatus"' in INDEX_HTML
+    assert "async function loadSplContext()" in APP_JS
+    assert "source event rows excluded" in APP_JS
+    assert "splCandidates:result.spl_candidates" in APP_JS
+    assert "Produced by · ${escapeHtml(meta.model || 'SignalRoom')}" in APP_JS
+    assert "Executed · ${escapeHtml(meta.model || 'SignalRoom')}" not in APP_JS
+    assert ".spl-candidate-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr))" in STYLES_CSS
+    assert "@media(max-width:760px){.spl-followup{grid-template-columns:1fr}" in STYLES_CSS
+
+
+def test_splunk_validation_adapter_is_explicit_private_and_accessible() -> None:
+    assert 'id="validationPreflight"' in INDEX_HTML
+    assert 'id="runValidationPreflight"' in INDEX_HTML
+    assert 'id="validationUseSaia" type="checkbox"' in INDEX_HTML
+    assert "without running the search" in INDEX_HTML
+    assert "never event rows" in INDEX_HTML
+    assert "function validationPreflightLabel(task = {})" in APP_JS
+    assert "async function runValidationPreflight(taskId, includeSaia = false)" in APP_JS
+    assert "Parser response inconclusive · runtime proof required" in APP_JS
+    assert "Result-shape contract" in APP_JS
+    assert "raw values remain confined to the bounded evidence preview" in APP_JS
+    assert ".validation-preflight{" in STYLES_CSS
+    assert ".validation-preflight>header>div{display:grid;gap:3px" in STYLES_CSS
+    assert ".plain-check input{" in STYLES_CSS
+    assert ".result-shape-receipt.mismatch{" in STYLES_CSS
+
+
+def test_workspace_establishes_immutable_scope_before_scoped_loaders() -> None:
+    workspace_loader = APP_JS.split("async function loadWorkspace()", 1)[1].split(
+        "async function initialize()", 1
+    )[0]
+    assert workspace_loader.index("await loadSettings();") < workspace_loader.index(
+        "await Promise.all([loadWorkload(), loadArtifacts()"
+    )
+    assert "empty connection fingerprint" in workspace_loader
 
 
 def test_durable_analytics_expose_explicit_splunk_targets_and_provenance() -> None:

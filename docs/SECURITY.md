@@ -27,6 +27,8 @@ The local prototype defaults to localhost, opt-in demo mode, local specialist ex
 - Workload decisions retain operation metadata and a query fingerprint, never raw SPL. SignalRoom cost units are deterministic comparisons rather than claims about scan bytes, execution time, or Splunk scheduler cost.
 - Uploaded context is restricted to text-like extensions and 2 MB.
 - Retrieved context is framed as untrusted evidence, not instructions.
+- Guided and full workspace modes are browser-local presentation choices. They do not alter server authorization,
+  tool authority, model policy, workload gates, tenant scope, audit behavior, or the availability of APIs/MCP tools.
 - External fonts and script CDNs are not used.
 - Demo mode allows validation without live infrastructure.
 - SecureBERT downloads are explicit, use safetensor snapshots, resolve an immutable publisher revision, and record a local installation manifest.
@@ -63,6 +65,10 @@ The local prototype defaults to localhost, opt-in demo mode, local specialist ex
 - Detection runtime verification is staged only after an exact enabled definition and unique saved-search name are observed. It creates an unapproved, bounded `_internal` scheduler draft in the existing single-execution queue; SignalRoom never runs it implicitly. Interpretation requires the unchanged fingerprint, a preserved artifact completed after the deployment snapshot, and an exact runtime-check digest. Scheduler evidence remains name-bound and cannot prove firing or delivery.
 - Generated Splunk saved-search stanzas are disabled and unscheduled. SignalRoom never deploys or enables the exported detection and does not acquire Splunk write authority through this workflow.
 - Partial discovery cannot resolve an existing correlated signal; absence is treated as unknown until an authoritative collection covers that signal class.
+- SPL authoring uses an exact-revision schema context rather than raw event examples. Saved-search bodies and filter literals are reduced to identifier relationships; evidence excerpts, `_raw`, and live result values are excluded. Pasted event-shaped samples are deterministically replaced with marked synthetic shapes before typed model planning.
+- A model may propose one to four typed SPL intents, but only the allowlisted deterministic compiler emits a `context-compiled` query. The receipt remains explicitly untrusted for execution until query intelligence, Splunk parser validation where available, analyst approval, bounded MCP execution, and result preservation complete.
+- The validation adapter discovers parser and SAIA capabilities on the exact immutable Splunk connection. These preflight calls receive only SPL and execution bounds. They receive no `_raw`, result rows, evidence excerpts, or pasted sample values. SAIA output is advisory and cannot replace the staged query. A parser pass requires an explicit positive decision; unavailable or ambiguous parser responses remain visibly advisory.
+- Post-execution result contracts retain field names and primitive types only. Result values remain confined to the separately bounded local evidence preview and are not copied into the shape receipt or future authoring context.
 - Hugging Face cloud inference has a separate disabled/ask/allow policy and is never implied by local model installation.
 
 ## Known limitations
@@ -75,7 +81,7 @@ The local prototype defaults to localhost, opt-in demo mode, local specialist ex
 - Recovery packages intentionally contain the local Fernet key beside its encrypted vault inside a stronger password-encrypted envelope. Anyone with the package and password can recover its credentials. SignalRoom cannot recover a lost package password, and environment-managed secrets and private-CA file contents must be restored independently.
 - SignalRoom logout revokes the local session but does not initiate provider-wide OIDC logout. A still-active provider SSO session may authenticate again. Provider-side group removal is evaluated on the next enterprise login; if that newly verified identity fails admission, SignalRoom revokes its older local sessions. Use local deactivation when revocation cannot wait for another provider login. The effective-access preview uses last verified claims and is advisory until fresh sign-in.
 - The app does not terminate HTTPS itself. Session cookies receive the `Secure` attribute only when the request scheme is HTTPS; configure and validate trusted proxy behavior in the deployment environment.
-- SPL command blocking is a guardrail, not a parser or authorization boundary. Enforce read-only roles in Splunk.
+- SPL command blocking and context compilation are guardrails, not a Splunk parser or authorization boundary. The current context engine proves catalog membership and compiler structure, not field population, command semantics on a specific Splunk release, or runtime cost. Enforce read-only roles and quotas in Splunk and require bounded validation before operational use.
 - SignalRoom workload estimation is static and cannot know real index volume, bucket locality, acceleration state, concurrent non-SignalRoom searches, or Splunk scheduler decisions. Keep authoritative quotas and workload pools in Splunk.
 - Model output can contain incorrect or unsafe recommendations. Human verification remains required.
 - Model approval is a local operator attestation, not a publisher signature, license review, malware scan, training-data assessment, or vulnerability verdict. Protect and independently inventory `data/model_trust_signing.key`; changing or losing it invalidates the local approval authority.

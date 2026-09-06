@@ -351,10 +351,13 @@ class ModelTournamentService:
         previous_baseline = self.benchmark_store.baseline(
             suite_id=tournament["suite_id"]
         )
+        previous_lifecycle = profile.lifecycle
+        profile.lifecycle = "active"
         setattr(settings, target, profile_id)
         self.config.save(settings)
         accepted = self.benchmark_store.accept_baseline(candidate_run["id"])
         if accepted is None:
+            profile.lifecycle = previous_lifecycle
             setattr(settings, target, current_assignment)
             self.config.save(settings)
             raise ValueError("The winner is no longer eligible to become the benchmark baseline")
@@ -435,6 +438,15 @@ class ModelTournamentService:
             await self.model_trust.require_profile(
                 previous.id, "tournament rollback"
             )
+        promoted_profile = next(
+            (item for item in settings.models if item.id == promotion["profile_id"]),
+            None,
+        )
+        if (
+            promoted_profile is not None
+            and promoted_profile.provenance == "Operator-staged installed Ollama model"
+        ):
+            promoted_profile.lifecycle = "candidate"
         setattr(settings, target, previous.id)
         self.config.save(settings)
         previous_baseline_id = promotion["previous_baseline_run_id"] or None
@@ -442,6 +454,8 @@ class ModelTournamentService:
             previous_baseline_id, suite_id=suite_id
         )
         if previous_baseline_id and restored is None:
+            if promoted_profile is not None:
+                promoted_profile.lifecycle = "active"
             setattr(settings, target, promotion["profile_id"])
             self.config.save(settings)
             self.benchmark_store.set_baseline(

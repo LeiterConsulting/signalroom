@@ -156,6 +156,13 @@ async def test_exact_tournament_promotion_and_rollback_restore_route_and_baselin
     tmp_path, monkeypatch
 ):
     config, benchmark_store, store, service = tournament_service(tmp_path)
+    staged_settings = config.load()
+    staged_profile = next(
+        item for item in staged_settings.models if item.id == "foundation-sec-instruct"
+    )
+    staged_profile.lifecycle = "candidate"
+    staged_profile.provenance = "Operator-staged installed Ollama model"
+    config.save(staged_settings)
     monkeypatch.setattr(
         "splunk_security_agent.benchmarks.tournament.suite_version",
         lambda: "suite-contract",
@@ -180,6 +187,9 @@ async def test_exact_tournament_promotion_and_rollback_restore_route_and_baselin
     )
 
     assert config.load().security_reasoning_model == "foundation-sec-instruct"
+    assert next(
+        item for item in config.load().models if item.id == "foundation-sec-instruct"
+    ).lifecycle == "active"
     assert promoted["promotion"]["status"] == "active"
     assert promoted["promotion"]["previous_profile_id"] == "foundation-sec"
     assert benchmark_store.baseline()["profile_id"] == "foundation-sec-instruct"
@@ -188,6 +198,9 @@ async def test_exact_tournament_promotion_and_rollback_restore_route_and_baselin
 
     assert rolled_back["promotion"]["status"] == "rolled-back"
     assert config.load().security_reasoning_model == "foundation-sec"
+    assert next(
+        item for item in config.load().models if item.id == "foundation-sec-instruct"
+    ).lifecycle == "candidate"
     assert benchmark_store.baseline() is None
 
 

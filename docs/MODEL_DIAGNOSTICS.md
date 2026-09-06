@@ -15,6 +15,10 @@ signalroom-diagnose-all.log
 
 Run it after reproducing a model setup problem and attach that file to the issue or development conversation. Collect it before restarting SignalRoom when the existing service-log tail is relevant, because the normal lifecycle manager starts each process with fresh `signalroom.log` and `signalroom.err.log` files.
 
+In the web workspace, begin with **Settings → Models** for readiness and installation. Use **Models → Show all
+tools** for artifact trust, evaluation, promotion, MLTK inventory, and publisher review. The guided/full choice
+does not change what this diagnostic collects.
+
 ## What it checks
 
 The collector records explicit `PASS`, `WARN`, `FAIL`, and `INFO` observations for:

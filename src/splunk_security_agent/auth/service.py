@@ -23,6 +23,7 @@ ADMIN_MUTATION_PREFIXES = (
     "/api/auth/oidc/",
     "/api/model-setup/pull",
     "/api/model-setup/activate",
+    "/api/model-lifecycle/",
     "/api/model-capabilities/time-series/runtime",
     "/api/model-trust",
     "/api/benchmarks/suites",
@@ -426,7 +427,10 @@ class AuthService:
         if any(path.startswith(prefix) for prefix in CONNECTION_MUTATION_PREFIXES):
             return True
         return (
-            (path.startswith("/api/validations/") and path.endswith("/run/stream"))
+            (
+                path.startswith("/api/validations/")
+                and path.endswith(("/preflight/stream", "/run/stream"))
+            )
             or (path.startswith("/api/detections/") and "/deployment-verification/refresh" in path)
             or path in {"/api/test-connection", "/mcp"}
         )

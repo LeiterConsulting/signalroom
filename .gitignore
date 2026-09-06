@@ -32,3 +32,4 @@ data/upgrade/
 signalroom.log
 signalroom.err.log
 signalroom-diagnose-all.log
+.signalroom.server.*.log

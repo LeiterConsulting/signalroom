@@ -6,12 +6,33 @@ This is a focused reimplementation inspired by [LeiterConsulting/splunk-discover
 
 For a quick technical walkthrough of how a prompt becomes a governed Splunk/MCP and model-backed response, see [How SignalRoom model orchestration works — TL;DR](docs/MODEL_ORCHESTRATION_TLDR.md).
 
+New users should begin with the [SignalRoom user guide](docs/USER_GUIDE.md). The interface starts in a guided,
+outcome-focused view and keeps the complete operational workspace one deliberate action away.
+
+## Start here
+
+| If you want to… | Begin in… | SignalRoom gives you… |
+|---|---|---|
+| Investigate activity | **Investigate** | An evidence-backed answer, bounded tool activity, and next actions |
+| Understand security visibility | **Discovery** | Reusable posture context, coverage gaps, and prioritized findings |
+| Coordinate and hand off work | **Cases** | Ownership, evidence health, decisions, and a durable timeline |
+| Build better detections | **Detections** | Validated evidence, versioned SPL, review, and safe handoff |
+| Curate reusable evidence | **Knowledge** | Tenant-scoped runbooks, intelligence, references, and known-good SPL |
+| Operate local AI | **Models** | Readiness, trust, staged evaluation, promotion, and rollback |
+
+Guided view explains the recommended three-step flow and role-specific value on every operational page. **Show all
+tools** reveals every advanced capability without changing permissions, data, routing, or safety policy.
+
+<details>
+<summary><strong>Complete capability inventory</strong></summary>
+
 ## What works now
 
-- A polished local web workspace with setup, investigation chat, discovery, durable cases, context, and model views
+- A guided local web workspace with Settings, investigation chat, discovery, durable cases, Knowledge, and model views; the complete operational surface remains available in full view
 - Splunk MCP tool discovery and alias resolution for common server naming differences
 - Immutable Splunk connection revisions and tenant-scoped durable workflow bindings that fail closed before a call when any target moves
 - An explicit Splunk-scope selector with tenant-gated artifacts, hybrid RAG, discovery state, investigation memory, cases, exports, and SignalRoom MCP tools
+- An exact-revision SPL Context Engine that ranks discovered indexes, sourcetypes, fields, and knowledge-object relationships for the question; replaces pasted event samples with synthetic shapes; converts local-model intent into deterministic bounded SPL; and exposes a trust receipt before the multi-block **Try this SPL in Splunk** validation gate
 - Admin-only, content-free physical-isolation readiness plans that bind an exact Splunk revision, inventory tenant row/file counts, and expose every blocking store without moving data or changing routing
 - Digest-verified tenant generations and runtime routing for Evidence, Cases, Manual Discovery, Validations, Detections, Forecast Experiments, Assurance Responses, and Delivery History, with stale-source rejection and zero-write rollback to a sealed shared source
 - Layered Splunk MCP diagnostics across configuration, DNS, TCP, TLS identity, authentication, and depth-specific tool contracts
@@ -22,7 +43,7 @@ For a quick technical walkthrough of how a prompt becomes a governed Splunk/MCP 
 - Delta-aware model-team reuse with exact input fingerprints and visible cache provenance
 - Read-only Splunk MLTK model inventory with definition drift and endpoint-scoped dependency checks
 - Opt-in, explicitly targeted continuous assurance with durable schedules, cross-run signal correlation, response packages, and hard Splunk-call budgets
-- A restart-safe validation queue with bounded SPL preview, explicit analyst approval, expiring assurance drafts, live progress, and preserved results
+- A restart-safe validation queue with exact-target MCP capability discovery, native Splunk parser checks when advertised, optional SAIA critique, bounded SPL preview, explicit analyst approval, live progress, and field-shape receipts on preserved results
 - Immutable Splunk/tenant ownership across validation execution and detection engineering, including tenant-bounded reuse and fail-closed target revalidation
 - An evidence-first agent with bounded multi-tool plans, investigation modes, and a structured ledger
 - Durable local investigation cases with an evidence-health cockpit, next-best actions, case-scoped context packets, chronological timelines, and handoff exports
@@ -48,6 +69,8 @@ For a quick technical walkthrough of how a prompt becomes a governed Splunk/MCP 
 - A safe demo workspace that runs without Splunk, Ollama, or Hugging Face
 - An outward MCP Streamable HTTP-compatible JSON-RPC endpoint at `POST /mcp`
 
+</details>
+
 ## Quick start
 
 Python 3.11 or later is the only prerequisite. The universal installer creates an isolated environment, installs dependencies, starts SignalRoom in the background, checks its health, and prints the workspace URL.
@@ -71,7 +94,7 @@ chmod +x install.sh
 ./install.sh
 ```
 
-Open the URL printed by the installer—normally [http://localhost:8003](http://localhost:8003). Demo mode is opt-in during Setup; a new installation does not silently substitute synthetic data for a live connection.
+Open the URL printed by the installer—normally [http://localhost:8003](http://localhost:8003). Demo mode is opt-in in Settings; a new installation does not silently substitute synthetic data for a live connection.
 
 Lifecycle commands intentionally mirror the Splunk Discovery Tool:
 
@@ -91,6 +114,8 @@ Lifecycle commands intentionally mirror the Splunk Discovery Tool:
 
 See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for lifecycle operations and
 [docs/UPGRADES.md](docs/UPGRADES.md) for the admitted upgrade, rollback, retained-data, and container matrix.
+The [documentation map](docs/README.md) routes users, operators, reviewers, and developers to the right level of
+detail without requiring them to read this entire reference.
 
 ## Optional named access
 
@@ -98,7 +123,7 @@ A new install starts in **local single-user mode**. No login is required, the lo
 authority, and demo/POC setup remains as simple as opening the installer URL. This mode is intended for one trusted
 operator on a loopback-bound service.
 
-When the workspace is ready to be shared, open **Setup → Access control · optional** and create the first named
+When the workspace is ready to be shared, open **Settings → Platform administration → Access** and create the first named
 administrator. SignalRoom immediately establishes that administrator's session and begins enforcing:
 
 - **Viewer:** read-only access to workspace evidence and state
@@ -138,18 +163,18 @@ event. OIDC tenant claims are an identity-admission boundary, not multi-tenant d
 
 ## Connect Splunk
 
-Open **Setup** and configure:
+Open **Settings → Splunk** and configure:
 
 1. A Splunk MCP HTTP endpoint
 2. A bearer token with the narrowest useful read-only permissions
 3. The **Verify TLS certificates** toggle; keep it enabled and provide a private CA bundle where possible, or disable it explicitly for a trusted self-signed development endpoint
 4. Disable demo mode and test the connection
 
-To add another Splunk estate, use **Setup → Connection identity and tenant scope → Add Splunk
+To add another Splunk estate, use **Settings → Instances → Add Splunk
 instance**. Save a stable alias, a distinct tenant scope, endpoint/TLS trust, and encrypted MCP token.
 The alias is created disabled. Run its streamed diagnostics, explicitly enable the successful exact
 revision, and—when optional RBAC is active—assign it to the appropriate named users. It will then appear
-in the global scope selector for Investigate, manual Discovery, Context, and Cases.
+in the global scope selector for Investigate, manual Discovery, Knowledge, and Cases.
 
 The diagnostic action evaluates configuration, DNS, TCP reachability, TLS identity, MCP initialization,
 authentication, and the read-only tool contract required by each discovery depth. Results are secret-free and
@@ -182,7 +207,7 @@ each exact compact result from its tenant-routed discovery store and verifies bo
 rematerializing the comparison. Metrics, findings, labels, raw rows, and model output are never copied
 into the global packet index.
 
-For deployments evaluating stronger data boundaries, **Setup → Physical tenant isolation readiness**
+For deployments evaluating stronger data boundaries, **Settings → Instances → Physical tenant isolation readiness**
 builds a review-only plan for an admitted tenant and immutable Splunk revision. The planner reads SQLite
 schema and row counts and streams manifested files through SHA-256 without parsing or exposing them. It does
 not copy data, create a tenant database, or change runtime routing. Its blockers identify stores that still
@@ -223,7 +248,7 @@ SIGNALROOM_AUDIT_HEC_TOKEN=...
 
 ## Connect a detection repository
 
-Repository handoff is optional and disabled by default. In **Setup → Detection repository handoff**, choose an
+Repository handoff is optional and disabled by default. In **Settings → Platform administration → Repository**, choose an
 absolute local Git repository root, base branch or ref, branch prefix, remote name, and commit identity. Use the
 read-only inspection action before saving. Remote push and draft-pull-request permissions are independent,
 off-by-default controls; enabling them never makes an export, preview, or local commit perform those later
@@ -266,7 +291,7 @@ general and security-reasoning defaults; the additional profiles remain explicit
 
 Model identifiers are configuration, not hard-coded trust decisions. Review each model card and license, pin an approved revision, and use your organization’s model intake process before production deployment. The app works with lexical FTS retrieval when the optional embedding model is unavailable.
 
-The easiest path is **Setup → Model services**. SignalRoom detects Ollama and the local Transformers runtime, shows every profile as ready or missing, and downloads only after an explicit click. Installing a SecureBERT profile adds the local runtime when necessary, resolves an immutable publisher revision, downloads safetensor assets into `data/models`, and records a local manifest. Opening Setup never starts a model download.
+The easiest path is **Settings → Models**. SignalRoom detects Ollama and the local Transformers runtime, shows every profile as ready or missing, and downloads only after an explicit action. Installing a SecureBERT profile adds the local runtime when necessary, resolves an immutable publisher revision, downloads safetensor assets into `data/models`, and records a local manifest. Opening Settings never starts a model download.
 
 The **Models → Check for updates** action is also read-only. Local Transformers snapshots are compared
 to their recorded immutable Hub revision. Hugging Face-backed Ollama models become trackable after an
@@ -286,6 +311,21 @@ operator approval—not publisher authorship, license acceptance, or vulnerabili
 plain Ollama library name, `ollama-library` is the configured namespace assertion; the approved local
 content digest remains the identity boundary.
 
+The **Models → Model lifecycle** workspace keeps three independent states visible: local runtime
+availability, exact artifact trust, and upstream publisher currency. An unavailable Ollama endpoint does
+not imply that the publisher catalog changed, and a current publisher revision does not imply that a local
+artifact is approved. The publisher inventory is revision-aware and paginated; new, missing, revised, gated,
+task-changed, or license-changed repositories can be staged as local intake checklists without downloading
+anything.
+
+An Ollama model that is already installed but not configured can be staged as a temporary evaluation profile.
+Staging never changes chat or security routing, and staged profiles are rejected by ordinary chat even when a
+client submits their IDs directly. **Evaluate against current route** runs the staged model and current control
+through the same synthetic suite, then uses the existing blind-review, artifact-approval, exact-fingerprint,
+promotion, and rollback gates. Promotion converts the winner into an active profile; rollback returns an
+operator-staged winner to candidate status. Discarding a candidate removes only SignalRoom's temporary profile,
+not its Ollama files or durable tournament history.
+
 The **Models → Scan MLTK models** action inventories models stored inside the connected Splunk instance
 using `| listmodels | head 500`. It records new, changed, unchanged, and previously observed-but-missing
 definitions and identifies declared Ollama dependencies. A backing model that is not observed is labeled
@@ -298,6 +338,13 @@ The bottom of **Models** is an admission queue rather than a list of implied int
 model is assessed against first-party source, local runtime, accepted input, required output, evaluation, and
 automatic-routing gates. The read-only update check observes the current immutable Hub revision for admitted
 profiles and evaluated candidates without downloading them.
+
+The publisher catalog was re-reviewed on **2026-09-05**. The shipped Foundation-Sec chat profiles, SecureBERT
+2.0 specialists, and Cisco Time Series Model 1.0 remain current; CTSM 1.0 already supersedes the deprecated
+1.0-preview release. Antares 1B is now tracked as a promising but blocked research candidate for read-only
+repository vulnerability localization. It is not installed, routable, or presented as an existing capability.
+See [Cisco and Splunk model catalog review](docs/MODEL_CATALOG.md) for exact observed revisions, exclusions, and
+the admission work required before Antares can execute.
 
 SecureBERT code vulnerability detection is admitted as an opt-in local preview. An analyst must paste a C, C++,
 or Python snippet explicitly; SignalRoom rejects SPL, Splunk inventory, event text, and prose before inference.
@@ -314,7 +361,7 @@ context would be imputed. It withholds
 known points for a backtest against a naive last-value baseline, then returns mean, p10, p50, and p90 forecasts with
 the source SPL, time bounds, query fingerprint, prepared-series SHA-256, runtime revision, and local execution
 boundary. A result becomes eligible only for analyst review; it cannot automatically change an alert, threshold,
-or capacity decision. Source rows and forecasts are not added to Context unless the analyst explicitly preserves
+or capacity decision. Source rows and forecasts are not added to Knowledge unless the analyst explicitly preserves
 a bounded review to a case.
 
 Completed and data-quality-blocked runs are also retained in `data/time_series_experiments.db` as immutable local
@@ -566,7 +613,7 @@ that still requires the analyst's normal approve-and-run flow.
 
 Submitting a passing version for review freezes its current SHA-256. An approval or changes-requested decision
 must name that exact hash, and approval atomically accepts the passing gate as the next regression baseline.
-Approved versions are indexed into local Context and, when linked to a case, recorded as a case decision. Export
+Approved versions are indexed into local Knowledge and, when linked to a case, recorded as a case decision. Export
 produces a ZIP with `detection.yml`, a disabled `savedsearches.conf` stanza, a review README, and a file-hash
 manifest containing the accepted gate provenance. The package contains no raw Splunk rows, sets `disabled = 1`
 and `enableSched = 0`, and grants SignalRoom no authority to deploy or enable the search in Splunk.
@@ -754,6 +801,15 @@ Assurance-generated drafts carry a seven-day expiry, a package reference, and a 
 Expiry invalidates an unexecuted draft or approval without modifying completed evidence. A recurring package reuses
 an existing live fingerprint instead of creating duplicate validation work.
 
+Before approval, **Validate with Splunk** discovers capabilities on the draft's immutable connection revision. If
+the MCP server advertises a compatible parser, SignalRoom submits only the SPL and its bounds and requires an
+explicit valid result before showing a parser pass. An optional Splunk AI Assistant critique can be requested from
+the same screen; it receives no event rows or raw samples and cannot rewrite the approved query. When either tool
+is absent, the receipt says so instead of simulating validation. The analyst may still approve a bounded check,
+but the interface labels it as requiring runtime proof. After execution, SignalRoom compares returned field names
+and types with the context compiler's typed result contract and preserves a value-free shape receipt alongside the
+bounded evidence preview.
+
 Approved detections add a snapshot-bound runtime path after explicit Splunk definition verification. SignalRoom
 stages—but does not approve or run—a one-row scheduler-health validation for the uniquely observed saved-search
 name. Once the normal queue preserves that exact result, the detection workspace interprets executions, latest
@@ -827,7 +883,7 @@ production increment is deployment-specific sandbox restore and adversarial mult
 
 ### Release-candidate quality gate
 
-Setup → **Release readiness** evaluates the exact shipped interface and reports promotion blockers in place. The
+**Settings → Platform administration → Release** evaluates the exact shipped interface and reports promotion blockers in place. The
 Settings modal has nine keyboard-operable section targets; its fixed header updates to name the visible section as
 the independently scrolling content moves. Each settings area is visually bounded, wide layouts no longer squeeze
 multi-column controls into a narrow modal, and every disclosure has an explicit chevron state and focus ring.
@@ -883,9 +939,9 @@ Relative units are a deterministic comparison derived from SPL shape, explicit i
 and known expensive commands. They are not predicted scan bytes, search runtime, or an authoritative Splunk
 scheduler estimate. Splunk roles, workload pools, quotas, and search limits remain the resource boundary.
 
-### Context
+### Knowledge
 
-Context is the managed evidence available to retrieval. Artifacts can be filtered, searched, inspected in
+Knowledge is the managed evidence available to retrieval. Artifacts can be filtered, searched, inspected in
 full, deep-linked by opaque ID, reused in an investigation, or converted into a validation plan. Runbooks and
 threat intelligence remain unverified context until current Splunk evidence supports them.
 The active Splunk scope gates artifact listing, mutation, lexical and semantic retrieval, embedding state, and
@@ -896,7 +952,7 @@ SignalRoom MCP access. Each card exposes its alias, tenant, and immutable connec
 Cases turn transient investigation activity into a durable local record. Each case has an owner, severity,
 status (`open`, `investigating`, `contained`, `monitoring`, or `closed`), executive summary, and tags. Analysts
 can add notes, observations, hypotheses, actions, decisions, context, and evidence to a chronological timeline.
-Evidence-led actions on the ledger, Discovery findings and hypotheses, and Context artifacts can all add an
+Evidence-led actions on the ledger, Discovery findings and hypotheses, and Knowledge artifacts can all add an
 attributed item directly to an existing case or create a new one. Case links use opaque IDs and survive reloads.
 Case listing, mutation, export, and cockpit evidence resolution are limited to the selected tenant scope.
 
@@ -907,7 +963,7 @@ open tickets, or change Splunk; external workflow automation remains an explicit
 
 ### Control-plane backup and recovery
 
-Setup → **Encrypted control-plane recovery** creates an AES-256-GCM package using a password-derived scrypt key.
+**Settings → Platform administration → Recovery** creates an AES-256-GCM package using a password-derived scrypt key.
 The package contains `config.json`, the paired encrypted credential vault and local vault key, immutable Splunk
 connection identities, RBAC/OIDC policy and identities, and the paired model-trust database/signing identity.
 Environment-managed secrets, private-CA file contents, evidence, cases, discovery results, queues, schedules,
@@ -936,7 +992,7 @@ lost password.
 
 ### Operational recovery and multi-instance acceptance
 
-Setup → **Recovery and multi-instance acceptance** separates observation from drills. Refreshing reads retained
+**Settings → Platform administration → Recovery → Recovery and multi-instance acceptance** separates observation from drills. Refreshing reads retained
 diagnostics, immutable connection revisions, tenant routes, access policy, runtime binding, recovery receipts, and
 worker state; it never contacts Splunk. Each instance has a separate **Run live diagnostics** action so an operator
 can deliberately exercise configuration, DNS, TCP, TLS, MCP authentication, and tool compatibility for that exact
@@ -958,7 +1014,7 @@ exercise required before production promotion.
 
 ### Local retention and cleanup
 
-Setup → **Retention and storage cleanup** gives administrators a read-only inventory before any deletion. Separate
+**Settings → Platform administration → Recovery → Retention and storage cleanup** gives administrators a read-only inventory before any deletion. Separate
 minimum-age and keep-newest controls cover superseded tenant generations, terminal reverse snapshots, encrypted
 recovery exports, and encrypted pre-restore checkpoints. Conservative defaults retain recent material, and cleanup
 never runs automatically.

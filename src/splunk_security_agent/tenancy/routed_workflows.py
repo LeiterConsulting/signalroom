@@ -115,8 +115,25 @@ class RoutedValidationStore(_RoutedWorkflowStore):
     def mark_running(self, task_id: str) -> Any:
         return self._mutate("mark_running", task_id)
 
-    def complete(self, task_id: str, result_count: int, result_preview: list[Any], artifact_id: str) -> Any:
-        return self._mutate("complete", task_id, result_count, result_preview, artifact_id)
+    def set_preflight(self, task_id: str, receipt: dict[str, Any]) -> Any:
+        return self._mutate("set_preflight", task_id, receipt)
+
+    def complete(
+        self,
+        task_id: str,
+        result_count: int,
+        result_preview: list[Any],
+        artifact_id: str,
+        execution_receipt: dict[str, Any] | None = None,
+    ) -> Any:
+        return self._mutate(
+            "complete",
+            task_id,
+            result_count,
+            result_preview,
+            artifact_id,
+            execution_receipt,
+        )
 
     def fail(self, task_id: str, error: str) -> Any:
         return self._mutate("fail", task_id, error)

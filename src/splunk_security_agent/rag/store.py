@@ -197,17 +197,40 @@ class EvidenceStore:
                 )
         return payload
 
-    def list(self, limit: int = 100, tenant_scope_id: str | None = None) -> list[ArtifactRecord]:
+    def list(
+        self,
+        limit: int = 100,
+        tenant_scope_id: str | None = None,
+        connection_alias: str | None = None,
+        connection_fingerprint: str | None = None,
+    ) -> list[ArtifactRecord]:
         with self.connect() as db:
-            if tenant_scope_id is None:
+            if (
+                tenant_scope_id is None
+                and connection_alias is None
+                and connection_fingerprint is None
+            ):
                 rows = db.execute(
                     "SELECT * FROM artifacts ORDER BY updated_at DESC LIMIT ?", (limit,)
                 ).fetchall()
             else:
+                conditions: list[str] = []
+                params: list[Any] = []
+                if tenant_scope_id is not None:
+                    conditions.append("tenant_scope_id=?")
+                    params.append(tenant_scope_id)
+                if connection_alias is not None:
+                    conditions.append("connection_alias=?")
+                    params.append(connection_alias)
+                if connection_fingerprint is not None:
+                    conditions.append("connection_fingerprint=?")
+                    params.append(connection_fingerprint)
+                params.append(limit)
                 rows = db.execute(
-                    """SELECT * FROM artifacts WHERE tenant_scope_id=?
-                    ORDER BY updated_at DESC LIMIT ?""",
-                    (tenant_scope_id, limit),
+                    "SELECT * FROM artifacts WHERE "
+                    + " AND ".join(conditions)
+                    + " ORDER BY updated_at DESC LIMIT ?",
+                    params,
                 ).fetchall()
         return [self._row_to_record(row) for row in rows]
 
@@ -290,7 +313,12 @@ class EvidenceStore:
         return result.rowcount > 0
 
     def search(
-        self, query: str, limit: int = 6, tenant_scope_id: str | None = None
+        self,
+        query: str,
+        limit: int = 6,
+        tenant_scope_id: str | None = None,
+        connection_alias: str | None = None,
+        connection_fingerprint: str | None = None,
     ) -> list[EvidenceRef]:
         terms = []
         for token in re.findall(r"[a-zA-Z0-9_\-.]{3,}", query.lower()):
@@ -312,6 +340,12 @@ class EvidenceStore:
         if tenant_scope_id is not None:
             sql += " AND a.tenant_scope_id=?"
             params.append(tenant_scope_id)
+        if connection_alias is not None:
+            sql += " AND a.connection_alias=?"
+            params.append(connection_alias)
+        if connection_fingerprint is not None:
+            sql += " AND a.connection_fingerprint=?"
+            params.append(connection_fingerprint)
         sql += " ORDER BY rank LIMIT ?"
         params.append(limit)
         try:
@@ -379,13 +413,24 @@ class EvidenceStore:
         return ("… " if start else "") + excerpt + (" …" if end < len(normalized) else "")
 
     def pending_embeddings(
-        self, model_profile: str, limit: int = 32, tenant_scope_id: str | None = None
+        self,
+        model_profile: str,
+        limit: int = 32,
+        tenant_scope_id: str | None = None,
+        connection_alias: str | None = None,
+        connection_fingerprint: str | None = None,
     ) -> list[tuple[str, str]]:
         scope_sql = ""
         params: list[Any] = [model_profile]
         if tenant_scope_id is not None:
             scope_sql = " AND a.tenant_scope_id=?"
             params.append(tenant_scope_id)
+        if connection_alias is not None:
+            scope_sql += " AND a.connection_alias=?"
+            params.append(connection_alias)
+        if connection_fingerprint is not None:
+            scope_sql += " AND a.connection_fingerprint=?"
+            params.append(connection_fingerprint)
         params.append(limit)
         with self.connect() as db:
             rows = db.execute(
@@ -434,7 +479,11 @@ class EvidenceStore:
         }
 
     def semantic_candidates(
-        self, limit: int = 24, tenant_scope_id: str | None = None
+        self,
+        limit: int = 24,
+        tenant_scope_id: str | None = None,
+        connection_alias: str | None = None,
+        connection_fingerprint: str | None = None,
     ) -> list[EvidenceRef]:
         sql = """
                 SELECT c.id, c.title, c.content, a.source, a.kind,
@@ -445,6 +494,16 @@ class EvidenceStore:
         if tenant_scope_id is not None:
             sql += " WHERE a.tenant_scope_id=?"
             params.append(tenant_scope_id)
+        if connection_alias is not None:
+            sql += " AND a.connection_alias=?" if params else " WHERE a.connection_alias=?"
+            params.append(connection_alias)
+        if connection_fingerprint is not None:
+            sql += (
+                " AND a.connection_fingerprint=?"
+                if params
+                else " WHERE a.connection_fingerprint=?"
+            )
+            params.append(connection_fingerprint)
         sql += " ORDER BY a.updated_at DESC, c.ordinal LIMIT ?"
         params.append(limit)
         with self.connect() as db:
@@ -478,6 +537,8 @@ class EvidenceStore:
         model_profile: str,
         limit: int = 6,
         tenant_scope_id: str | None = None,
+        connection_alias: str | None = None,
+        connection_fingerprint: str | None = None,
     ) -> list[EvidenceRef]:
         if not query_vector:
             return []
@@ -493,6 +554,12 @@ class EvidenceStore:
             if tenant_scope_id is not None:
                 sql += " AND a.tenant_scope_id=?"
                 params.append(tenant_scope_id)
+            if connection_alias is not None:
+                sql += " AND a.connection_alias=?"
+                params.append(connection_alias)
+            if connection_fingerprint is not None:
+                sql += " AND a.connection_fingerprint=?"
+                params.append(connection_fingerprint)
             rows = db.execute(sql, params).fetchall()
         query_norm = math.sqrt(sum(value * value for value in query_vector)) or 1
         scored: list[tuple[float, sqlite3.Row]] = []
