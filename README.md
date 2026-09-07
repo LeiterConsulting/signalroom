@@ -293,6 +293,18 @@ Model identifiers are configuration, not hard-coded trust decisions. Review each
 
 The easiest path is **Settings → Models**. SignalRoom detects Ollama and the local Transformers runtime, shows every profile as ready or missing, and downloads only after an explicit action. Installing a SecureBERT profile adds the local runtime when necessary, resolves an immutable publisher revision, downloads safetensor assets into `data/models`, and records a local manifest. Opening Settings never starts a model download.
 
+When one of those installs fails without a useful explanation, **Guided installation troubleshooting** proves
+one selected Ollama path and one selected local Transformers path in the same host-side run. It continues to the
+second path after a first-path failure, runs only synthetic capability checks, and returns stage-specific
+remediation plus a credential-free report. If the initial failure indicates that a narrow package index, mirror,
+or stale source credential could not resolve a public dependency within 45 seconds, the explicitly confirmed drill retries once
+with isolated public PyPI or the admitted public Hugging Face repository. The report records that fallback and
+confirms no credentials were sent; TLS verification is not relaxed. The drill never changes active routing,
+model trust, or cloud policy.
+
+An explicit one-profile local specialist install uses the same fail-fast public-source recovery. Merely opening
+Models, checking readiness, or running `--diagnose_all` remains read-only and never invokes the fallback.
+
 The **Models → Check for updates** action is also read-only. Local Transformers snapshots are compared
 to their recorded immutable Hub revision. Hugging Face-backed Ollama models become trackable after an
 explicit SignalRoom pull binds the resulting local digest to the Hub revision. Older/pre-existing Ollama
@@ -462,6 +474,10 @@ If model installation or readiness is unclear on macOS or Linux, run:
 ```
 
 The command makes no configuration changes and installs or downloads nothing. It tests the host and virtual-environment architecture, dependency consistency, binary-wheel availability, public Hugging Face model metadata, local model artifacts, Ollama CLI/app/process/HTTP state, the running SignalRoom readiness API when available, and redacted tails of the existing service logs. The attachment-friendly result is written to `signalroom-diagnose-all.log`; a non-zero exit means at least one blocker was observed. See [Model installation diagnostics](docs/MODEL_DIAGNOSTICS.md) for the complete contract.
+
+Use the read-only command to collect evidence before changing the host. Use the separately confirmed
+**Settings → Models → Guided installation troubleshooting** action when SignalRoom should attempt the installs,
+exercise both local runtime paths, and recommend a known shipped/configured alternative.
 
 The equivalent manual commands are:
 

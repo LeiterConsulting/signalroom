@@ -32,6 +32,13 @@ The local prototype defaults to localhost, opt-in demo mode, local specialist ex
 - External fonts and script CDNs are not used.
 - Demo mode allows validation without live infrastructure.
 - SecureBERT downloads are explicit, use safetensor snapshots, resolve an immutable publisher revision, and record a local installation manifest.
+- Guided installation troubleshooting is an explicit administrator mutation that may install one selected
+  Ollama model and one selected local Transformers specialist. It uses synthetic probes, retains no model output
+  or investigation data in its report, and cannot change model routing, trust enforcement, or cloud policy.
+- A resolution/authentication-style failure during that guided action or another explicit local-specialist install
+  may trigger one credential-free public-only retry. pip runs isolated against `https://pypi.org/simple`; admitted public model retrieval uses
+  `https://huggingface.co` with no saved token. The receipt records the retry. TLS verification remains enabled,
+  and TLS, storage, or filesystem failures never use this fallback.
 - Model freshness checks are read-only. They compare recorded immutable revisions and local Ollama digests without pulling, loading, unloading, or swapping models; unprovable provenance is labeled untracked.
 - Model artifact trust defaults to non-blocking audit mode. Exact publisher, immutable revision, runtime, and local content digest identities can receive an explicit operator approval signed with a persistent local Ed25519 key. Enforced mode requires trusted active routes and fails closed for activation, accepted benchmark baselines, tournament promotion, and rollback; artifact drift requires re-evaluation and re-approval.
 - Splunk MLTK scans use only `listmodels`, retain local definition fingerprints, and perform zero model writes. Dependency comparisons are explicitly scoped to SignalRoom's configured Ollama endpoint.

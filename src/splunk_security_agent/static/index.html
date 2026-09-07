@@ -636,6 +636,16 @@
               <div class="profile-readiness" id="hfProfileReadiness"></div>
             </article>
           </div>
+          <section class="model-setup-doctor" id="modelSetupDoctor" aria-labelledby="modelSetupDoctorTitle">
+            <header><div><span>GUIDED INSTALLATION TROUBLESHOOTING</span><h4 id="modelSetupDoctorTitle">Prove both local model paths on this machine</h4><p>Select one Ollama profile and one local Transformers specialist. SignalRoom checks the host, installs either model only when missing, runs a synthetic local capability check, and explains the precise failing layer.</p></div><span class="subtle-pill" id="modelSetupDoctorStatus">Not run</span></header>
+            <div id="modelSetupDoctorControls" class="model-setup-doctor-form" role="group" aria-label="Guided model installation checks">
+              <label><span>Ollama model to prove</span><select id="modelSetupOllamaProfile" required></select><small>Downloads through the configured Ollama endpoint only when absent.</small></label>
+              <label><span>Local specialist to prove</span><select id="modelSetupLocalProfile" required></select><small>Downloads from Hugging Face, then performs local-only inference on synthetic input.</small></label>
+              <button class="button primary" type="button" id="runModelSetupDoctor">Test and install both</button>
+            </div>
+            <div class="model-setup-consent" role="note"><b>Explicit, potentially large download</b><span>This can install Python inference packages and model files. If a configured development index or mirror fails to resolve a public dependency within 45 seconds, the drill retries once against public PyPI or public Hugging Face without credentials and records that decision. It never changes active routing, model trust, or cloud policy.</span></div>
+            <div class="model-setup-doctor-result" id="modelSetupDoctorResult" aria-live="polite"><div class="empty-inline compact-empty">Run the guided check when an installation fails without a useful explanation.</div></div>
+          </section>
           <div class="form-grid">
             <label class="full"><span>Ollama endpoint</span><input id="ollamaEndpoint" type="url" placeholder="http://localhost:11434"></label>
             <label><span>General Ollama model</span><input id="generalModelId" list="ollamaInstalledModels" placeholder="llama3.1:8b"></label>

@@ -325,6 +325,11 @@ class ModelPullRequest(BaseModel):
     profile_id: str
 
 
+class ModelSetupTroubleshootRequest(BaseModel):
+    ollama_profile_id: str = Field(default="ollama-general", min_length=1, max_length=160)
+    local_profile_id: str = Field(default="securebert-ner", min_length=1, max_length=160)
+
+
 class ModelActivateRequest(BaseModel):
     profile_id: str
     unload_other_signalroom_models: bool = True

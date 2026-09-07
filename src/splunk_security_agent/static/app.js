@@ -6,7 +6,7 @@ const state = {
   contextItems: [], editingArtifactId: null, editingCaseItemId: null, demoTourStep: -1,
   modelRecommendations: {}, splCandidateGroups: {}, activeSplCandidates: [],
   splCandidateIntelligence: {}, validations: [], editingValidationId: null,
-  modelUpdates: null, modelCatalog: null, modelTrust: null, splunkModels: null,
+  modelUpdates: null, modelCatalog: null, modelTrust: null, modelSetupTroubleshooting: null, splunkModels: null,
   assurance: null, assurancePolicyDirty: false, connectionDiagnostics: null, queryIntelligence: null,
   workload: null,
   feedbackBenchmarks: null, goldenBenchmarks: null, selectedTournamentId: null, deliveryPolicyDirty: false,
@@ -2143,6 +2143,87 @@ function renderModelReadiness() {
   $('#hfProfileReadiness').innerHTML = hf.profiles.map(profile => `
     <div class="profile-ready-row"><span><i class="model-status ${profile.reachable ? 'ok' : ''}"></i><b>${escapeHtml(profile.label)}</b><small>${escapeHtml(profile.model)}</small></span>
     <em>${!hf.selected ? 'Cloud standby' : profile.reachable == null ? 'Token first' : (profile.inference_available ? 'Hosted' : 'Endpoint needed')}</em></div>`).join('');
+  renderModelSetupDoctorOptions();
+}
+
+function renderModelSetupDoctorOptions() {
+  const ollamaSelect = $('#modelSetupOllamaProfile');
+  const localSelect = $('#modelSetupLocalProfile');
+  if (!ollamaSelect || !localSelect || !state.settings) return;
+  const priorOllama = ollamaSelect.value;
+  const priorLocal = localSelect.value;
+  const ollamaProfiles = state.settings.models.filter(item => item.enabled && item.provider === 'ollama');
+  const localProfiles = state.settings.models.filter(item => item.enabled && item.provider === 'huggingface' && ['embedding','ner','reranking','classification'].includes(item.task));
+  ollamaSelect.innerHTML = ollamaProfiles.map(item => `<option value="${escapeHtml(item.id)}">${escapeHtml(item.label)} · ${escapeHtml(item.model)}</option>`).join('');
+  localSelect.innerHTML = localProfiles.map(item => `<option value="${escapeHtml(item.id)}">${escapeHtml(item.label)} · ${escapeHtml(item.task)}</option>`).join('');
+  ollamaSelect.value = ollamaProfiles.some(item => item.id === priorOllama) ? priorOllama : (ollamaProfiles.find(item => item.id === 'ollama-general')?.id || ollamaProfiles[0]?.id || '');
+  localSelect.value = localProfiles.some(item => item.id === priorLocal) ? priorLocal : (localProfiles.find(item => item.id === 'securebert-ner')?.id || localProfiles[0]?.id || '');
+  $('#runModelSetupDoctor').disabled = !ollamaProfiles.length || !localProfiles.length;
+}
+
+function modelSetupAttemptCard(attempt) {
+  const failure = attempt.failure || {};
+  const proof = attempt.proof || {};
+  const publicRetry = attempt.public_retry || {};
+  const proofItems = Object.entries(proof).map(([key,value]) => `<span><b>${escapeHtml(key.replaceAll('_',' '))}</b> ${escapeHtml(String(value))}</span>`).join('');
+  const failureDetail = failure.code ? `<details><summary>Why this failed · ${escapeHtml(failure.code.replaceAll('-',' '))}</summary><p>${escapeHtml(failure.detail || '')}</p>${attempt.diagnostic_tail ? `<pre>${escapeHtml(attempt.diagnostic_tail)}</pre>` : ''}</details>` : '';
+  return `<article class="model-setup-attempt ${escapeHtml(attempt.status || 'queued')}">
+    <i aria-hidden="true"></i><div><header><span>${escapeHtml((attempt.provider || '').replaceAll('-',' '))}</span><b>${escapeHtml(attempt.label || attempt.profile_id || 'Model')}</b><em>${escapeHtml(attempt.status || 'queued')}</em></header>
+    <p>${escapeHtml(attempt.detail || '')}</p><small>${escapeHtml(attempt.model || '')} · stage ${escapeHtml((attempt.stage || 'waiting').replaceAll('-',' '))}${attempt.download_started ? ' · download started' : ' · no download yet'}</small>
+    ${publicRetry.attempted ? `<div class="model-setup-public-retry"><b>Public-only retry ${publicRetry.succeeded ? 'succeeded' : 'attempted'}</b><span>${escapeHtml(publicRetry.source || '')} · credentials sent: no</span></div>` : ''}
+    ${proofItems ? `<div class="model-setup-proof">${proofItems}</div>` : ''}${failureDetail}</div></article>`;
+}
+
+function renderModelSetupDoctor() {
+  const holder = $('#modelSetupDoctorResult'); const status = $('#modelSetupDoctorStatus');
+  if (!holder || !status) return;
+  const job = state.modelSetupTroubleshooting;
+  if (!job) return;
+  const running = ['queued','running'].includes(job.status);
+  status.textContent = running ? `${Number(job.progress || 0)}% · ${String(job.stage || 'checking').replaceAll('-',' ')}` : job.decision === 'ready' ? 'Both paths ready' : 'Attention required';
+  status.className = `subtle-pill ${job.decision === 'ready' ? 'ready' : job.status === 'attention' ? 'attention' : ''}`;
+  const host = job.host || {};
+  const attempts = (job.attempts || []).map(modelSetupAttemptCard).join('');
+  const recommendations = (job.recommendations || []).map(item => `<li class="${item.external ? 'external' : ''}"><div><b>${escapeHtml(item.title || 'Recommended action')}</b><span>${escapeHtml(item.detail || '')}</span>${item.command ? `<code>${escapeHtml(item.command)}</code>` : ''}</div>${item.external ? '<em>External option</em>' : '<em>Local action</em>'}</li>`).join('');
+  const alternatives = (job.alternatives || []).map(item => `<article><div><span>${escapeHtml((item.kind || '').replaceAll('-',' '))}</span><b>${escapeHtml(item.label || '')}</b><small>${escapeHtml(item.model || '')}</small><p>${escapeHtml(item.reason || '')}</p></div>${item.profile_id ? `<button class="button ghost small" type="button" data-use-setup-alternative="${escapeHtml(item.profile_id)}" data-alternative-kind="${escapeHtml(item.kind)}">Select for next check</button>` : ''}</article>`).join('');
+  holder.innerHTML = `<div class="model-setup-doctor-progress"><div><b>${escapeHtml(job.detail || 'Checking model setup')}</b><span>${escapeHtml(host.system || 'Host')} ${escapeHtml(host.machine || '')} · Python ${escapeHtml(host.python_version || 'unknown')} · ${host.architecture_ok === false ? 'architecture mismatch' : 'architecture consistent'}</span></div><div class="operation-progress" role="progressbar" aria-label="Guided model setup progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${Number(job.progress || 0)}"><i style="width:${Number(job.progress || 0)}%"></i></div></div>
+    <div class="model-setup-attempts">${attempts}</div>
+    ${recommendations ? `<section class="model-setup-guidance"><header><div><span>NEXT BEST ACTIONS</span><h5>Fix the observed layer, then retry</h5></div></header><ul>${recommendations}</ul></section>` : ''}
+    ${!running && alternatives ? `<details class="model-setup-alternatives"><summary>SignalRoom-supported alternatives</summary><p>These are shipped or already configured paths—not a claim that an untested artifact works on this host.</p><div>${alternatives}</div></details>` : ''}
+    ${!running ? '<div class="model-setup-report-actions"><button class="button ghost small" type="button" data-copy-model-setup-report>Copy safe troubleshooting report</button><small>No credentials, model output, or investigation data are included.</small></div>' : ''}`;
+}
+
+async function runModelSetupDoctor(event) {
+  event.preventDefault();
+  const ollamaProfileId = $('#modelSetupOllamaProfile').value;
+  const localProfileId = $('#modelSetupLocalProfile').value;
+  if (!ollamaProfileId || !localProfileId) { toast('Choose one profile for each local runtime'); return; }
+  if (!confirm('Run the two-runtime setup drill? Missing profiles may download several gigabytes and local Python inference packages may be installed. Routing and cloud policy will not change.')) return;
+  const button = $('#runModelSetupDoctor'); button.disabled = true; button.textContent = 'Starting checks…';
+  try {
+    let job = await api('/api/model-setup/troubleshoot', {method:'POST',body:JSON.stringify({ollama_profile_id:ollamaProfileId,local_profile_id:localProfileId})});
+    state.modelSetupTroubleshooting = job; renderModelSetupDoctor();
+    while (['queued','running'].includes(job.status)) {
+      button.textContent = `${Number(job.progress || 0)}% · checking`;
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      job = await api(`/api/model-setup/troubleshoot/${encodeURIComponent(job.id)}`);
+      state.modelSetupTroubleshooting = job; renderModelSetupDoctor();
+    }
+    toast(job.decision === 'ready' ? 'Both local model paths are ready' : 'Model setup needs attention · review the exact failing stage');
+    await Promise.all([loadModelReadiness(), loadModelTrust(true)]);
+  } catch (error) {
+    toast(error.message);
+    $('#modelSetupDoctorResult').innerHTML = `<div class="empty-inline compact-empty error">Guided setup could not start: ${escapeHtml(error.message)}</div>`;
+  } finally {
+    button.disabled = false; button.textContent = 'Test and install both';
+  }
+}
+
+async function copyModelSetupReport() {
+  const job = state.modelSetupTroubleshooting; if (!job) return;
+  const report = JSON.stringify({schema:'signalroom.model-setup-troubleshooting.v1',generated_at:new Date().toISOString(),decision:job.decision,host:job.host,attempts:job.attempts,recommendations:job.recommendations,alternatives:job.alternatives,downloads_started:job.downloads_started,contract:job.contract}, null, 2);
+  try { await navigator.clipboard.writeText(report); toast('Safe model setup report copied'); }
+  catch (_) { toast('Clipboard access was blocked; copy the visible stage details instead'); }
 }
 
 async function loadModelReadiness() {
@@ -6878,6 +6959,16 @@ document.addEventListener('click', async event => {
   }
   const pull = event.target.closest('[data-pull-profile]');
   if (pull) pullModel(pull.dataset.pullProfile, pull);
+  if (event.target.closest('[data-copy-model-setup-report]')) await copyModelSetupReport();
+  const setupAlternative = event.target.closest('[data-use-setup-alternative]');
+  if (setupAlternative) {
+    const target = setupAlternative.dataset.alternativeKind === 'ollama-profile' ? $('#modelSetupOllamaProfile') : $('#modelSetupLocalProfile');
+    if ([...target.options].some(option => option.value === setupAlternative.dataset.useSetupAlternative)) {
+      target.value = setupAlternative.dataset.useSetupAlternative;
+      $('#modelSetupDoctor').scrollIntoView({behavior:'smooth',block:'start'});
+      toast('Alternative selected · run the guided check when ready');
+    }
+  }
   const activate = event.target.closest('[data-activate-model]');
   if (activate) activateModel(activate.dataset.activateModel, activate);
   const stageIntake = event.target.closest('[data-stage-model-intake]');
@@ -6994,6 +7085,7 @@ $('#deliveryForm').addEventListener('submit', saveDeliveryPolicy);
 $('#auditExportForm').addEventListener('submit', saveAuditExportPolicy);
 $('#auditOperationsForm').addEventListener('submit', saveAuditOperationsPolicy);
 $('#modelTrustPolicyForm').addEventListener('submit', saveModelTrustPolicy);
+$('#runModelSetupDoctor').addEventListener('click', runModelSetupDoctor);
 $('#approveDelivery').addEventListener('click', approveDeliveryPreview);
 $('#testDeliveryDestination').addEventListener('click', testDeliveryDestination);
 $('#testSoarDeliveryDestination').addEventListener('click', testDeliveryDestination);

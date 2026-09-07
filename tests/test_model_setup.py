@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import types
 from typing import Any
@@ -14,6 +15,9 @@ from splunk_security_agent.model_setup import (
     _candidate_runtime_installed,
     _huggingface_repo,
     _model_installed,
+    _safe_setup_detail,
+    _setup_failure,
+    _should_retry_public_source,
 )
 from splunk_security_agent.rag import EvidenceStore
 from splunk_security_agent.schemas import ArtifactCreate
@@ -67,6 +71,54 @@ def test_model_installed_accepts_implicit_latest_only():
     assert _model_installed("llama3.2", ["llama3.2:latest"])
     assert _model_installed("LLAMA3.1:8B", ["llama3.1:8b"])
     assert not _model_installed("llama3.1:70b", ["llama3.1:8b"])
+
+
+def test_setup_diagnostics_redact_secrets_and_classify_macos_architecture():
+    detail = _safe_setup_detail(
+        "Authorization: Bearer secret-value\ntoken=another-secret\n"
+        "https://private-user:private-pass@packages.example/simple\n"
+        "No matching distribution found"
+    )
+    failure = _setup_failure(
+        "local-transformers",
+        "runtime-install",
+        detail,
+        {
+            "system": "Darwin",
+            "machine": "x86_64",
+            "apple_silicon": True,
+            "architecture_ok": False,
+        },
+    )
+
+    assert "secret-value" not in detail
+    assert "another-secret" not in detail
+    assert "private-user" not in detail
+    assert "private-pass" not in detail
+    assert detail.count("[REDACTED]") == 3
+    assert failure["code"] == "macos-rosetta-python"
+    assert any(action.get("command") == "./install.sh" for action in failure["actions"])
+
+
+def test_public_source_retry_is_limited_to_resolution_failures():
+    assert _should_retry_public_source(
+        "ERROR: Could not find a version that satisfies the requirement torch"
+    )
+    assert _should_retry_public_source("401 Client Error: Unauthorized")
+    assert not _should_retry_public_source(
+        "No matching distribution found",
+        elapsed_seconds=46,
+    )
+    assert not _should_retry_public_source("CERTIFICATE_VERIFY_FAILED")
+    assert not _should_retry_public_source("No space left on device")
+
+    ollama_failure = _setup_failure(
+        "ollama",
+        "model-validation",
+        "Ollama returned no assistant content",
+        {"system": "Darwin", "architecture_ok": True},
+    )
+    assert ollama_failure["code"] == "ollama-inference-failed"
 
 
 @pytest.mark.asyncio
@@ -416,6 +468,86 @@ def test_pull_accepts_securebert_as_local_transformers_install(monkeypatch, tmp_
     )
 
 
+def test_guided_setup_queues_one_profile_for_each_local_runtime(monkeypatch, tmp_path):
+    service = ModelSetupService(ConfigStore(tmp_path))
+
+    def capture(coroutine):
+        coroutine.close()
+        return None
+
+    monkeypatch.setattr("splunk_security_agent.model_setup.asyncio.create_task", capture)
+    job = service.start_troubleshooting("ollama-general", "securebert-ner")
+
+    assert job["kind"] == "guided-model-setup"
+    assert job["downloads_started"] == 0
+    assert [attempt["provider"] for attempt in job["attempts"]] == [
+        "ollama",
+        "local-transformers",
+    ]
+    assert "no route" in job["contract"].lower()
+    assert any(item["kind"] == "local-fallback" for item in job["alternatives"])
+
+
+@pytest.mark.asyncio
+async def test_guided_setup_checks_second_runtime_after_first_failure(monkeypatch, tmp_path):
+    service = ModelSetupService(ConfigStore(tmp_path))
+
+    def capture(coroutine):
+        coroutine.close()
+        return None
+
+    monkeypatch.setattr("splunk_security_agent.model_setup.asyncio.create_task", capture)
+    job = service.start_troubleshooting("ollama-general", "securebert-ner")
+    called: list[str] = []
+
+    async def fake_attempt(_job, attempt, _index):
+        called.append(attempt["provider"])
+        if attempt["provider"] == "ollama":
+            raise RuntimeError("connection refused")
+        attempt.update(status="complete", stage="complete", detail="Synthetic check passed")
+
+    monkeypatch.setattr(service, "_run_setup_attempt", fake_attempt)
+    await service._run_troubleshooting(job["id"])
+
+    assert called == ["ollama", "local-transformers"]
+    assert job["attempts"][0]["failure"]["code"] == "network"
+    assert job["attempts"][1]["status"] == "complete"
+    assert job["status"] == "attention"
+
+
+@pytest.mark.asyncio
+async def test_ollama_smoke_probe_is_synthetic_and_retains_no_output(
+    monkeypatch, tmp_path
+):
+    class ProbeClient(FakeClient):
+        async def post(self, url: str, json: dict[str, Any], **kwargs: Any) -> FakeResponse:
+            assert url == "http://localhost:11434/api/chat"
+            assert json["messages"] == [
+                {
+                    "role": "user",
+                    "content": "Synthetic SignalRoom setup probe. Reply with the single word READY.",
+                }
+            ]
+            assert json["options"] == {"temperature": 0, "num_predict": 8}
+            return FakeResponse({"message": {"content": "READY"}, "done": True})
+
+    monkeypatch.setattr("splunk_security_agent.model_setup.httpx.AsyncClient", ProbeClient)
+    service = ModelSetupService(ConfigStore(tmp_path))
+    profile = next(
+        item for item in service.config.load().models if item.id == "ollama-general"
+    )
+
+    proof = await service._smoke_ollama_profile(profile)
+
+    assert proof == {
+        "runtime": "ollama",
+        "capability": "chat",
+        "response_received": True,
+        "output_retained": False,
+    }
+    assert "READY" not in proof.values()
+
+
 @pytest.mark.asyncio
 async def test_local_install_records_immutable_revision_and_manifest(monkeypatch, tmp_path):
     config = ConfigStore(tmp_path / "data")
@@ -426,7 +558,8 @@ async def test_local_install_records_immutable_revision_and_manifest(monkeypatch
         sha = "abc123immutable"
 
     class FakeApi:
-        def __init__(self, token=None):
+        def __init__(self, endpoint=None, token=None):
+            self.endpoint = endpoint
             self.token = token
 
         def model_info(self, model):
@@ -469,6 +602,158 @@ async def test_local_install_records_immutable_revision_and_manifest(monkeypatch
     assert job["progress"] == 100
     assert manifest["revision"] == "abc123immutable"
     assert manifest["runtime"] == "local-transformers"
+
+
+@pytest.mark.asyncio
+async def test_public_hub_retry_is_credential_free_and_recorded(monkeypatch, tmp_path):
+    config = ConfigStore(tmp_path / "data")
+    config.update_secrets(huggingface_token="stale-private-token")
+    service = ModelSetupService(config)
+    fake_hub = types.ModuleType("huggingface_hub")
+    calls: list[dict[str, Any]] = []
+
+    class FakeInfo:
+        sha = "public-revision"
+
+    class FakeApi:
+        def __init__(self, endpoint=None, token=None):
+            calls.append({"operation": "model_info", "endpoint": endpoint, "token": token})
+            self.endpoint = endpoint
+            self.token = token
+
+        def model_info(self, _model):
+            if self.token:
+                raise RuntimeError("401 Client Error: Unauthorized token=stale-private-token")
+            return FakeInfo()
+
+    def fake_snapshot_download(**kwargs):
+        calls.append({"operation": "snapshot", **kwargs})
+        assert kwargs["endpoint"] == "https://huggingface.co"
+        assert kwargs["token"] is False
+        path = kwargs["local_dir"]
+        (path / "config.json").write_text("{}", encoding="utf-8")
+        (path / "model.safetensors").write_bytes(b"synthetic safe weights")
+        return str(path)
+
+    fake_hub.HfApi = FakeApi
+    fake_hub.snapshot_download = fake_snapshot_download
+    monkeypatch.setitem(sys.modules, "huggingface_hub", fake_hub)
+    monkeypatch.setattr("splunk_security_agent.model_setup.local_runtime_available", lambda: True)
+    job = {
+        "profile_id": "securebert-ner",
+        "model": "cisco-ai/SecureBERT2.0-NER",
+        "status": "queued",
+        "detail": "Queued",
+        "progress": 0,
+    }
+
+    await service._install_local_specialist(job)
+
+    assert job["status"] == "complete"
+    assert job["public_retry"]["attempted"] is True
+    assert job["public_retry"]["source"] == "https://huggingface.co"
+    assert job["public_retry"]["credentials_sent"] is False
+    assert job["public_retry"]["reason"] == (
+        "401 Client Error: Unauthorized token=[REDACTED]"
+    )
+    assert job["public_retry"]["trigger"] == "fail-fast-source-resolution"
+    assert job["public_retry"]["succeeded"] is True
+    assert calls[0]["token"] == "stale-private-token"
+    assert calls[-1]["token"] is False
+
+
+@pytest.mark.asyncio
+async def test_pip_resolution_failure_retries_public_pypi_in_isolated_mode(
+    monkeypatch, tmp_path
+):
+    config = ConfigStore(tmp_path / "data")
+    service = ModelSetupService(config)
+    fake_hub = types.ModuleType("huggingface_hub")
+    process_calls: list[tuple[tuple[str, ...], dict[str, Any]]] = []
+
+    class FakeInfo:
+        sha = "runtime-revision"
+
+    class FakeApi:
+        def __init__(self, endpoint=None, token=None):
+            self.endpoint = endpoint
+            self.token = token
+
+        def model_info(self, _model):
+            return FakeInfo()
+
+    def fake_snapshot_download(**kwargs):
+        path = kwargs["local_dir"]
+        (path / "config.json").write_text("{}", encoding="utf-8")
+        (path / "model.safetensors").write_bytes(b"synthetic safe weights")
+        return str(path)
+
+    class FakeOutput:
+        def __init__(self, lines):
+            self.lines = iter(lines)
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            try:
+                return next(self.lines)
+            except StopIteration as exc:
+                raise StopAsyncIteration from exc
+
+    class FakeProcess:
+        def __init__(self, return_code, lines):
+            self.return_code = return_code
+            self.stdout = FakeOutput(lines)
+
+        async def wait(self):
+            return self.return_code
+
+    async def fake_create_subprocess_exec(*args, **kwargs):
+        process_calls.append((tuple(str(value) for value in args), kwargs))
+        if len(process_calls) == 1:
+            return FakeProcess(
+                1,
+                [b"ERROR: Could not find a version that satisfies the requirement torch\n"],
+            )
+        return FakeProcess(0, [b"Successfully installed the public runtime\n"])
+
+    fake_hub.HfApi = FakeApi
+    fake_hub.snapshot_download = fake_snapshot_download
+    monkeypatch.setitem(sys.modules, "huggingface_hub", fake_hub)
+    monkeypatch.setattr(
+        "splunk_security_agent.model_setup.asyncio.create_subprocess_exec",
+        fake_create_subprocess_exec,
+    )
+    monkeypatch.setattr(
+        "splunk_security_agent.model_setup.local_runtime_available",
+        lambda: len(process_calls) >= 2,
+    )
+    job = {
+        "profile_id": "securebert-ner",
+        "model": "cisco-ai/SecureBERT2.0-NER",
+        "status": "queued",
+        "detail": "Queued",
+        "progress": 0,
+    }
+
+    await service._install_local_specialist(job)
+
+    assert job["status"] == "complete"
+    assert len(process_calls) == 2
+    public_command, public_options = process_calls[1]
+    assert "--isolated" in public_command
+    assert public_command[public_command.index("--index-url") + 1] == "https://pypi.org/simple"
+    assert "--no-cache-dir" in public_command
+    assert "--no-input" in public_command
+    assert public_options["env"]["PIP_CONFIG_FILE"] == os.devnull
+    assert not any(
+        key.upper().startswith("PIP_") and key != "PIP_CONFIG_FILE"
+        for key in public_options["env"]
+    )
+    assert job["public_retry"]["credentials_sent"] is False
+    assert job["public_retry"]["trigger"] == "fail-fast-source-resolution"
+    assert job["public_retry"]["succeeded"] is True
 
 
 @pytest.mark.asyncio

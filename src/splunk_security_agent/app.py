@@ -128,6 +128,7 @@ from .schemas import (
     ModelArtifactApproval,
     ModelIntakeStageRequest,
     ModelPullRequest,
+    ModelSetupTroubleshootRequest,
     ModelTournamentPromotionRequest,
     ModelTournamentReviewRequest,
     ModelTournamentRunCreate,
@@ -3246,6 +3247,50 @@ async def pull_model(request: ModelPullRequest) -> dict[str, Any]:
         raise HTTPException(404, str(exc)) from exc
     except (PermissionError, ValueError) as exc:
         raise HTTPException(409, str(exc)) from exc
+
+
+@app.post("/api/model-setup/troubleshoot", status_code=202)
+async def troubleshoot_model_setup(
+    value: ModelSetupTroubleshootRequest,
+    request: Request,
+) -> dict[str, Any]:
+    try:
+        result = services.model_setup.start_troubleshooting(
+            value.ollama_profile_id,
+            value.local_profile_id,
+        )
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    principal = getattr(request.state, "principal", {}) or {}
+    services.audit.record(
+        "model.setup.troubleshooting.started",
+        "install-and-verify",
+        target_type="model-setup",
+        target_id=result["id"],
+        summary=(
+            "An administrator explicitly started the two-runtime model setup drill. "
+            "The drill may install the selected profiles but cannot change model routing or cloud policy."
+        ),
+        metadata={
+            "ollama_profile_id": value.ollama_profile_id,
+            "local_profile_id": value.local_profile_id,
+            "host_system": (result.get("host") or {}).get("system", ""),
+            "host_machine": (result.get("host") or {}).get("machine", ""),
+        },
+        actor=str(principal.get("username") or "local-operator"),
+    )
+    return result
+
+
+@app.get("/api/model-setup/troubleshoot/{job_id}")
+async def model_setup_troubleshooting_status(job_id: str) -> dict[str, Any]:
+    try:
+        result = services.model_setup.get_job(job_id)
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    if result.get("kind") != "guided-model-setup":
+        raise HTTPException(404, f"Model setup troubleshooting job not found: {job_id}")
+    return result
 
 
 @app.post("/api/model-setup/activate")

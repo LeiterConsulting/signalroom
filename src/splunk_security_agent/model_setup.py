@@ -7,7 +7,10 @@ import json
 import os
 import platform
 import re
+import subprocess
 import sys
+import sysconfig
+import time
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
@@ -32,6 +35,7 @@ LOCAL_RUNTIME_PACKAGES = (
     "torch>=2.5",
     "transformers>=4.48,<6",
 )
+PUBLIC_RETRY_FAST_FAILURE_SECONDS = 45
 
 MODEL_CATALOG_REVIEW: dict[str, Any] = {
     "reviewed_at": "2026-09-05",
@@ -467,6 +471,298 @@ def _candidate_runtime_installed(runtime: str) -> bool:
     if runtime == "dedicated-time-series":
         return importlib.util.find_spec("cisco_tsm") is not None
     return False
+
+
+_SETUP_SECRET = re.compile(
+    r"(?i)\b(authorization|access[_-]?token|api[_-]?key|password|secret|token)"
+    r"(\s*[:=]\s*)(?:bearer\s+)?([^\s,;]+)"
+)
+_SETUP_BEARER = re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]+")
+_SETUP_URL_USERINFO = re.compile(r"(?i)(https?://)([^/\s:@]+):([^@\s/]+)@")
+
+
+def _safe_setup_detail(value: Any, limit: int = 1800) -> str:
+    """Keep actionable installer output while removing common credential forms."""
+    text = _SETUP_BEARER.sub("Bearer [REDACTED]", str(value or ""))
+    text = _SETUP_URL_USERINFO.sub(r"\1[REDACTED]@", text)
+    text = _SETUP_SECRET.sub(
+        lambda match: f"{match.group(1)}{match.group(2)}[REDACTED]",
+        text,
+    )
+    try:
+        home = str(Path.home())
+        if home:
+            text = text.replace(home, "~")
+    except RuntimeError:
+        pass
+    text = "\n".join(line.strip() for line in text.splitlines() if line.strip())
+    return text[-limit:]
+
+
+def _should_retry_public_source(value: Any, *, elapsed_seconds: float = 0) -> bool:
+    """Retry only failures plausibly caused by a restricted index, mirror, or stale token."""
+    if elapsed_seconds > PUBLIC_RETRY_FAST_FAILURE_SECONDS:
+        return False
+    lowered = str(value or "").lower()
+    return any(
+        phrase in lowered
+        for phrase in (
+            "no matching distribution found",
+            "could not find a version that satisfies",
+            "from versions: none",
+            "no available distribution",
+            "404 client error",
+            "401 client error",
+            "403 client error",
+            "repository not found",
+            "unauthorized",
+            "forbidden",
+            "name resolution",
+            "connection refused",
+            "timed out",
+            "timeout",
+        )
+    )
+
+
+def _model_host_context() -> dict[str, Any]:
+    """Return the architecture facts that affect local binary-wheel compatibility."""
+    system = platform.system()
+    machine = platform.machine().lower() or "unknown"
+    apple_silicon = False
+    translated = False
+    if system == "Darwin":
+        try:
+            arm_probe = subprocess.run(
+                ["/usr/sbin/sysctl", "-in", "hw.optional.arm64"],
+                capture_output=True,
+                text=True,
+                timeout=3,
+                check=False,
+            )
+            apple_silicon = arm_probe.stdout.strip() == "1"
+        except (OSError, subprocess.SubprocessError):
+            apple_silicon = machine == "arm64"
+        try:
+            translation_probe = subprocess.run(
+                ["/usr/sbin/sysctl", "-in", "sysctl.proc_translated"],
+                capture_output=True,
+                text=True,
+                timeout=3,
+                check=False,
+            )
+            translated = translation_probe.stdout.strip() == "1"
+        except (OSError, subprocess.SubprocessError):
+            translated = apple_silicon and machine != "arm64"
+    return {
+        "system": system,
+        "machine": machine,
+        "python_version": platform.python_version(),
+        "python_implementation": platform.python_implementation(),
+        "python_platform": sysconfig.get_platform(),
+        "apple_silicon": apple_silicon,
+        "translated": translated,
+        "architecture_ok": not (apple_silicon and machine != "arm64"),
+    }
+
+
+def _setup_failure(kind: str, stage: str, detail: Any, host: dict[str, Any]) -> dict[str, Any]:
+    """Classify a failed installation into an operator-facing cause and remedy."""
+    safe = _safe_setup_detail(detail)
+    lowered = safe.lower()
+    actions: list[dict[str, Any]] = []
+    if host.get("apple_silicon") and not host.get("architecture_ok"):
+        code = "macos-rosetta-python"
+        summary = "Apple Silicon is running an Intel Python environment"
+        actions.extend(
+            [
+                {
+                    "title": "Repair the native Python environment",
+                    "detail": (
+                        "Rerun ./install.sh and accept the native Apple Silicon Python repair, "
+                        "then reopen SignalRoom and run this check again."
+                    ),
+                    "command": "./install.sh",
+                    "external": False,
+                },
+                {
+                    "title": "Capture the architecture evidence",
+                    "detail": (
+                        "Run the read-only collector and attach its redacted log if repair "
+                        "still fails."
+                    ),
+                    "command": "./install.sh --diagnose_all",
+                    "external": False,
+                },
+            ]
+        )
+    elif any(
+        phrase in lowered
+        for phrase in (
+            "no matching distribution found",
+            "could not find a version that satisfies",
+            "not a supported wheel",
+            "unsupported platform",
+        )
+    ):
+        code = "binary-wheel-unavailable"
+        summary = "A compatible local inference package is unavailable for this Python or architecture"
+        actions.append(
+            {
+                "title": "Use a native supported Python",
+                "detail": (
+                    "Use native Python 3.11–3.13, rerun the installer to rebuild .venv, and retry. "
+                    "Do not mix arm64 and x86_64 Python packages on macOS."
+                ),
+                "command": "./install.sh",
+                "external": False,
+            }
+        )
+    elif any(phrase in lowered for phrase in ("certificate verify failed", "sslerror", "tls")):
+        code = "tls-trust"
+        summary = "TLS certificate validation blocked the package or model download"
+        actions.append(
+            {
+                "title": "Configure the organization CA",
+                "detail": (
+                    "Add the trusted CA to the Python/pip and HTTPS trust configuration. "
+                    "Do not disable certificate verification for model downloads."
+                ),
+                "external": False,
+            }
+        )
+    elif any(phrase in lowered for phrase in ("no space left", "disk quota", "errno 28")):
+        code = "storage"
+        summary = "The model installation ran out of writable storage"
+        actions.append(
+            {
+                "title": "Free local model storage",
+                "detail": "Keep at least 10 GiB free in the SignalRoom data volume before retrying.",
+                "external": False,
+            }
+        )
+    elif any(
+        phrase in lowered
+        for phrase in (
+            "permission denied",
+            "operation not permitted",
+            "read-only file system",
+        )
+    ):
+        code = "filesystem-permission"
+        summary = "SignalRoom cannot write the runtime or local model directory"
+        actions.append(
+            {
+                "title": "Repair installation ownership",
+                "detail": (
+                    "Run SignalRoom from a user-writable directory and ensure .venv and data/models "
+                    "belong to the account running the service."
+                ),
+                "external": False,
+            }
+        )
+    elif any(phrase in lowered for phrase in ("401", "403", "unauthorized", "forbidden", "gated repo")):
+        code = "source-authorization"
+        summary = "The model source rejected this download"
+        actions.append(
+            {
+                "title": "Check the model access boundary",
+                "detail": (
+                    "The shipped SecureBERT profiles are public and normally need no token. "
+                    "Remove a stale token or save a valid fine-grained Hugging Face token for a gated source."
+                ),
+                "external": True,
+            }
+        )
+    elif any(
+        phrase in lowered
+        for phrase in (
+            "name resolution",
+            "temporary failure",
+            "connection refused",
+            "timed out",
+            "timeout",
+            "network is unreachable",
+        )
+    ):
+        code = "network"
+        summary = "The configured model service or publisher could not be reached"
+        actions.append(
+            {
+                "title": "Verify the correct network path",
+                "detail": (
+                    "Confirm the Ollama endpoint for Ollama failures, or HTTPS access to huggingface.co "
+                    "for local specialist downloads, then retry."
+                ),
+                "external": kind == "local-transformers",
+            }
+        )
+    elif kind == "ollama" and any(
+        phrase in lowered for phrase in ("404", "not found", "manifest", "model does not exist")
+    ):
+        code = "ollama-model-unavailable"
+        summary = "Ollama could not resolve the configured model identifier"
+        actions.append(
+            {
+                "title": "Choose an installed or shipped profile",
+                "detail": (
+                    "Select an existing model from the Ollama inventory, or restore the shipped "
+                    "profile identifier before retrying."
+                ),
+                "external": False,
+            }
+        )
+    elif stage == "model-validation" and kind == "ollama":
+        code = "ollama-inference-failed"
+        summary = "The Ollama model is installed but failed a synthetic inference check"
+        actions.append(
+            {
+                "title": "Check Ollama runtime capacity",
+                "detail": (
+                    "Review Ollama service output and available memory, then test a smaller shipped "
+                    "Ollama profile to distinguish model capacity from service failure."
+                ),
+                "external": False,
+            }
+        )
+    elif stage == "model-validation":
+        code = "model-artifact-invalid"
+        summary = "The downloaded specialist snapshot could not be loaded locally"
+        actions.append(
+            {
+                "title": "Retry a shipped SecureBERT specialist",
+                "detail": (
+                    "Remove only the incomplete profile directory, retry its explicit install, "
+                    "and use another shipped SecureBERT profile to distinguish repository-specific failure."
+                ),
+                "external": False,
+            }
+        )
+    else:
+        code = "unclassified-install-error"
+        summary = "The model setup attempt failed at an identified stage"
+        actions.append(
+            {
+                "title": "Collect the complete safe diagnostic",
+                "detail": (
+                    "Run the read-only diagnostic collector; it records Python, wheels, Ollama, "
+                    "Hub access, and redacted service logs without downloading anything."
+                ),
+                "command": (
+                    ".\\install.ps1 -DiagnoseAll"
+                    if host.get("system") == "Windows"
+                    else "./install.sh --diagnose_all"
+                ),
+                "external": False,
+            }
+        )
+    return {
+        "code": code,
+        "stage": stage,
+        "summary": summary,
+        "detail": safe or "No additional installer output was returned.",
+        "actions": actions,
+    }
 
 
 class ModelSetupService:
@@ -1340,6 +1636,395 @@ class ModelSetupService:
             "ready": ollama["ok"] and any(item["installed"] for item in ollama["profiles"]),
         }
 
+    def start_troubleshooting(
+        self,
+        ollama_profile_id: str = "ollama-general",
+        local_profile_id: str = "securebert-ner",
+    ) -> dict[str, Any]:
+        """Start an explicit two-runtime install and capability drill."""
+        settings = self.config.load()
+        ollama_profile = next(
+            (
+                profile
+                for profile in settings.models
+                if profile.id == ollama_profile_id
+                and profile.provider == "ollama"
+                and profile.enabled
+            ),
+            None,
+        )
+        local_profile = next(
+            (
+                profile
+                for profile in settings.models
+                if profile.id == local_profile_id
+                and profile.provider == "huggingface"
+                and profile.enabled
+                and profile.task in {"embedding", "ner", "reranking", "classification"}
+            ),
+            None,
+        )
+        if ollama_profile is None:
+            raise KeyError(f"Enabled Ollama profile not found: {ollama_profile_id}")
+        if local_profile is None:
+            raise KeyError(f"Enabled local specialist profile not found: {local_profile_id}")
+        existing = next(
+            (
+                job
+                for job in self.jobs.values()
+                if job.get("kind") == "guided-model-setup"
+                and job.get("status") in {"queued", "running"}
+            ),
+            None,
+        )
+        if existing:
+            return existing
+        job_id = uuid.uuid4().hex
+        host = _model_host_context()
+        attempts = [
+            {
+                "provider": "ollama",
+                "profile_id": ollama_profile.id,
+                "label": ollama_profile.label,
+                "model": ollama_profile.model,
+                "task": ollama_profile.task,
+                "status": "queued",
+                "stage": "waiting",
+                "detail": "Waiting for the Ollama installation check.",
+                "download_started": False,
+            },
+            {
+                "provider": "local-transformers",
+                "profile_id": local_profile.id,
+                "label": local_profile.label,
+                "model": local_profile.model,
+                "task": local_profile.task,
+                "status": "queued",
+                "stage": "waiting",
+                "detail": "Waiting for the local Transformers installation check.",
+                "download_started": False,
+            },
+        ]
+        job = {
+            "id": job_id,
+            "profile_id": "",
+            "kind": "guided-model-setup",
+            "status": "queued",
+            "decision": "pending",
+            "stage": "host-preflight",
+            "detail": "Inspecting local model runtime compatibility.",
+            "progress": 0,
+            "attempts": attempts,
+            "host": host,
+            "recommendations": [],
+            "alternatives": self._setup_alternatives(settings, attempts),
+            "downloads_started": 0,
+            "created_at": datetime.now(UTC).isoformat(),
+            "completed_at": None,
+            "contract": (
+                "Runs only after an explicit administrator action. Missing selected models may be "
+                "downloaded; no route, trust policy, or cloud-inference policy is changed."
+            ),
+        }
+        self.jobs[job_id] = job
+        asyncio.create_task(self._run_troubleshooting(job_id))
+        return job
+
+    @staticmethod
+    def _setup_alternatives(
+        settings: Any, attempts: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        selected = {str(item.get("profile_id") or "") for item in attempts}
+        alternatives: list[dict[str, Any]] = []
+        for profile in settings.models:
+            if not profile.enabled or profile.id in selected:
+                continue
+            if profile.provider == "ollama":
+                alternatives.append(
+                    {
+                        "kind": "ollama-profile",
+                        "profile_id": profile.id,
+                        "label": profile.label,
+                        "model": profile.model,
+                        "reason": (
+                            "Shipped or operator-configured Ollama profile; test it without "
+                            "changing routing."
+                        ),
+                        "external": False,
+                    }
+                )
+            elif profile.provider == "huggingface" and profile.task in {
+                "embedding",
+                "ner",
+                "reranking",
+                "classification",
+            }:
+                alternatives.append(
+                    {
+                        "kind": "local-specialist",
+                        "profile_id": profile.id,
+                        "label": profile.label,
+                        "model": profile.model,
+                        "reason": (
+                            "Shipped local Transformers specialist; useful for separating a "
+                            "repository-specific problem from a shared runtime problem."
+                        ),
+                        "external": False,
+                    }
+                )
+        alternatives.append(
+            {
+                "kind": "local-fallback",
+                "profile_id": "",
+                "label": "Lexical and deterministic specialist fallback",
+                "model": "No additional model",
+                "reason": (
+                    "SignalRoom remains local and usable with FTS retrieval and deterministic "
+                    "entity extraction while Transformers is repaired."
+                ),
+                "external": False,
+            }
+        )
+        return alternatives[:8]
+
+    async def _run_troubleshooting(self, job_id: str) -> None:
+        job = self.jobs[job_id]
+        job.update(status="running", stage="host-preflight", progress=3)
+        host = job["host"]
+        if not host.get("architecture_ok"):
+            job["detail"] = "A local architecture mismatch was detected; both paths will still be checked."
+        else:
+            job["detail"] = "Host architecture is compatible; checking both selected runtimes."
+        for index, attempt in enumerate(job["attempts"]):
+            try:
+                await self._run_setup_attempt(job, attempt, index)
+            except Exception as exc:
+                failure = attempt.get("failure") or _setup_failure(
+                    str(attempt.get("provider") or ""),
+                    str(attempt.get("stage") or "installation"),
+                    exc,
+                    host,
+                )
+                attempt.update(
+                    status="error",
+                    detail=failure["summary"],
+                    failure=failure,
+                )
+            for action in (attempt.get("failure") or {}).get("actions", []):
+                if action not in job["recommendations"]:
+                    job["recommendations"].append(action)
+        local_attempt = next(
+            item for item in job["attempts"] if item["provider"] == "local-transformers"
+        )
+        if local_attempt["status"] == "error":
+            job["recommendations"].extend(
+                [
+                    {
+                        "title": "Continue safely without local Transformers",
+                        "detail": (
+                            "Keep the specialist runtime local. SignalRoom will use lexical RAG and "
+                            "deterministic entity extraction until the specialist runtime is repaired."
+                        ),
+                        "external": False,
+                    },
+                    {
+                        "title": "Use hosted specialists only as an explicit fallback",
+                        "detail": (
+                            "If policy permits external inference, select the cloud specialist runtime "
+                            "and the Ask policy. This is optional and never enabled by this drill."
+                        ),
+                        "external": True,
+                    },
+                ]
+            )
+        ready = all(item["status"] == "complete" for item in job["attempts"])
+        job.update(
+            status="complete" if ready else "attention",
+            decision="ready" if ready else "attention-required",
+            stage="complete",
+            detail=(
+                "Both selected local model paths installed and passed their host-side checks."
+                if ready
+                else "At least one model path needs attention; use the stage-specific guidance below."
+            ),
+            progress=100,
+            completed_at=datetime.now(UTC).isoformat(),
+        )
+
+    async def _run_setup_attempt(
+        self,
+        job: dict[str, Any],
+        attempt: dict[str, Any],
+        index: int,
+    ) -> None:
+        settings = self.config.load()
+        profile = next(item for item in settings.models if item.id == attempt["profile_id"])
+        base_progress = 8 if index == 0 else 53
+        attempt.update(status="running", stage="service-check", detail="Checking current state.")
+        job.update(
+            stage=f"{attempt['provider']}:service-check",
+            detail=f"Checking {attempt['label']} on this host.",
+            progress=base_progress,
+        )
+        already_installed = False
+        if attempt["provider"] == "ollama":
+            endpoint = _ollama_base(profile)
+            try:
+                async with httpx.AsyncClient(timeout=8) as client:
+                    response = await client.get(f"{endpoint}/api/tags")
+                    response.raise_for_status()
+                installed = [
+                    str(item.get("name") or "")
+                    for item in response.json().get("models", [])
+                    if isinstance(item, dict)
+                ]
+                already_installed = _model_installed(profile.model, installed)
+            except (httpx.HTTPError, ValueError) as exc:
+                failure = _setup_failure("ollama", "service-check", exc, job["host"])
+                attempt["failure"] = failure
+                raise RuntimeError(failure["summary"]) from exc
+        else:
+            already_installed = local_model_installed(self.config.local_model_path(profile.id))
+
+        if not already_installed:
+            attempt.update(
+                stage="installation",
+                detail=f"Installing {profile.label} through its configured local provider.",
+                download_started=True,
+            )
+            job["downloads_started"] += 1
+            child = self.start_pull(profile.id)
+            attempt["install_job_id"] = child["id"]
+            while child.get("status") in {"queued", "pulling"}:
+                attempt["detail"] = str(child.get("detail") or "Installing…")
+                attempt["stage"] = str(child.get("stage") or "installation")
+                child_progress = int(child.get("progress") or 0)
+                job.update(
+                    stage=f"{attempt['provider']}:{attempt['stage']}",
+                    detail=attempt["detail"],
+                    progress=min(base_progress + 38, base_progress + round(child_progress * 0.38)),
+                )
+                await asyncio.sleep(0.5)
+                child = self.jobs[child["id"]]
+            if child.get("public_retry"):
+                attempt["public_retry"] = child["public_retry"]
+            if child.get("status") != "complete":
+                failure = child.get("failure") or _setup_failure(
+                    attempt["provider"],
+                    str(child.get("stage") or "installation"),
+                    child.get("diagnostic_tail") or child.get("detail") or "Installation failed",
+                    job["host"],
+                )
+                attempt["diagnostic_tail"] = child.get("diagnostic_tail", "")
+                attempt["failure"] = failure
+                raise RuntimeError(failure["summary"])
+
+        attempt.update(stage="model-validation", detail="Verifying the installed artifact locally.")
+        job.update(
+            stage=f"{attempt['provider']}:model-validation",
+            detail=f"Verifying {profile.label} without changing SignalRoom routing.",
+            progress=base_progress + 39,
+        )
+        if attempt["provider"] == "ollama":
+            endpoint = _ollama_base(profile)
+            async with httpx.AsyncClient(timeout=8) as client:
+                response = await client.get(f"{endpoint}/api/tags")
+                response.raise_for_status()
+            installed = [
+                str(item.get("name") or "")
+                for item in response.json().get("models", [])
+                if isinstance(item, dict)
+            ]
+            if not _model_installed(profile.model, installed):
+                raise RuntimeError("Ollama completed the request but did not report the selected model")
+            proof = await self._smoke_ollama_profile(profile)
+            proof.update(inventory_visible=True, endpoint=endpoint)
+        else:
+            proof = await self._smoke_local_specialist(profile)
+        attempt.update(
+            status="complete",
+            stage="complete",
+            detail=(
+                "Existing installation verified; no download was needed."
+                if already_installed
+                else "Installation completed and the local capability check passed."
+            ),
+            proof=proof,
+        )
+        job["progress"] = base_progress + 42
+
+    async def _smoke_ollama_profile(self, profile: ModelProfile) -> dict[str, Any]:
+        """Run a bounded synthetic generation and retain no response content."""
+        endpoint = _ollama_base(profile)
+        timeout = httpx.Timeout(connect=10, read=300, write=30, pool=10)
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.post(
+                f"{endpoint}/api/chat",
+                json={
+                    "model": profile.model,
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": (
+                                "Synthetic SignalRoom setup probe. Reply with the single word READY."
+                            ),
+                        }
+                    ],
+                    "stream": False,
+                    "keep_alive": "5m",
+                    "options": {"temperature": 0, "num_predict": 8},
+                },
+            )
+            response.raise_for_status()
+        payload = response.json()
+        content = str((payload.get("message") or {}).get("content") or "").strip()
+        if not content:
+            raise RuntimeError("Ollama returned no assistant content for the synthetic probe")
+        return {
+            "runtime": "ollama",
+            "capability": "chat",
+            "response_received": True,
+            "output_retained": False,
+        }
+
+    async def _smoke_local_specialist(self, profile: ModelProfile) -> dict[str, Any]:
+        """Load one installed specialist with synthetic input and retain value-free proof."""
+        provider = LocalTransformersProvider(profile, self.config.local_model_path(profile.id))
+        health = await provider.health()
+        if not health.get("ok"):
+            raise RuntimeError("The local runtime or model artifact is incomplete")
+        if profile.task == "embedding":
+            values = await provider.query_embedding("Synthetic security validation record")
+            if not values:
+                raise RuntimeError("The embedding model loaded but returned no vector")
+            return {"runtime": "local-transformers", "capability": "embedding", "dimensions": len(values)}
+        if profile.task == "reranking":
+            values = await provider.rerank(
+                "synthetic suspicious authentication",
+                ["Synthetic authentication evidence for setup validation."],
+            )
+            if len(values) != 1:
+                raise RuntimeError("The reranker loaded but returned an unexpected result shape")
+            return {"runtime": "local-transformers", "capability": "reranking", "results": 1}
+        if profile.task == "classification":
+            value = await provider.classify(
+                "int synthetic_copy(char *dst, const char *src) { return dst && src ? 0 : 1; }"
+            )
+            if not value.get("predictions"):
+                raise RuntimeError("The classifier loaded but returned no prediction")
+            return {
+                "runtime": "local-transformers",
+                "capability": "classification",
+                "classes": len(value["predictions"]),
+            }
+        values = await provider.entities("Synthetic host demo-host observed CVE-2024-0001.")
+        return {
+            "runtime": "local-transformers",
+            "capability": "ner",
+            "invocation_ok": isinstance(values, list),
+            "candidate_count": len(values),
+        }
+
     async def activate(
         self, profile_id: str, unload_other_signalroom_models: bool = True
     ) -> dict[str, Any]:
@@ -1465,7 +2150,8 @@ class ModelSetupService:
             (
                 job
                 for job in self.jobs.values()
-                if job["profile_id"] == profile_id and job["status"] in {"queued", "pulling"}
+                if job.get("profile_id") == profile_id
+                and job.get("status") in {"queued", "pulling"}
             ),
             None,
         )
@@ -1503,7 +2189,7 @@ class ModelSetupService:
         if job["kind"] == "local-transformers":
             await self._install_local_specialist(job)
             return
-        job.update(status="pulling", detail="Contacting Ollama")
+        job.update(status="pulling", stage="ollama-service", detail="Contacting Ollama")
         try:
             timeout = httpx.Timeout(connect=10, read=None, write=30, pool=10)
             async with httpx.AsyncClient(timeout=timeout) as client:
@@ -1522,6 +2208,7 @@ class ModelSetupService:
                         completed = int(event.get("completed") or job["completed"])
                         total = int(event.get("total") or job["total"])
                         job.update(
+                            stage="ollama-download",
                             detail=event.get("status", job["detail"]),
                             completed=completed,
                             total=total,
@@ -1538,16 +2225,38 @@ class ModelSetupService:
                 job["trust"] = self.model_trust.assess(
                     await self.model_trust.observe(profile.id, verify_files=True)
                 )
-            job.update(status="complete", detail="Model ready", progress=100)
+            job.update(status="complete", stage="complete", detail="Model ready", progress=100)
         except (httpx.HTTPError, ValueError, RuntimeError) as exc:
-            job.update(status="error", detail=str(exc))
+            failure = _setup_failure(
+                "ollama",
+                str(job.get("stage") or "ollama-download"),
+                exc,
+                _model_host_context(),
+            )
+            job.update(
+                status="error",
+                detail=failure["summary"],
+                diagnostic_tail=failure["detail"],
+                failure=failure,
+            )
 
     async def _install_local_specialist(self, job: dict[str, Any]) -> None:
-        job.update(status="pulling", detail="Checking the local Transformers runtime", progress=5)
+        job.update(
+            status="pulling",
+            stage="runtime-check",
+            detail="Checking the local Transformers runtime",
+            progress=5,
+        )
+        diagnostic_lines: list[str] = []
         try:
             if not local_runtime_available():
-                job.update(detail="Installing the local inference runtime", progress=10)
+                job.update(
+                    stage="runtime-install",
+                    detail="Installing the local inference runtime",
+                    progress=10,
+                )
                 creationflags = 0x08000000 if os.name == "nt" else 0
+                initial_install_started = time.monotonic()
                 process = await asyncio.create_subprocess_exec(
                     sys.executable,
                     "-m",
@@ -1563,13 +2272,90 @@ class ModelSetupService:
                     async for line in process.stdout:
                         detail = line.decode("utf-8", errors="replace").strip()
                         if detail:
-                            job["detail"] = detail[-240:]
+                            safe_detail = _safe_setup_detail(detail, 400)
+                            diagnostic_lines.append(safe_detail)
+                            diagnostic_lines = diagnostic_lines[-12:]
+                            job["detail"] = safe_detail[-240:]
                 return_code = await process.wait()
                 importlib.invalidate_caches()
+                initial_tail = "\n".join(diagnostic_lines)
+                initial_install_seconds = time.monotonic() - initial_install_started
+                if (
+                    return_code != 0
+                    and _should_retry_public_source(
+                        initial_tail,
+                        elapsed_seconds=initial_install_seconds,
+                    )
+                ):
+                    public_pip_env = {
+                        key: value
+                        for key, value in os.environ.items()
+                        if not key.upper().startswith("PIP_")
+                    }
+                    public_pip_env["PIP_CONFIG_FILE"] = os.devnull
+                    job.update(
+                        stage="runtime-install-public-retry",
+                        detail=(
+                            "Configured package sources did not resolve the runtime; retrying "
+                            "credential-free against public PyPI only"
+                        ),
+                        progress=16,
+                        public_retry={
+                            "attempted": True,
+                            "source": "https://pypi.org/simple",
+                            "credentials_sent": False,
+                            "reason": _safe_setup_detail(initial_tail, 600),
+                            "trigger": "fail-fast-source-resolution",
+                            "initial_failure_seconds": round(initial_install_seconds, 2),
+                        },
+                    )
+                    diagnostic_lines = []
+                    process = await asyncio.create_subprocess_exec(
+                        sys.executable,
+                        "-m",
+                        "pip",
+                        "install",
+                        "--isolated",
+                        "--index-url",
+                        "https://pypi.org/simple",
+                        "--no-cache-dir",
+                        "--no-input",
+                        "--disable-pip-version-check",
+                        *LOCAL_RUNTIME_PACKAGES,
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.STDOUT,
+                        creationflags=creationflags,
+                        env=public_pip_env,
+                    )
+                    if process.stdout:
+                        async for line in process.stdout:
+                            detail = line.decode("utf-8", errors="replace").strip()
+                            if detail:
+                                safe_detail = _safe_setup_detail(detail, 400)
+                                diagnostic_lines.append(safe_detail)
+                                diagnostic_lines = diagnostic_lines[-12:]
+                                job["detail"] = safe_detail[-240:]
+                    return_code = await process.wait()
+                    importlib.invalidate_caches()
+                    job["public_retry"]["succeeded"] = (
+                        return_code == 0 and local_runtime_available()
+                    )
                 if return_code != 0 or not local_runtime_available():
-                    raise RuntimeError("Local Transformers runtime installation failed")
+                    tail = "\n".join(diagnostic_lines) or (
+                        f"pip exited with status {return_code}; one or more required modules "
+                        "could not be imported afterward"
+                    )
+                    failure = _setup_failure(
+                        "local-transformers",
+                        "runtime-install",
+                        tail,
+                        _model_host_context(),
+                    )
+                    job.update(failure=failure, diagnostic_tail=failure["detail"])
+                    raise RuntimeError(failure["summary"])
 
             job.update(
+                stage="model-download",
                 detail=f"Downloading {job['model']} from Hugging Face to local storage",
                 progress=30,
             )
@@ -1582,16 +2368,21 @@ class ModelSetupService:
             model_path.mkdir(parents=True, exist_ok=True)
             token = self.config.secret("huggingface_token") or None
 
-            def download() -> tuple[str, str]:
+            def download(*, public_only: bool = False) -> tuple[str, str]:
                 from huggingface_hub import HfApi, snapshot_download
 
-                revision = HfApi(token=token).model_info(profile.model).sha
+                selected_token: str | bool | None = False if public_only else token
+                endpoint = "https://huggingface.co" if public_only else None
+                revision = HfApi(endpoint=endpoint, token=selected_token).model_info(
+                    profile.model
+                ).sha
 
                 snapshot = snapshot_download(
                     repo_id=profile.model,
                     revision=revision,
                     local_dir=model_path,
-                    token=token,
+                    token=selected_token,
+                    endpoint=endpoint,
                     ignore_patterns=[
                         "*.bin",
                         "*.h5",
@@ -1602,6 +2393,7 @@ class ModelSetupService:
                 )
                 return snapshot, revision
 
+            initial_download_started = time.monotonic()
             download_task = asyncio.create_task(asyncio.to_thread(download))
             elapsed = 0
             while not download_task.done():
@@ -1614,8 +2406,39 @@ class ModelSetupService:
                     ),
                     progress=min(85, 30 + elapsed // 10),
                 )
-            _, revision = await download_task
-            job.update(detail="Validating the downloaded model", progress=92)
+            try:
+                _, revision = await download_task
+            except Exception as initial_error:
+                initial_download_seconds = time.monotonic() - initial_download_started
+                reviewed = REVIEWED_PUBLISHER_MODELS.get(profile.model, {})
+                public_source = bool(reviewed) and not bool(reviewed.get("gated"))
+                if (
+                    not public_source
+                    or not _should_retry_public_source(
+                        initial_error,
+                        elapsed_seconds=initial_download_seconds,
+                    )
+                ):
+                    raise
+                job.update(
+                    stage="model-download-public-retry",
+                    detail=(
+                        "Configured Hub access did not resolve the admitted public model; "
+                        "retrying against public Hugging Face without credentials"
+                    ),
+                    progress=70,
+                    public_retry={
+                        "attempted": True,
+                        "source": "https://huggingface.co",
+                        "credentials_sent": False,
+                        "reason": _safe_setup_detail(initial_error, 600),
+                        "trigger": "fail-fast-source-resolution",
+                        "initial_failure_seconds": round(initial_download_seconds, 2),
+                    },
+                )
+                _, revision = await asyncio.to_thread(download, public_only=True)
+                job["public_retry"]["succeeded"] = True
+            job.update(stage="model-validation", detail="Validating the downloaded model", progress=92)
             if not (model_path / "config.json").exists() or not any(
                 model_path.glob("*.safetensors")
             ):
@@ -1660,13 +2483,25 @@ class ModelSetupService:
                 )
             job.update(
                 status="complete",
+                stage="complete",
                 detail="Local specialist ready · no cloud inference required",
                 progress=100,
                 total=size,
                 completed=size,
             )
         except Exception as exc:
-            job.update(status="error", detail=str(exc))
+            failure = job.get("failure") or _setup_failure(
+                "local-transformers",
+                str(job.get("stage") or "installation"),
+                exc,
+                _model_host_context(),
+            )
+            job.update(
+                status="error",
+                detail=failure["summary"],
+                diagnostic_tail=job.get("diagnostic_tail") or failure["detail"],
+                failure=failure,
+            )
 
     async def _backfill_embeddings(
         self, profile: ModelProfile, job: dict[str, Any]

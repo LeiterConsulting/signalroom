@@ -19,6 +19,33 @@ In the web workspace, begin with **Settings → Models** for readiness and insta
 tools** for artifact trust, evaluation, promotion, MLTK inventory, and publisher review. The guided/full choice
 does not change what this diagnostic collects.
 
+## Guided installation troubleshooting
+
+**Settings → Models → Guided installation troubleshooting** is the mutating companion to the read-only
+collector. An administrator selects one Ollama profile and one local Transformers specialist, confirms the
+potentially multi-gigabyte operation, and SignalRoom then:
+
+1. records the host OS, Python, architecture, and Apple Silicon translation state;
+2. verifies or explicitly installs the selected Ollama model;
+3. verifies or explicitly installs the local specialist runtime and safetensor snapshot;
+4. runs a synthetic, value-free capability check through each local runtime; and
+5. returns the exact failing stage, redacted installer tail, corrective actions, and shipped/configured
+   alternatives without changing active model routing, artifact-trust policy, or cloud policy.
+
+The drill checks both paths even when the first fails. Its **Copy safe troubleshooting report** action excludes
+credentials, model output, and investigation data.
+
+If the normal package or model request fails within 45 seconds in a way consistent with a narrow development
+index, mirror, or stale source credential, the drill makes one bounded public-only retry:
+
+- pip uses `--isolated --index-url https://pypi.org/simple --no-cache-dir --no-input`; and
+- an admitted public Hugging Face repository uses `https://huggingface.co` with `token=False`.
+
+The receipt identifies the source, states that no credential was sent, and records success or failure. TLS
+verification is never disabled. Certificate failures, storage failures, and filesystem-permission failures do
+not trigger this retry. The same guarded retry is used by an explicit one-profile local specialist installation;
+opening Settings, running readiness, and `--diagnose_all` never invoke it.
+
 ## What it checks
 
 The collector records explicit `PASS`, `WARN`, `FAIL`, and `INFO` observations for:
@@ -56,6 +83,9 @@ The workflow does not:
 - Change settings, model trust, routing, or runtime policy.
 - Read `data/secrets.enc`, `.vault.key`, environment variables, or bearer tokens.
 - Send a saved Hugging Face token. Public model metadata is tested without authentication.
+
+These statements describe `./install.sh --diagnose_all`, not the separately confirmed guided installation
+troubleshooting action above.
 
 Common authorization, token, password, API-key, and URL-user-info forms are redacted before text reaches disk. Existing application logs are untrusted input and receive the same redaction pass; review any diagnostic attachment according to the deployment's normal data-handling policy.
 

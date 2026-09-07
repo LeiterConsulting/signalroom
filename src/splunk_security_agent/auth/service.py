@@ -23,6 +23,7 @@ ADMIN_MUTATION_PREFIXES = (
     "/api/auth/oidc/",
     "/api/model-setup/pull",
     "/api/model-setup/activate",
+    "/api/model-setup/troubleshoot",
     "/api/model-lifecycle/",
     "/api/model-capabilities/time-series/runtime",
     "/api/model-trust",

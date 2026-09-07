@@ -167,6 +167,21 @@ def test_model_lifecycle_workspace_separates_health_and_safe_staging() -> None:
     assert ".lifecycle-axis.offline" in STYLES_CSS
 
 
+def test_guided_model_setup_explains_mutation_public_retry_and_safe_report() -> None:
+    assert 'id="modelSetupDoctorControls"' in INDEX_HTML
+    assert 'role="group" aria-label="Guided model installation checks"' in INDEX_HTML
+    assert 'id="modelSetupOllamaProfile"' in INDEX_HTML
+    assert 'id="modelSetupLocalProfile"' in INDEX_HTML
+    assert 'id="modelSetupDoctorResult" aria-live="polite"' in INDEX_HTML
+    assert "Explicit, potentially large download" in INDEX_HTML
+    assert "public PyPI or public Hugging Face without credentials" in INDEX_HTML
+    assert "async function runModelSetupDoctor(event)" in APP_JS
+    assert "function copyModelSetupReport()" in APP_JS
+    assert "credentials sent: no" in APP_JS
+    assert ".model-setup-doctor-form" in STYLES_CSS
+    assert ".model-setup-public-retry" in STYLES_CSS
+
+
 def test_guided_workspace_preserves_advanced_capabilities() -> None:
     assert '<body class="chat-active workspace-guided">' in INDEX_HTML
     assert 'id="workspaceGuide"' in INDEX_HTML

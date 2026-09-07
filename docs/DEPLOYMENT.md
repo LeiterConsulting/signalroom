@@ -51,6 +51,19 @@ For a terminal-driven deployment:
 
 External installation and model downloads are always opt-in. Local SecureBERT installation is initiated from Settings so the operator sees the exact profile, purpose, and progress. On macOS, `--install-ollama` opens the signed app download; finish the app installation and rerun with `--pull-models`.
 
+For an opaque or host-specific failure, run **Settings → Models → Guided installation troubleshooting**.
+After explicit confirmation it tests one selected Ollama profile and one selected local Transformers specialist,
+installs either only when missing, and executes synthetic local capability probes. It checks both paths even when
+one fails and produces a redacted, copyable report with the failing stage and supported alternatives. It does not
+change routing, trust enforcement, or cloud-inference policy.
+
+When the configured package/model source fails with a resolution, connectivity, or authorization signature, the
+guided action retries once against isolated public PyPI or the admitted public Hugging Face repository without
+sending saved credentials. That public-only decision is visible in the receipt. It does not apply to TLS trust,
+disk, or filesystem-permission errors, and certificate verification remains enabled.
+The same rule applies to an explicitly requested individual local specialist install; readiness and diagnostic
+reads never trigger package or model retrieval.
+
 For a non-mutating model-preparation audit on Linux or macOS, run:
 
 ```bash

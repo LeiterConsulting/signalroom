@@ -101,7 +101,9 @@ decision-ready brief rather than a tour of implementation details.
 3. Open Discovery and run **Standard** discovery.
 4. Review prioritized findings and open one in Investigate.
 5. Preserve a material observation or hypothesis in a case.
-6. Open Models and check whether runtime, artifact trust, and publisher currency are healthy.
+6. Open Models and check whether runtime, artifact trust, and publisher currency are healthy. If an installation
+   is unclear, use **Guided installation troubleshooting** to exercise one Ollama and one local specialist path,
+   then copy its credential-free report or select one of the displayed supported alternatives.
 
 Demo mode is optional and synthetic. It is useful for learning the workflow, but it is never silently substituted
 for a live Splunk connection.
