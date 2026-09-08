@@ -2165,11 +2165,15 @@ function modelSetupAttemptCard(attempt) {
   const failure = attempt.failure || {};
   const proof = attempt.proof || {};
   const publicRetry = attempt.public_retry || {};
+  const sourcePolicy = attempt.source_policy || {};
+  const tlsTrust = attempt.tls_trust || {};
   const proofItems = Object.entries(proof).map(([key,value]) => `<span><b>${escapeHtml(key.replaceAll('_',' '))}</b> ${escapeHtml(String(value))}</span>`).join('');
   const failureDetail = failure.code ? `<details><summary>Why this failed · ${escapeHtml(failure.code.replaceAll('-',' '))}</summary><p>${escapeHtml(failure.detail || '')}</p>${attempt.diagnostic_tail ? `<pre>${escapeHtml(attempt.diagnostic_tail)}</pre>` : ''}</details>` : '';
   return `<article class="model-setup-attempt ${escapeHtml(attempt.status || 'queued')}">
     <i aria-hidden="true"></i><div><header><span>${escapeHtml((attempt.provider || '').replaceAll('-',' '))}</span><b>${escapeHtml(attempt.label || attempt.profile_id || 'Model')}</b><em>${escapeHtml(attempt.status || 'queued')}</em></header>
     <p>${escapeHtml(attempt.detail || '')}</p><small>${escapeHtml(attempt.model || '')} · stage ${escapeHtml((attempt.stage || 'waiting').replaceAll('-',' '))}${attempt.download_started ? ' · download started' : ' · no download yet'}</small>
+    ${sourcePolicy.mode ? `<div class="model-setup-public-retry"><b>Model source · ${escapeHtml(sourcePolicy.mode.replaceAll('-',' '))}</b><span>${escapeHtml(sourcePolicy.source || '')} · credentials sent: ${sourcePolicy.credentials_sent ? 'yes' : 'no'} · first attempt</span></div>` : ''}
+    ${tlsTrust.mode ? `<div class="model-setup-public-retry"><b>HTTPS trust · ${escapeHtml(tlsTrust.active ? 'native system store' : 'Python fallback')}</b><span>Certificate verification on${tlsTrust.environment_bundle ? ` · approved bundle ${tlsTrust.environment_bundle_exists ? 'found' : 'missing'}` : ''}</span></div>` : ''}
     ${publicRetry.attempted ? `<div class="model-setup-public-retry"><b>Public-only retry ${publicRetry.succeeded ? 'succeeded' : 'attempted'}</b><span>${escapeHtml(publicRetry.source || '')} · credentials sent: no</span></div>` : ''}
     ${proofItems ? `<div class="model-setup-proof">${proofItems}</div>` : ''}${failureDetail}</div></article>`;
 }
@@ -2221,7 +2225,7 @@ async function runModelSetupDoctor(event) {
 
 async function copyModelSetupReport() {
   const job = state.modelSetupTroubleshooting; if (!job) return;
-  const report = JSON.stringify({schema:'signalroom.model-setup-troubleshooting.v1',generated_at:new Date().toISOString(),decision:job.decision,host:job.host,attempts:job.attempts,recommendations:job.recommendations,alternatives:job.alternatives,downloads_started:job.downloads_started,contract:job.contract}, null, 2);
+  const report = JSON.stringify({schema:'signalroom.model-setup-troubleshooting.v2',generated_at:new Date().toISOString(),decision:job.decision,host:job.host,attempts:job.attempts,recommendations:job.recommendations,alternatives:job.alternatives,downloads_started:job.downloads_started,contract:job.contract}, null, 2);
   try { await navigator.clipboard.writeText(report); toast('Safe model setup report copied'); }
   catch (_) { toast('Clipboard access was blocked; copy the visible stage details instead'); }
 }
@@ -3287,8 +3291,12 @@ async function pullModel(profileId, button) {
       await new Promise(resolve => setTimeout(resolve, 1000));
       job = await api(`/api/model-setup/pull/${job.id}`);
     }
-    if (job.status !== 'complete') throw new Error(job.detail || 'Model download failed');
-    toast(job.kind === 'local-transformers' ? 'Local specialist installed · approve its exact artifact after evaluation' : 'Model is ready in Ollama · approve its exact artifact after evaluation'); await Promise.all([loadModelReadiness(), loadModelTrust(true)]); renderModels();
+    if (job.status !== 'complete') {
+      const publicSourceUsed = job.source_policy?.mode === 'credential-free-public' ? ' · credential-free public source was already used' : '';
+      throw new Error(`${job.detail || 'Model download failed'}${publicSourceUsed}`);
+    }
+    const publicSourceNote = job.source_policy?.mode === 'credential-free-public' ? ' · downloaded credential-free from the admitted public repository' : '';
+    toast(job.kind === 'local-transformers' ? `Local specialist installed${publicSourceNote} · approve its exact artifact after evaluation` : 'Model is ready in Ollama · approve its exact artifact after evaluation'); await Promise.all([loadModelReadiness(), loadModelTrust(true)]); renderModels();
   } catch (error) { button.disabled = false; button.textContent = 'Retry'; toast(error.message); }
 }
 

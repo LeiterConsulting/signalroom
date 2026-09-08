@@ -282,19 +282,32 @@ ensure_macos_python_compatibility() {
     esac
 }
 
+run_public_pip() {
+    local description="$1"; shift
+    local clean_env=(env)
+    local name=""
+    while IFS='=' read -r name _; do
+        [[ "$name" == PIP_* ]] && clean_env+=(-u "$name")
+    done < <(env)
+    "${clean_env[@]}" PIP_CONFIG_FILE=/dev/null "$VENV_PYTHON" -m pip --isolated "$@" \
+        --disable-pip-version-check --retries 2 --timeout 20 --index-url "$PYPI_URL" \
+        --no-cache-dir --no-input || {
+        fail "$description failed while using credential-free public PyPI."
+        return 1
+    }
+}
+
 run_pip() {
     local description="$1"; shift
     local common=(--disable-pip-version-check --retries 2 --timeout 20)
     if [[ "$PUBLIC_ONLY" == "yes" ]]; then
-        info "Using public PyPI only."
-        "$VENV_PYTHON" -m pip "$@" "${common[@]}" --index-url "$PYPI_URL" --no-cache-dir || {
-            fail "$description failed while using public PyPI."; exit 1;
-        }
+        info "Using credential-free public PyPI only."
+        run_public_pip "$description" "$@" || exit 1
         return
     fi
     if "$VENV_PYTHON" -m pip "$@" "${common[@]}"; then return; fi
     warn "$description failed with the configured package index. Retrying with public PyPI..."
-    "$VENV_PYTHON" -m pip "$@" "${common[@]}" --index-url "$PYPI_URL" --no-cache-dir || {
+    run_public_pip "$description" "$@" || {
         fail "$description failed. Check network access or retry with --public_only."; exit 1;
     }
 }
@@ -596,7 +609,11 @@ setup_models() {
 diagnose_all() {
     find_python
     info "Running non-mutating installation and model diagnostics..."
-    if "$PYTHON_CMD" "$INSTALL_DIR/src/splunk_security_agent/diagnose_all.py" \
+    local diagnostic_python="$PYTHON_CMD"
+    if [[ -x "$VENV_PYTHON" ]]; then
+        diagnostic_python="$VENV_PYTHON"
+    fi
+    if "$diagnostic_python" "$INSTALL_DIR/src/splunk_security_agent/diagnose_all.py" \
         --root "$INSTALL_DIR" --log "$DIAGNOSTIC_LOG_FILE"; then
         success "SignalRoom diagnostics passed."
         info "Attach this log for review: $DIAGNOSTIC_LOG_FILE"

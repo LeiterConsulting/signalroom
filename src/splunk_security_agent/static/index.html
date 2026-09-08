@@ -643,7 +643,7 @@
               <label><span>Local specialist to prove</span><select id="modelSetupLocalProfile" required></select><small>Downloads from Hugging Face, then performs local-only inference on synthetic input.</small></label>
               <button class="button primary" type="button" id="runModelSetupDoctor">Test and install both</button>
             </div>
-            <div class="model-setup-consent" role="note"><b>Explicit, potentially large download</b><span>This can install Python inference packages and model files. If a configured development index or mirror fails to resolve a public dependency within 45 seconds, the drill retries once against public PyPI or public Hugging Face without credentials and records that decision. It never changes active routing, model trust, or cloud policy.</span></div>
+            <div class="model-setup-consent" role="note"><b>Explicit, potentially large download</b><span>This can install Python inference packages and model files. Admitted public SecureBERT snapshots use official Hugging Face without credentials on the first attempt. If a configured development package index cannot resolve a public dependency within 45 seconds, the drill retries once against isolated public PyPI and records that decision. It never changes active routing, model trust, or cloud policy.</span></div>
             <div class="model-setup-doctor-result" id="modelSetupDoctorResult" aria-live="polite"><div class="empty-inline compact-empty">Run the guided check when an installation fails without a useful explanation.</div></div>
           </section>
           <div class="form-grid">

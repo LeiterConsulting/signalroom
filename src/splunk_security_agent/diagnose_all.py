@@ -11,12 +11,20 @@ import ssl
 import subprocess
 import sys
 import sysconfig
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlsplit, urlunsplit
 from urllib.request import Request, urlopen
+
+try:
+    from .source_recovery import credential_free_pip_environment, should_retry_public_source
+    from .tls_trust import activate_system_tls_trust
+except ImportError:  # Support the documented direct-file offline invocation.
+    from source_recovery import credential_free_pip_environment, should_retry_public_source
+    from tls_trust import activate_system_tls_trust
 
 RUNTIME_REQUIREMENTS = (
     "huggingface-hub>=0.27,<2",
@@ -132,6 +140,7 @@ class DiagnoseAll:
         self.models = [
             item for item in self.config.get("models", []) if isinstance(item, dict)
         ]
+        self.tls_trust = activate_system_tls_trust()
         self.venv_python = (
             self.root / ".venv" / "Scripts" / "python.exe"
             if os.name == "nt"
@@ -156,8 +165,9 @@ class DiagnoseAll:
                 "configuration payloads are not collected. Common secret forms are redacted."
             )
             log.raw(
-                "Mutation contract: this command does not install packages, download models, "
-                "start services, or change SignalRoom configuration."
+                "Mutation contract: this command does not install packages, retain model artifacts, "
+                "start services, or change SignalRoom configuration. One-byte HTTPS range probes "
+                "verify public artifact delivery paths."
             )
             self._host(log)
             self._installation(log)
@@ -216,6 +226,31 @@ class DiagnoseAll:
                     "machine": platform.machine(),
                     "sysconfig_platform": sysconfig.get_platform(),
                     "openssl": ssl.OPENSSL_VERSION,
+                },
+                sort_keys=True,
+            ),
+        )
+        verify_paths = ssl.get_default_verify_paths()
+        log.record(
+            "PASS" if self.tls_trust.get("active") else "WARN",
+            "Outbound HTTPS certificate trust",
+            json.dumps(
+                {
+                    "certificate_verification": True,
+                    "mode": self.tls_trust.get("mode"),
+                    "provider": self.tls_trust.get("provider"),
+                    "native_system_trust_active": self.tls_trust.get("active"),
+                    "environment_bundle": self.tls_trust.get("environment_bundle"),
+                    "environment_bundle_exists": self.tls_trust.get(
+                        "environment_bundle_exists"
+                    ),
+                    "python_default_cafile_present": bool(
+                        verify_paths.cafile and Path(verify_paths.cafile).is_file()
+                    ),
+                    "python_default_capath_present": bool(
+                        verify_paths.capath and Path(verify_paths.capath).is_dir()
+                    ),
+                    "fallback_reason": self.tls_trust.get("reason", ""),
                 },
                 sort_keys=True,
             ),
@@ -684,28 +719,7 @@ print(json.dumps(result, sort_keys=True))
         elif not self.network:
             log.record("INFO", "PyPI wheel compatibility check skipped by --offline")
         else:
-            self._run_command(
-                log,
-                "PyPI binary-wheel resolution for the local runtime",
-                [
-                    str(self.venv_python),
-                    "-m",
-                    "pip",
-                    "install",
-                    "--dry-run",
-                    "--ignore-installed",
-                    "--no-deps",
-                    "--only-binary=:all:",
-                    "--disable-pip-version-check",
-                    "--no-cache-dir",
-                    "--retries",
-                    "1",
-                    "--timeout",
-                    "20",
-                    *RUNTIME_REQUIREMENTS,
-                ],
-                timeout=240,
-            )
+            self._runtime_wheel_compatibility(log)
 
         if not self.network:
             log.record("INFO", "Hugging Face metadata checks skipped by --offline")
@@ -759,6 +773,31 @@ print(json.dumps(result, sort_keys=True))
                         f"Hugging Face model has no observable safetensors weights: {model}",
                         "The current local installer ignores legacy .bin weights.",
                     )
+                else:
+                    artifact_url = (
+                        f"https://huggingface.co/{quote(model, safe='/')}/resolve/"
+                        f"{quote(str(metadata.get('sha') or 'main'), safe='')}/"
+                        f"{quote(str(weights[0]), safe='/')}"
+                    )
+                    try:
+                        artifact_probe = self._http_artifact_probe(artifact_url)
+                        log.record(
+                            "PASS",
+                            f"Hugging Face artifact HTTPS path {model}",
+                            json.dumps(artifact_probe, sort_keys=True),
+                        )
+                    except HTTPError as exc:
+                        log.record(
+                            "FAIL",
+                            f"Hugging Face artifact HTTPS path failed for {model}",
+                            f"HTTP {exc.code} after resolving the admitted public weight URL.",
+                        )
+                    except Exception as exc:
+                        log.record(
+                            "FAIL",
+                            f"Hugging Face artifact HTTPS path failed for {model}",
+                            exc,
+                        )
             except HTTPError as exc:
                 level = "WARN" if exc.code in {401, 403} else "FAIL"
                 log.record(
@@ -769,6 +808,73 @@ print(json.dumps(result, sort_keys=True))
                 )
             except Exception as exc:
                 log.record("FAIL", f"Hugging Face metadata request failed for {model}", exc)
+
+    def _runtime_wheel_compatibility(self, log: DiagnosticLog) -> None:
+        """Resolve runtime wheels read-only, with one bounded credential-free public fallback."""
+        runtime_command = [
+            str(self.venv_python),
+            "-m",
+            "pip",
+            "install",
+            "--dry-run",
+            "--ignore-installed",
+            "--no-deps",
+            "--only-binary=:all:",
+            "--disable-pip-version-check",
+            "--no-cache-dir",
+            "--no-input",
+            "--retries",
+            "1",
+            "--timeout",
+            "20",
+            *RUNTIME_REQUIREMENTS,
+        ]
+        started = time.monotonic()
+        configured = self._run_command(
+            log,
+            "Configured-index PyPI binary-wheel resolution",
+            runtime_command,
+            timeout=240,
+            failure_level="WARN",
+        )
+        elapsed = time.monotonic() - started
+        configured_output = "\n".join(
+            value
+            for value in (
+                configured.stdout if configured else "",
+                configured.stderr if configured else "",
+            )
+            if value
+        )
+        if configured is not None and configured.returncode == 0:
+            return
+        if configured is not None and should_retry_public_source(
+            configured_output,
+            elapsed_seconds=elapsed,
+        ):
+            public_command = [
+                *runtime_command[:4],
+                "--isolated",
+                "--index-url",
+                "https://pypi.org/simple",
+                *runtime_command[4:],
+            ]
+            self._run_command(
+                log,
+                "Credential-free public PyPI binary-wheel resolution fallback",
+                public_command,
+                timeout=240,
+                env=credential_free_pip_environment(),
+            )
+            return
+        log.record(
+            "FAIL",
+            "PyPI binary-wheel resolution has no admitted public-only retry",
+            (
+                "The configured-source failure was slow or did not match a narrow mirror, "
+                "resolution, connectivity, or authorization signature."
+            ),
+        )
 
     def _existing_logs(self, log: DiagnosticLog) -> None:
         log.heading("Existing SignalRoom log tails")
@@ -796,6 +902,7 @@ print(json.dumps(result, sort_keys=True))
         *,
         timeout: int,
         failure_level: str = "FAIL",
+        env: dict[str, str] | None = None,
     ) -> subprocess.CompletedProcess[str] | None:
         try:
             completed = subprocess.run(
@@ -807,6 +914,7 @@ print(json.dumps(result, sort_keys=True))
                 errors="replace",
                 timeout=timeout,
                 check=False,
+                env=env,
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
             log.record(failure_level, label, f"{type(exc).__name__}: {exc}")
@@ -860,6 +968,29 @@ print(json.dumps(result, sort_keys=True))
         if not isinstance(value, dict):
             raise ValueError("Expected a JSON object")
         return value
+
+    @staticmethod
+    def _http_artifact_probe(url: str, timeout: int = 20) -> dict[str, Any]:
+        """Follow the model-file delivery path while reading at most one response byte."""
+        request = Request(
+            url,
+            headers={
+                "Accept": "application/octet-stream",
+                "Accept-Encoding": "identity",
+                "Range": "bytes=0-0",
+                "User-Agent": "SignalRoom-Diagnose/0.1",
+            },
+            method="GET",
+        )
+        with urlopen(request, timeout=timeout) as response:
+            sample = response.read(1)
+            return {
+                "status": getattr(response, "status", None),
+                "redirect_target": safe_url(str(response.geturl())),
+                "range_requested": True,
+                "bytes_read": len(sample),
+                "content_range_returned": bool(response.headers.get("Content-Range")),
+            }
 
 
 def build_parser() -> argparse.ArgumentParser:

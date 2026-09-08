@@ -26,6 +26,9 @@ from .providers.local_transformers import (
 )
 from .rag import EvidenceStore
 from .schemas import ModelProfile
+from .source_recovery import credential_free_pip_environment
+from .source_recovery import should_retry_public_source as _should_retry_public_source
+from .tls_trust import system_tls_trust_state
 
 OLLAMA_DOWNLOAD_URL = "https://ollama.com/download"
 HF_TOKEN_URL = "https://huggingface.co/settings/tokens"
@@ -35,7 +38,6 @@ LOCAL_RUNTIME_PACKAGES = (
     "torch>=2.5",
     "transformers>=4.48,<6",
 )
-PUBLIC_RETRY_FAST_FAILURE_SECONDS = 45
 
 MODEL_CATALOG_REVIEW: dict[str, Any] = {
     "reviewed_at": "2026-09-05",
@@ -499,32 +501,6 @@ def _safe_setup_detail(value: Any, limit: int = 1800) -> str:
     return text[-limit:]
 
 
-def _should_retry_public_source(value: Any, *, elapsed_seconds: float = 0) -> bool:
-    """Retry only failures plausibly caused by a restricted index, mirror, or stale token."""
-    if elapsed_seconds > PUBLIC_RETRY_FAST_FAILURE_SECONDS:
-        return False
-    lowered = str(value or "").lower()
-    return any(
-        phrase in lowered
-        for phrase in (
-            "no matching distribution found",
-            "could not find a version that satisfies",
-            "from versions: none",
-            "no available distribution",
-            "404 client error",
-            "401 client error",
-            "403 client error",
-            "repository not found",
-            "unauthorized",
-            "forbidden",
-            "name resolution",
-            "connection refused",
-            "timed out",
-            "timeout",
-        )
-    )
-
-
 def _model_host_context() -> dict[str, Any]:
     """Return the architecture facts that affect local binary-wheel compatibility."""
     system = platform.system()
@@ -563,6 +539,7 @@ def _model_host_context() -> dict[str, Any]:
         "apple_silicon": apple_silicon,
         "translated": translated,
         "architecture_ok": not (apple_silicon and machine != "arm64"),
+        "outbound_tls_trust": system_tls_trust_state(),
     }
 
 
@@ -571,6 +548,7 @@ def _setup_failure(kind: str, stage: str, detail: Any, host: dict[str, Any]) -> 
     safe = _safe_setup_detail(detail)
     lowered = safe.lower()
     actions: list[dict[str, Any]] = []
+    tls_trust = host.get("outbound_tls_trust") or {}
     if host.get("apple_silicon") and not host.get("architecture_ok"):
         code = "macos-rosetta-python"
         summary = "Apple Silicon is running an Intel Python environment"
@@ -596,6 +574,21 @@ def _setup_failure(kind: str, stage: str, detail: Any, host: dict[str, Any]) -> 
                 },
             ]
         )
+    elif tls_trust.get("environment_bundle") and not tls_trust.get(
+        "environment_bundle_exists"
+    ):
+        code = "tls-ca-bundle-missing"
+        summary = "The configured outbound CA bundle does not exist"
+        actions.append(
+            {
+                "title": "Correct or remove SSL_CERT_FILE",
+                "detail": (
+                    "Start SignalRoom with SSL_CERT_FILE pointing to an existing, approved PEM "
+                    "bundle, or remove the variable to use the native operating-system trust store."
+                ),
+                "external": False,
+            }
+        )
     elif any(
         phrase in lowered
         for phrase in (
@@ -618,18 +611,65 @@ def _setup_failure(kind: str, stage: str, detail: Any, host: dict[str, Any]) -> 
                 "external": False,
             }
         )
-    elif any(phrase in lowered for phrase in ("certificate verify failed", "sslerror", "tls")):
+    elif any(
+        phrase in lowered
+        for phrase in ("certificate verify failed", "certificate_verify_failed", "sslerror", "tls")
+    ):
         code = "tls-trust"
         summary = "TLS certificate validation blocked the package or model download"
-        actions.append(
-            {
-                "title": "Configure the organization CA",
-                "detail": (
-                    "Add the trusted CA to the Python/pip and HTTPS trust configuration. "
-                    "Do not disable certificate verification for model downloads."
-                ),
-                "external": False,
-            }
+        if host.get("system") == "Darwin" and tls_trust.get("active"):
+            actions.append(
+                {
+                    "title": "Repair the certificate chain in macOS Keychain",
+                    "detail": (
+                        "SignalRoom already used the native macOS trust store. Confirm "
+                        "that the issuer or organization TLS-inspection root is installed and trusted "
+                        "in Keychain Access, restart SignalRoom, and retry."
+                    ),
+                    "external": False,
+                }
+            )
+        elif host.get("system") == "Darwin":
+            actions.append(
+                {
+                    "title": "Update SignalRoom's native macOS trust support",
+                    "detail": (
+                        "Pull the current SignalRoom release and rerun the installer so outbound model "
+                        "downloads can use certificates trusted by macOS Keychain."
+                    ),
+                    "command": "./install.sh --restart",
+                    "external": False,
+                }
+            )
+        actions.extend(
+            [
+                {
+                    "title": "Use an explicit organization CA bundle when required",
+                    "detail": (
+                        "If policy distributes a PEM bundle instead of a Keychain root, set SSL_CERT_FILE "
+                        "to that approved bundle before starting SignalRoom. Never disable verification."
+                    ),
+                    "command": (
+                        "SSL_CERT_FILE=/absolute/path/to/approved-ca-bundle.pem "
+                        "./install.sh --restart"
+                    ),
+                    "external": False,
+                },
+                {
+                    "title": "Capture the outbound trust evidence",
+                    "detail": (
+                        "Run the read-only collector after restarting. It records the active trust mode, "
+                        "CA-path presence, and Hugging Face verification result without "
+                        "exporting certificates."
+                    ),
+                    "command": (
+                        ".\\install.ps1 -DiagnoseAll"
+                        if host.get("system") == "Windows"
+                        else "./install.sh --diagnose_all"
+                    ),
+                    "external": False,
+                },
+            ]
         )
     elif any(phrase in lowered for phrase in ("no space left", "disk quota", "errno 28")):
         code = "storage"
@@ -1908,6 +1948,10 @@ class ModelSetupService:
                 child = self.jobs[child["id"]]
             if child.get("public_retry"):
                 attempt["public_retry"] = child["public_retry"]
+            if child.get("tls_trust"):
+                attempt["tls_trust"] = child["tls_trust"]
+            if child.get("source_policy"):
+                attempt["source_policy"] = child["source_policy"]
             if child.get("status") != "complete":
                 failure = child.get("failure") or _setup_failure(
                     attempt["provider"],
@@ -2241,6 +2285,7 @@ class ModelSetupService:
             )
 
     async def _install_local_specialist(self, job: dict[str, Any]) -> None:
+        job["tls_trust"] = system_tls_trust_state()
         job.update(
             status="pulling",
             stage="runtime-check",
@@ -2264,6 +2309,11 @@ class ModelSetupService:
                     "install",
                     *LOCAL_RUNTIME_PACKAGES,
                     "--disable-pip-version-check",
+                    "--no-input",
+                    "--retries",
+                    "1",
+                    "--timeout",
+                    "20",
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.STDOUT,
                     creationflags=creationflags,
@@ -2287,12 +2337,7 @@ class ModelSetupService:
                         elapsed_seconds=initial_install_seconds,
                     )
                 ):
-                    public_pip_env = {
-                        key: value
-                        for key, value in os.environ.items()
-                        if not key.upper().startswith("PIP_")
-                    }
-                    public_pip_env["PIP_CONFIG_FILE"] = os.devnull
+                    public_pip_env = credential_free_pip_environment()
                     job.update(
                         stage="runtime-install-public-retry",
                         detail=(
@@ -2321,6 +2366,10 @@ class ModelSetupService:
                         "--no-cache-dir",
                         "--no-input",
                         "--disable-pip-version-check",
+                        "--retries",
+                        "1",
+                        "--timeout",
+                        "20",
                         *LOCAL_RUNTIME_PACKAGES,
                         stdout=asyncio.subprocess.PIPE,
                         stderr=asyncio.subprocess.STDOUT,
@@ -2367,6 +2416,20 @@ class ModelSetupService:
             model_path = self.config.local_model_path(profile.id)
             model_path.mkdir(parents=True, exist_ok=True)
             token = self.config.secret("huggingface_token") or None
+            reviewed = REVIEWED_PUBLISHER_MODELS.get(profile.model, {})
+            public_source = bool(reviewed) and not bool(reviewed.get("gated"))
+            job["source_policy"] = {
+                "mode": "credential-free-public" if public_source else "configured-access",
+                "source": "https://huggingface.co" if public_source else "configured Hugging Face",
+                "credentials_sent": False if public_source else bool(token),
+                "first_attempt": True,
+                "reason": (
+                    "The admitted publisher revision is public, so SignalRoom bypassed saved "
+                    "credentials and alternate Hub endpoints."
+                    if public_source
+                    else "The repository is not admitted as public; configured access policy applies."
+                ),
+            }
 
             def download(*, public_only: bool = False) -> tuple[str, str]:
                 from huggingface_hub import HfApi, snapshot_download
@@ -2393,8 +2456,9 @@ class ModelSetupService:
                 )
                 return snapshot, revision
 
-            initial_download_started = time.monotonic()
-            download_task = asyncio.create_task(asyncio.to_thread(download))
+            download_task = asyncio.create_task(
+                asyncio.to_thread(download, public_only=public_source)
+            )
             elapsed = 0
             while not download_task.done():
                 await asyncio.sleep(1)
@@ -2406,38 +2470,7 @@ class ModelSetupService:
                     ),
                     progress=min(85, 30 + elapsed // 10),
                 )
-            try:
-                _, revision = await download_task
-            except Exception as initial_error:
-                initial_download_seconds = time.monotonic() - initial_download_started
-                reviewed = REVIEWED_PUBLISHER_MODELS.get(profile.model, {})
-                public_source = bool(reviewed) and not bool(reviewed.get("gated"))
-                if (
-                    not public_source
-                    or not _should_retry_public_source(
-                        initial_error,
-                        elapsed_seconds=initial_download_seconds,
-                    )
-                ):
-                    raise
-                job.update(
-                    stage="model-download-public-retry",
-                    detail=(
-                        "Configured Hub access did not resolve the admitted public model; "
-                        "retrying against public Hugging Face without credentials"
-                    ),
-                    progress=70,
-                    public_retry={
-                        "attempted": True,
-                        "source": "https://huggingface.co",
-                        "credentials_sent": False,
-                        "reason": _safe_setup_detail(initial_error, 600),
-                        "trigger": "fail-fast-source-resolution",
-                        "initial_failure_seconds": round(initial_download_seconds, 2),
-                    },
-                )
-                _, revision = await asyncio.to_thread(download, public_only=True)
-                job["public_retry"]["succeeded"] = True
+            _, revision = await download_task
             job.update(stage="model-validation", detail="Validating the downloaded model", progress=92)
             if not (model_path / "config.json").exists() or not any(
                 model_path.glob("*.safetensors")

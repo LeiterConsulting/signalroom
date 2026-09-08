@@ -121,6 +121,53 @@ def test_public_source_retry_is_limited_to_resolution_failures():
     assert ollama_failure["code"] == "ollama-inference-failed"
 
 
+def test_macos_tls_failure_distinguishes_native_keychain_from_missing_runtime_support():
+    native_failure = _setup_failure(
+        "local-transformers",
+        "model-download",
+        "[SSL: CERTIFICATE_VERIFY_FAILED] unable to get local issuer certificate",
+        {
+            "system": "Darwin",
+            "architecture_ok": True,
+            "outbound_tls_trust": {"active": True, "mode": "native-system"},
+        },
+    )
+    fallback_failure = _setup_failure(
+        "local-transformers",
+        "model-download",
+        "SSL certificate verify failed",
+        {
+            "system": "Darwin",
+            "architecture_ok": True,
+            "outbound_tls_trust": {"active": False, "mode": "python-default"},
+        },
+    )
+
+    assert native_failure["code"] == "tls-trust"
+    assert native_failure["actions"][0]["title"] == (
+        "Repair the certificate chain in macOS Keychain"
+    )
+    assert fallback_failure["actions"][0]["command"] == "./install.sh --restart"
+    assert all("disable certificate" not in item["detail"].lower() for item in native_failure["actions"])
+    assert any("Never disable verification" in item["detail"] for item in native_failure["actions"])
+
+    missing_bundle = _setup_failure(
+        "local-transformers",
+        "model-download",
+        "No such file or directory",
+        {
+            "system": "Darwin",
+            "architecture_ok": True,
+            "outbound_tls_trust": {
+                "active": True,
+                "environment_bundle": True,
+                "environment_bundle_exists": False,
+            },
+        },
+    )
+    assert missing_bundle["code"] == "tls-ca-bundle-missing"
+
+
 @pytest.mark.asyncio
 async def test_readiness_reports_each_ollama_profile(monkeypatch, tmp_path):
     monkeypatch.setattr("splunk_security_agent.model_setup.httpx.AsyncClient", FakeClient)
@@ -559,6 +606,8 @@ async def test_local_install_records_immutable_revision_and_manifest(monkeypatch
 
     class FakeApi:
         def __init__(self, endpoint=None, token=None):
+            assert endpoint == "https://huggingface.co"
+            assert token is False
             self.endpoint = endpoint
             self.token = token
 
@@ -600,12 +649,13 @@ async def test_local_install_records_immutable_revision_and_manifest(monkeypatch
     )
     assert job["status"] == "complete"
     assert job["progress"] == 100
+    assert job["tls_trust"]["certificate_verification"] is True
     assert manifest["revision"] == "abc123immutable"
     assert manifest["runtime"] == "local-transformers"
 
 
 @pytest.mark.asyncio
-async def test_public_hub_retry_is_credential_free_and_recorded(monkeypatch, tmp_path):
+async def test_admitted_public_hub_is_credential_free_on_first_attempt(monkeypatch, tmp_path):
     config = ConfigStore(tmp_path / "data")
     config.update_secrets(huggingface_token="stale-private-token")
     service = ModelSetupService(config)
@@ -622,8 +672,6 @@ async def test_public_hub_retry_is_credential_free_and_recorded(monkeypatch, tmp
             self.token = token
 
         def model_info(self, _model):
-            if self.token:
-                raise RuntimeError("401 Client Error: Unauthorized token=stale-private-token")
             return FakeInfo()
 
     def fake_snapshot_download(**kwargs):
@@ -650,15 +698,12 @@ async def test_public_hub_retry_is_credential_free_and_recorded(monkeypatch, tmp
     await service._install_local_specialist(job)
 
     assert job["status"] == "complete"
-    assert job["public_retry"]["attempted"] is True
-    assert job["public_retry"]["source"] == "https://huggingface.co"
-    assert job["public_retry"]["credentials_sent"] is False
-    assert job["public_retry"]["reason"] == (
-        "401 Client Error: Unauthorized token=[REDACTED]"
-    )
-    assert job["public_retry"]["trigger"] == "fail-fast-source-resolution"
-    assert job["public_retry"]["succeeded"] is True
-    assert calls[0]["token"] == "stale-private-token"
+    assert "public_retry" not in job
+    assert job["source_policy"]["mode"] == "credential-free-public"
+    assert job["source_policy"]["first_attempt"] is True
+    assert job["source_policy"]["credentials_sent"] is False
+    assert calls[0]["endpoint"] == "https://huggingface.co"
+    assert calls[0]["token"] is False
     assert calls[-1]["token"] is False
 
 

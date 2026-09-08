@@ -57,12 +57,20 @@ installs either only when missing, and executes synthetic local capability probe
 one fails and produces a redacted, copyable report with the failing stage and supported alternatives. It does not
 change routing, trust enforcement, or cloud-inference policy.
 
-When the configured package/model source fails with a resolution, connectivity, or authorization signature, the
-guided action retries once against isolated public PyPI or the admitted public Hugging Face repository without
-sending saved credentials. That public-only decision is visible in the receipt. It does not apply to TLS trust,
-disk, or filesystem-permission errors, and certificate verification remains enabled.
+Admitted public SecureBERT repositories use official Hugging Face without saved credentials on the first attempt;
+that public-only decision is visible in the receipt. When a configured package source fails with a fast resolution,
+connectivity, or authorization signature, the guided action retries once against isolated public PyPI without
+sending configured index credentials. Repeated requests do not apply to TLS trust, disk, or filesystem-permission
+errors, and certificate verification remains enabled.
 The same rule applies to an explicitly requested individual local specialist install; readiness and diagnostic
 reads never trigger package or model retrieval.
+
+SignalRoom uses native operating-system certificate trust for outbound package and model HTTPS. On macOS this
+allows the local Transformers installer to honor roots administered in Keychain Access without disabling TLS
+verification. A remaining `CERTIFICATE_VERIFY_FAILED` with `native-system` active means the issuer is not trusted
+by macOS or the remote/intercepted certificate chain is incomplete. Repair the approved root/chain in Keychain,
+restart SignalRoom, and retry. For an organization-managed PEM bundle, export `SSL_CERT_FILE` with the absolute
+bundle path before starting SignalRoom; do not use an unverified-download workaround.
 
 For a non-mutating model-preparation audit on Linux or macOS, run:
 
@@ -70,7 +78,16 @@ For a non-mutating model-preparation audit on Linux or macOS, run:
 ./install.sh --diagnose_all
 ```
 
-The collector runs from the system Python so it remains usable when `.venv`, pip, PyTorch, or Transformers is incomplete. It writes `signalroom-diagnose-all.log` in the installation root and returns a non-zero status when it observes a blocker. It never reads the credential vault or dumps environment variables. See [Model installation diagnostics](MODEL_DIAGNOSTICS.md).
+The collector uses `.venv` Python when it exists, matching the running app's native trust integration, and falls
+back to the selected system Python before installation. It remains usable when pip, PyTorch, or Transformers is
+incomplete. It writes `signalroom-diagnose-all.log` in the installation root and returns a non-zero status when it
+observes a blocker. It never reads the credential vault or dumps environment variables. See
+[Model installation diagnostics](MODEL_DIAGNOSTICS.md).
+
+Its wheel check tries the configured package source first. A fast narrow-index failure produces a warning and one
+credential-free public-PyPI `--dry-run`; public success proves the host is compatible without installing anything.
+The normal shell installer and explicitly confirmed in-app runtime installation use the same isolated public-PyPI
+boundary when they recover from a configured-index failure.
 
 After installing and evaluating models, use **Models → Local model supply chain** to approve each exact
 artifact. The default audit mode is appropriate while proving the deployment. Before selecting enforcement,

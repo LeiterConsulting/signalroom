@@ -181,6 +181,7 @@ from .tenancy import (
     TenantIsolationPlanner,
     TenantIsolationStore,
 )
+from .tls_trust import activate_system_tls_trust
 from .upgrade_readiness import UpgradeReadinessService
 from .validation import QueryIntelligenceService, ValidationService
 from .workload import (
@@ -189,6 +190,9 @@ from .workload import (
     WorkloadStore,
 )
 
+# SignalRoom owns this application process. Apply operating-system trust before services create
+# any outbound HTTP clients; certificate verification remains mandatory.
+OUTBOUND_TLS_TRUST = activate_system_tls_trust()
 ROOT = Path(os.getenv("SIGNALROOM_ROOT", Path.cwd())).resolve()
 STATIC = Path(__file__).resolve().parent / "static"
 DATA = Path(os.getenv("SIGNALROOM_DATA_DIR", ROOT / "data")).resolve()

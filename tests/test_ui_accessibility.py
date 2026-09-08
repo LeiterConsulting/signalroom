@@ -174,12 +174,18 @@ def test_guided_model_setup_explains_mutation_public_retry_and_safe_report() -> 
     assert 'id="modelSetupLocalProfile"' in INDEX_HTML
     assert 'id="modelSetupDoctorResult" aria-live="polite"' in INDEX_HTML
     assert "Explicit, potentially large download" in INDEX_HTML
-    assert "public PyPI or public Hugging Face without credentials" in INDEX_HTML
+    assert "official Hugging Face without credentials on the first attempt" in INDEX_HTML
+    assert "isolated public PyPI" in INDEX_HTML
     assert "async function runModelSetupDoctor(event)" in APP_JS
     assert "function copyModelSetupReport()" in APP_JS
     assert "credentials sent: no" in APP_JS
     assert ".model-setup-doctor-form" in STYLES_CSS
     assert ".model-setup-public-retry" in STYLES_CSS
+    assert "HTTPS trust" in APP_JS
+    assert "native system store" in APP_JS
+    assert "credential-free public source was already used" in APP_JS
+    assert "Model source" in APP_JS
+    assert "signalroom.model-setup-troubleshooting.v2" in APP_JS
 
 
 def test_guided_workspace_preserves_advanced_capabilities() -> None:

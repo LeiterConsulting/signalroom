@@ -296,14 +296,25 @@ The easiest path is **Settings → Models**. SignalRoom detects Ollama and the l
 When one of those installs fails without a useful explanation, **Guided installation troubleshooting** proves
 one selected Ollama path and one selected local Transformers path in the same host-side run. It continues to the
 second path after a first-path failure, runs only synthetic capability checks, and returns stage-specific
-remediation plus a credential-free report. If the initial failure indicates that a narrow package index, mirror,
-or stale source credential could not resolve a public dependency within 45 seconds, the explicitly confirmed drill retries once
-with isolated public PyPI or the admitted public Hugging Face repository. The report records that fallback and
-confirms no credentials were sent; TLS verification is not relaxed. The drill never changes active routing,
-model trust, or cloud policy.
+remediation plus a credential-free report. Admitted public SecureBERT repositories use the official
+`https://huggingface.co` endpoint with `token=False` on the first attempt, bypassing saved credentials and alternate
+Hub endpoints. If a narrow package index or mirror cannot resolve a public runtime dependency within 45 seconds,
+the explicitly confirmed drill retries once with isolated public PyPI. The report records the source decision and
+confirms no credentials were sent; TLS verification is not relaxed. The drill never changes active routing, model
+trust, or cloud policy.
+
+Outbound package and model HTTPS uses the operating system's native certificate trust store. On macOS this
+means roots administered through Keychain Access are available to Python and Hugging Face downloads while
+hostname and certificate validation remain enabled. A TLS failure now reports whether native Keychain trust was
+active. If it was active, repair the issuer chain in Keychain; if policy supplies a PEM bundle instead, start
+SignalRoom with `SSL_CERT_FILE` pointing to that approved bundle. SignalRoom never offers an insecure-download
+mode.
 
 An explicit one-profile local specialist install uses the same fail-fast public-source recovery. Merely opening
-Models, checking readiness, or running `--diagnose_all` remains read-only and never invokes the fallback.
+Models or checking readiness never invokes the fallback. `--diagnose_all` remains read-only, but if its configured
+package-index dry run fails quickly with a narrow-source signature, it performs a second credential-free,
+no-install resolution against public PyPI. This proves whether the host can obtain compatible wheels without
+changing the environment.
 
 The **Models → Check for updates** action is also read-only. Local Transformers snapshots are compared
 to their recorded immutable Hub revision. Hugging Face-backed Ollama models become trackable after an
@@ -473,7 +484,7 @@ If model installation or readiness is unclear on macOS or Linux, run:
 ./install.sh --diagnose_all
 ```
 
-The command makes no configuration changes and installs or downloads nothing. It tests the host and virtual-environment architecture, dependency consistency, binary-wheel availability, public Hugging Face model metadata, local model artifacts, Ollama CLI/app/process/HTTP state, the running SignalRoom readiness API when available, and redacted tails of the existing service logs. The attachment-friendly result is written to `signalroom-diagnose-all.log`; a non-zero exit means at least one blocker was observed. See [Model installation diagnostics](docs/MODEL_DIAGNOSTICS.md) for the complete contract.
+The command makes no configuration changes, installs nothing, and retains no model content. It tests the host and virtual-environment architecture, native/system HTTPS trust mode and CA-path presence, dependency consistency, binary-wheel availability, public Hugging Face model metadata and redirected artifact-delivery trust with a one-byte range probe, local model artifacts, Ollama CLI/app/process/HTTP state, the running SignalRoom readiness API when available, and redacted tails of the existing service logs. The attachment-friendly result is written to `signalroom-diagnose-all.log`; a non-zero exit means at least one blocker was observed. See [Model installation diagnostics](docs/MODEL_DIAGNOSTICS.md) for the complete contract.
 
 Use the read-only command to collect evidence before changing the host. Use the separately confirmed
 **Settings → Models → Guided installation troubleshooting** action when SignalRoom should attempt the installs,

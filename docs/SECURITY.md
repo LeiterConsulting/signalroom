@@ -35,10 +35,18 @@ The local prototype defaults to localhost, opt-in demo mode, local specialist ex
 - Guided installation troubleshooting is an explicit administrator mutation that may install one selected
   Ollama model and one selected local Transformers specialist. It uses synthetic probes, retains no model output
   or investigation data in its report, and cannot change model routing, trust enforcement, or cloud policy.
-- A resolution/authentication-style failure during that guided action or another explicit local-specialist install
-  may trigger one credential-free public-only retry. pip runs isolated against `https://pypi.org/simple`; admitted public model retrieval uses
-  `https://huggingface.co` with no saved token. The receipt records the retry. TLS verification remains enabled,
-  and TLS, storage, or filesystem failures never use this fallback.
+- Admitted public SecureBERT retrieval uses `https://huggingface.co` with `token=False` on the first attempt,
+  bypassing saved tokens and alternate Hub endpoints. A resolution/authentication-style package failure during
+  guided setup or another explicit local-specialist install may trigger one credential-free public-only retry;
+  pip runs isolated against `https://pypi.org/simple`. The receipt records both source decisions. TLS verification
+  remains enabled, and TLS, storage, or filesystem failures never repeat the same request as a fallback.
+- The read-only model diagnostic may perform an isolated public-PyPI `--dry-run` after a fast configured-index
+  failure. It removes inherited `PIP_*` values, ignores pip configuration, sends no index credentials, installs
+  nothing, and records the configured-source miss as a warning when public wheel resolution succeeds.
+- Application-owned outbound HTTPS uses the operating system's native certificate store (`truststore`), allowing
+  macOS Keychain, Windows CryptoAPI, and Linux OpenSSL trust policy to govern model downloads. Hostname and
+  certificate verification remain enabled. The diagnostic records only the trust mode and CA-path presence—not
+  certificates or environment values—and no insecure model-download override is exposed.
 - Model freshness checks are read-only. They compare recorded immutable revisions and local Ollama digests without pulling, loading, unloading, or swapping models; unprovable provenance is labeled untracked.
 - Model artifact trust defaults to non-blocking audit mode. Exact publisher, immutable revision, runtime, and local content digest identities can receive an explicit operator approval signed with a persistent local Ed25519 key. Enforced mode requires trusted active routes and fails closed for activation, accepted benchmark baselines, tournament promotion, and rollback; artifact drift requires re-evaluation and re-approval.
 - Splunk MLTK scans use only `listmodels`, retain local definition fingerprints, and perform zero model writes. Dependency comparisons are explicitly scoped to SignalRoom's configured Ollama endpoint.

@@ -7,8 +7,6 @@ import socket
 from datetime import UTC, datetime
 from pathlib import Path
 
-import uvicorn
-
 
 def _port_available(host: str, port: int) -> bool:
     bind_host = "127.0.0.1" if host in {"0.0.0.0", "::"} else host
@@ -67,6 +65,13 @@ def _write_runtime_file(path: str, host: str, port: int) -> None:
 
 
 def run() -> None:
+    # Apply OS-managed certificate trust before Uvicorn imports the application and its HTTP
+    # clients. This preserves certificate validation while making macOS Keychain roots usable.
+    from .tls_trust import activate_system_tls_trust
+
+    activate_system_tls_trust()
+    import uvicorn
+
     args = build_parser().parse_args()
     port = resolve_port(args.host, args.port, max(0, args.port_scan))
     if port != args.port:
