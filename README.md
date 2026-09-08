@@ -6,6 +6,9 @@ This is a focused reimplementation inspired by [LeiterConsulting/splunk-discover
 
 For a quick technical walkthrough of how a prompt becomes a governed Splunk/MCP and model-backed response, see [How SignalRoom model orchestration works — TL;DR](docs/MODEL_ORCHESTRATION_TLDR.md).
 
+For a customer-ready explanation of the platform, its immediate value, trust model, demonstration story, and
+development-team extension points, see the [SignalRoom customer brief](docs/CUSTOMER_BRIEF.md).
+
 New users should begin with the [SignalRoom user guide](docs/USER_GUIDE.md). The interface starts in a guided,
 outcome-focused view and keeps the complete operational workspace one deliberate action away.
 
@@ -301,6 +304,16 @@ failure the button becomes **Retry**, survives a page or service restart, and ex
 will attempt next: isolated public PyPI, verified direct Hugging Face HTTPS with Xet disabled, or a clean fetch
 that removes only that model's incomplete directory. The browser notification repeats both the failure and the
 next method. None of these paths disables TLS verification or downloads a model until the operator clicks.
+
+Ollama downloads have a separate integrity-aware recovery path. If Ollama reports a SHA-256 or digest mismatch,
+SignalRoom labels it **Ollama digest mismatch** instead of an unclassified install error, retains the expected and
+observed digests as safe attempt metadata, and changes that model's action to **Retry**. A retry reissues only the
+selected model pull and requires Ollama to verify it again; SignalRoom never clears the shared Ollama blob store.
+When the same profile fails repeatedly, the interface says so before another multi-gigabyte attempt and recommends
+updating Ollama plus checking VPN, proxy, content-filter, or TLS-inspection handling. Ollama has documented both
+[intermittent digest mismatches](https://github.com/ollama/ollama/issues/941) and a case where an intermediary's
+incorrect response to ranged downloads produced the wrong content
+([Ollama issue 10267](https://github.com/ollama/ollama/issues/10267)).
 
 When one of those installs fails without a useful explanation, **Guided installation troubleshooting** proves
 one selected Ollama path and one selected local Transformers path in the same host-side run. It continues to the

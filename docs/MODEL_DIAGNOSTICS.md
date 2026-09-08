@@ -33,6 +33,17 @@ runtime resolution to public PyPI, disable Hugging Face Xet in favor of verified
 remove only the selected model's incomplete directory before a clean immutable snapshot download. Each retry is
 explicit. TLS and hostname verification remain enabled throughout.
 
+Ollama uses a distinct recovery contract because its daemon owns the download and shared blob store. When
+`/api/pull` reports `digest mismatch`, `SHA256 mismatch`, or `checksum mismatch`, SignalRoom classifies the attempt
+as `ollama-digest-mismatch`, preserves the expected and observed SHA-256 values, and changes only that profile's
+action to **Retry**. The first retry asks Ollama to pull and verify the selected model again. If the same profile
+records multiple integrity failures, Settings explains the repeat and recommends updating Ollama and checking VPN,
+proxy, content-filter, or TLS-inspection behavior before another large transfer. SignalRoom does not automatically
+delete any Ollama blobs: the store is shared, and a blob may be referenced by another model. The upstream project
+tracks both [intermittent digest mismatch failures](https://github.com/ollama/ollama/issues/941) and a concrete case
+where HTTP Range requests received full `200` responses rather than `206 Partial Content`, producing the wrong
+assembled digest ([Ollama issue 10267](https://github.com/ollama/ollama/issues/10267)).
+
 **Settings → Models → Guided installation troubleshooting** is the mutating companion to the read-only
 collector. An administrator selects one Ollama profile and one local Transformers specialist, confirms the
 potentially multi-gigabyte operation, and SignalRoom then:
@@ -94,6 +105,8 @@ The collector records explicit `PASS`, `WARN`, `FAIL`, and `INFO` observations f
 - Every configured Ollama endpoint through `/api/version`, `/api/tags`, and `/api/ps`.
 - Configured Ollama profile names against the endpoint's installed model catalog.
 - The running SignalRoom health and model-readiness APIs when they can be accessed without a named browser session.
+- Persistent Ollama per-profile retry metadata, including any classified digest mismatch and safe expected/observed
+  SHA-256 values returned by the model-readiness API.
 - Redacted tails from `signalroom.err.log` and `signalroom.log`.
 
 The pip compatibility step uses `--dry-run`, `--no-deps`, `--only-binary=:all:`, and `--no-cache-dir`. It resolves

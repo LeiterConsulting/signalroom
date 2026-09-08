@@ -117,9 +117,51 @@ def test_public_source_retry_is_limited_to_resolution_failures():
         "ollama",
         "model-validation",
         "Ollama returned no assistant content",
-        {"system": "Darwin", "architecture_ok": True},
+        {
+            "system": "Darwin",
+            "apple_silicon": True,
+            "architecture_ok": False,
+        },
     )
     assert ollama_failure["code"] == "ollama-inference-failed"
+
+
+def test_ollama_digest_mismatch_is_classified_with_integrity_evidence():
+    expected = "a" * 64
+    observed = "b" * 64
+    failure = _setup_failure(
+        "ollama",
+        "ollama-download",
+        (
+            "digest mismatch, file must be downloaded again: "
+            f"want sha256:{expected}, got sha256:{observed}"
+        ),
+        {
+            "system": "Darwin",
+            "apple_silicon": True,
+            "architecture_ok": False,
+        },
+    )
+
+    assert failure["code"] == "ollama-digest-mismatch"
+    assert failure["integrity"] == {
+        "expected_sha256": expected,
+        "observed_sha256": observed,
+    }
+    assert failure["actions"][0]["title"] == "Retry this model download"
+    assert all("clear the entire" not in item["title"].lower() for item in failure["actions"])
+
+
+def test_ollama_digest_mismatch_without_hashes_is_still_classified():
+    failure = _setup_failure(
+        "ollama",
+        "ollama-download",
+        "SHA256 mismatch while verifying the downloaded layer",
+        {"system": "Linux", "architecture_ok": True},
+    )
+
+    assert failure["code"] == "ollama-digest-mismatch"
+    assert "integrity" not in failure
 
 
 def test_local_install_retry_strategy_changes_with_failure_and_prior_attempts():
@@ -200,6 +242,101 @@ async def test_readiness_reports_each_ollama_profile(monkeypatch, tmp_path):
         "securebert-rerank",
         "securebert-code-vulnerability",
     }
+
+
+@pytest.mark.asyncio
+async def test_readiness_persists_ollama_digest_retry_and_escalates_repeats(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setattr("splunk_security_agent.model_setup.httpx.AsyncClient", FakeClient)
+    service = ModelSetupService(ConfigStore(tmp_path))
+    for observed in ("b" * 64, "c" * 64):
+        service._record_install_outcome(
+            {
+                "profile_id": "foundation-sec",
+                "kind": "ollama",
+                "strategy": "auto",
+                "status": "error",
+                "stage": "ollama-download",
+                "failure": {
+                    "code": "ollama-digest-mismatch",
+                    "summary": "Ollama rejected a downloaded layer",
+                    "integrity": {
+                        "expected_sha256": "a" * 64,
+                        "observed_sha256": observed,
+                    },
+                },
+            }
+        )
+
+    result = await service.readiness()
+    profile = next(
+        item for item in result["ollama"]["profiles"] if item["id"] == "foundation-sec"
+    )
+    action = profile["install_action"]
+
+    assert action["label"] == "Retry"
+    assert action["strategy"] == "auto"
+    assert action["integrity_failures"] == 2
+    assert "failed 2 times" in action["reason"]
+    assert action["previous_failure"]["integrity"]["observed_sha256"] == "c" * 64
+
+
+@pytest.mark.asyncio
+async def test_ollama_pull_digest_failure_returns_retry_action_and_safe_receipt(
+    monkeypatch, tmp_path
+):
+    expected = "a" * 64
+    observed = "b" * 64
+
+    class PullErrorStream:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        def raise_for_status(self):
+            return None
+
+        async def aiter_lines(self):
+            yield json.dumps({"status": "pulling model", "completed": 1, "total": 2})
+            yield json.dumps(
+                {
+                    "error": (
+                        "digest mismatch, file must be downloaded again: "
+                        f"want sha256:{expected}, got sha256:{observed}"
+                    )
+                }
+            )
+
+    class PullErrorClient(FakeClient):
+        def stream(self, method, url, **kwargs):
+            assert method == "POST"
+            assert url.endswith("/api/pull")
+            assert kwargs["json"]["stream"] is True
+            return PullErrorStream()
+
+    service = ModelSetupService(ConfigStore(tmp_path))
+
+    def capture(coroutine):
+        coroutine.close()
+        return None
+
+    monkeypatch.setattr("splunk_security_agent.model_setup.asyncio.create_task", capture)
+    monkeypatch.setattr("splunk_security_agent.model_setup.httpx.AsyncClient", PullErrorClient)
+    job = service.start_pull("foundation-sec")
+
+    await service._pull(job["id"])
+
+    assert job["status"] == "error"
+    assert job["stage"] == "ollama-download"
+    assert job["failure"]["code"] == "ollama-digest-mismatch"
+    assert job["failure"]["integrity"]["expected_sha256"] == expected
+    assert job["retry_action"]["label"] == "Retry"
+    receipt = service._load_install_history()["profiles"]["foundation-sec"][-1]
+    assert receipt["failure_code"] == "ollama-digest-mismatch"
+    assert receipt["integrity"]["observed_sha256"] == observed
 
 
 @pytest.mark.asyncio

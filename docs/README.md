@@ -5,6 +5,8 @@ these documents preserve the full operational and technical detail needed to dep
 
 ## Use the product
 
+- [Customer brief](CUSTOMER_BRIEF.md): shareable platform, purpose, technical architecture, customer walkthrough,
+  trust boundaries, and development-team extension opportunities.
 - [User guide](USER_GUIDE.md): navigation, guided/full modes, role-oriented starting points, and terminology.
 - [Model orchestration TL;DR](MODEL_ORCHESTRATION_TLDR.md): shareable prompt-to-evidence-to-model flow.
 - [Model installation diagnostics](MODEL_DIAGNOSTICS.md): collect a safe model/runtime support log.

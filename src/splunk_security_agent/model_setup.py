@@ -607,13 +607,77 @@ def _model_host_context() -> dict[str, Any]:
     }
 
 
+def _ollama_digest_details(detail: str) -> dict[str, str]:
+    """Extract non-secret integrity evidence from an Ollama digest failure."""
+    if not any(
+        phrase in detail.lower()
+        for phrase in ("digest mismatch", "sha256 mismatch", "checksum mismatch")
+    ):
+        return {}
+
+    def digest_after(labels: str) -> str:
+        match = re.search(
+            rf"(?:{labels})\s+[\"']?sha256[:-]\s*([0-9a-f]{{12,64}})",
+            detail,
+            flags=re.IGNORECASE,
+        )
+        return match.group(1).lower() if match else ""
+
+    values = {
+        "expected_sha256": digest_after("want|expected"),
+        "observed_sha256": digest_after("got|actual"),
+    }
+    return {key: value for key, value in values.items() if value}
+
+
 def _setup_failure(kind: str, stage: str, detail: Any, host: dict[str, Any]) -> dict[str, Any]:
     """Classify a failed installation into an operator-facing cause and remedy."""
     safe = _safe_setup_detail(detail)
     lowered = safe.lower()
     actions: list[dict[str, Any]] = []
+    integrity = _ollama_digest_details(safe) if kind == "ollama" else {}
+    digest_mismatch = kind == "ollama" and any(
+        phrase in lowered
+        for phrase in ("digest mismatch", "sha256 mismatch", "checksum mismatch")
+    )
     tls_trust = host.get("outbound_tls_trust") or {}
-    if host.get("apple_silicon") and not host.get("architecture_ok"):
+    if digest_mismatch:
+        code = "ollama-digest-mismatch"
+        summary = "Ollama rejected a downloaded layer that failed SHA-256 verification"
+        actions.extend(
+            [
+                {
+                    "title": "Retry this model download",
+                    "detail": (
+                        "Use Retry on this model. SignalRoom will ask Ollama to download and verify "
+                        "the selected model again; it will not remove another installed model."
+                    ),
+                    "external": False,
+                },
+                {
+                    "title": "If the same digest fails again, check Ollama and the download path",
+                    "detail": (
+                        "Update Ollama, then check any VPN, proxy, content filter, or TLS-inspection "
+                        "device. Repeated mismatches can occur when ranged model downloads are "
+                        "rewritten or returned as full responses. Do not clear the entire Ollama store."
+                    ),
+                    "external": False,
+                },
+                {
+                    "title": "Test another shipped Ollama profile",
+                    "detail": (
+                        "Use the guided alternatives to try a different model. This distinguishes "
+                        "one publisher artifact from a host-wide Ollama download-integrity problem."
+                    ),
+                    "external": False,
+                },
+            ]
+        )
+    elif (
+        kind == "local-transformers"
+        and host.get("apple_silicon")
+        and not host.get("architecture_ok")
+    ):
         code = "macos-rosetta-python"
         summary = "Apple Silicon is running an Intel Python environment"
         actions.extend(
@@ -860,13 +924,16 @@ def _setup_failure(kind: str, stage: str, detail: Any, host: dict[str, Any]) -> 
                 "external": False,
             }
         )
-    return {
+    result = {
         "code": code,
         "stage": stage,
         "summary": summary,
         "detail": safe or "No additional installer output was returned.",
         "actions": actions,
     }
+    if integrity:
+        result["integrity"] = integrity
+    return result
 
 
 class ModelSetupService:
@@ -913,6 +980,7 @@ class ModelSetupService:
         failure = job.get("failure") if isinstance(job.get("failure"), dict) else {}
         values.append(
             {
+                "kind": str(job.get("kind") or ""),
                 "strategy": str(job.get("strategy") or "auto"),
                 "status": str(job.get("status") or "error"),
                 "stage": str(job.get("stage") or "installation"),
@@ -920,6 +988,11 @@ class ModelSetupService:
                 "summary": _safe_setup_detail(
                     failure.get("summary") or job.get("detail") or "Installation attempt ended",
                     300,
+                ),
+                "integrity": (
+                    dict(failure.get("integrity") or {})
+                    if isinstance(failure.get("integrity"), dict)
+                    else {}
                 ),
                 "recorded_at": datetime.now(UTC).isoformat(),
             }
@@ -1031,6 +1104,93 @@ class ModelSetupService:
             "previous_failure": latest,
             "source_probe": source_probe,
             "free_bytes": free_bytes,
+        }
+
+    def _ollama_install_action(
+        self,
+        profile: ModelProfile,
+        *,
+        installed: bool,
+        service_ok: bool,
+    ) -> dict[str, Any]:
+        """Return an explicit, persistent next action for one Ollama model."""
+        history = self._load_install_history().get("profiles", {}).get(profile.id, [])
+        last_success = max(
+            (index for index, item in enumerate(history) if item.get("status") == "complete"),
+            default=-1,
+        )
+        failures = [
+            item for item in history[last_success + 1 :] if item.get("status") == "error"
+        ]
+        latest = failures[-1] if failures else None
+        if installed:
+            return {
+                "label": "Installed",
+                "strategy": "auto",
+                "retry": False,
+                "ready": True,
+                "title": "Ollama model ready",
+                "reason": "Ollama reports this model in its local inventory.",
+                "changes": [],
+                "blocking": False,
+            }
+        if not service_ok:
+            return {
+                "label": "Download",
+                "strategy": "auto",
+                "retry": bool(latest),
+                "ready": False,
+                "title": "Start Ollama before downloading",
+                "reason": (
+                    "The configured Ollama service is offline. Starting or correcting that service "
+                    "is required before SignalRoom can retry this model."
+                ),
+                "changes": ["Reconnect to the configured Ollama service before another pull."],
+                "blocking": True,
+                "previous_failure": latest,
+            }
+
+        digest_failures = [
+            item for item in failures if item.get("failure_code") == "ollama-digest-mismatch"
+        ]
+        repeated_digest = len(digest_failures) > 1
+        if latest and latest.get("failure_code") == "ollama-digest-mismatch":
+            change = (
+                "Reissue the model-scoped Ollama pull and require SHA-256 verification again."
+            )
+            reason = (
+                "The previous transfer was rejected because its content did not match the expected "
+                "SHA-256 digest. Retry is explicit and affects only this selected model."
+            )
+            if repeated_digest:
+                reason = (
+                    f"SHA-256 verification has failed {len(digest_failures)} times for this profile. "
+                    "Retry remains available, but update Ollama and inspect VPN, proxy, content-filter, "
+                    "or TLS-inspection handling before spending another full download."
+                )
+            title = "Retry verified Ollama download"
+        elif latest:
+            change = "Reissue this selected model pull through the configured Ollama service."
+            reason = (
+                f"Previous attempt stopped at {latest.get('stage') or 'installation'}: "
+                f"{latest.get('summary') or 'the Ollama pull did not complete'}."
+            )
+            title = "Retry Ollama download"
+        else:
+            change = "Download and verify this model through the configured Ollama service."
+            reason = "Ollama is online and this configured model is not installed."
+            title = "Download through Ollama"
+        return {
+            "label": "Retry" if latest else "Download",
+            "strategy": "auto",
+            "retry": bool(latest),
+            "ready": True,
+            "title": title,
+            "reason": reason,
+            "changes": [change],
+            "blocking": False,
+            "previous_failure": latest,
+            "integrity_failures": len(digest_failures),
         }
 
     async def _probe_public_model_sources(
@@ -1839,6 +1999,11 @@ class ModelSetupService:
                 "installed": _model_installed(profile.model, installed),
                 "loaded": _model_installed(profile.model, loaded),
                 "pullable": bool(profile.enabled),
+                "install_action": self._ollama_install_action(
+                    profile,
+                    installed=_model_installed(profile.model, installed),
+                    service_ok=bool(ollama["ok"]),
+                ),
             }
             for profile in ollama_profiles
         ]
@@ -2271,6 +2436,8 @@ class ModelSetupService:
                 attempt["tls_trust"] = child["tls_trust"]
             if child.get("source_policy"):
                 attempt["source_policy"] = child["source_policy"]
+            if child.get("retry_action"):
+                attempt["retry_action"] = child["retry_action"]
             if child.get("status") != "complete":
                 failure = child.get("failure") or _setup_failure(
                     attempt["provider"],
@@ -2555,6 +2722,9 @@ class ModelSetupService:
 
     async def _pull(self, job_id: str) -> None:
         job = self.jobs[job_id]
+        profile = next(
+            item for item in self.config.load().models if item.id == job["profile_id"]
+        )
         if job["kind"] == "local-transformers":
             async with self._local_install_lock:
                 await self._install_local_specialist(job)
@@ -2563,9 +2733,6 @@ class ModelSetupService:
             except OSError as exc:
                 job["history_warning"] = _safe_setup_detail(exc, 300)
             if job.get("status") == "error":
-                profile = next(
-                    item for item in self.config.load().models if item.id == job["profile_id"]
-                )
                 model_path = self.config.local_model_path(profile.id)
                 try:
                     partial_download = model_path.exists() and any(model_path.iterdir())
@@ -2597,6 +2764,7 @@ class ModelSetupService:
                     json={"model": job["model"], "stream": True},
                 ) as response:
                     response.raise_for_status()
+                    job.update(stage="ollama-download", detail="Downloading through Ollama")
                     async for line in response.aiter_lines():
                         if not line:
                             continue
@@ -2612,9 +2780,6 @@ class ModelSetupService:
                             total=total,
                             progress=round(completed * 100 / total) if total else job["progress"],
                         )
-            profile = next(
-                item for item in self.config.load().models if item.id == job["profile_id"]
-            )
             try:
                 job["revision_tracking"] = await self._record_ollama_revision(profile)
             except Exception as exc:
@@ -2636,6 +2801,16 @@ class ModelSetupService:
                 detail=failure["summary"],
                 diagnostic_tail=failure["detail"],
                 failure=failure,
+            )
+        try:
+            self._record_install_outcome(job)
+        except OSError as exc:
+            job["history_warning"] = _safe_setup_detail(exc, 300)
+        if job.get("status") == "error":
+            job["retry_action"] = self._ollama_install_action(
+                profile,
+                installed=False,
+                service_ok=True,
             )
 
     async def _run_runtime_install(

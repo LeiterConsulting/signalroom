@@ -2104,12 +2104,27 @@ function localInstallAction(profileId) {
   return state.modelReadiness?.local_transformers?.profiles?.find(profile => profile.id === profileId)?.install_action || null;
 }
 
+function ollamaInstallAction(profileId) {
+  return state.modelReadiness?.ollama?.profiles?.find(profile => profile.id === profileId)?.install_action || null;
+}
+
+function modelInstallAction(profileId) {
+  return localInstallAction(profileId) || ollamaInstallAction(profileId);
+}
+
 function localInstallButton(profileId, fallbackLabel = 'Install locally') {
   const action = localInstallAction(profileId);
   const label = action?.label || fallbackLabel;
   const strategy = action?.strategy || 'auto';
   const title = action ? `${action.title}. ${action.reason}` : 'Install this specialist into SignalRoom local storage.';
   return `<button type="button" data-pull-profile="${escapeHtml(profileId)}" data-install-strategy="${escapeHtml(strategy)}" title="${escapeHtml(title)}">${escapeHtml(label)}</button>`;
+}
+
+function ollamaInstallButton(profileId, enabled = true, fallbackLabel = 'Download') {
+  const action = ollamaInstallAction(profileId);
+  const label = action?.label || fallbackLabel;
+  const title = action ? `${action.title}. ${action.reason}` : 'Download and verify this model through Ollama.';
+  return `<button type="button" data-pull-profile="${escapeHtml(profileId)}" title="${escapeHtml(title)}" ${enabled && !action?.blocking ? '' : 'disabled'}>${escapeHtml(label)}</button>`;
 }
 
 function localInstallFeedback(profile) {
@@ -2127,6 +2142,21 @@ function localInstallFeedback(profile) {
   </div>`;
 }
 
+function ollamaInstallFeedback(profile) {
+  const action = profile.install_action;
+  if (!action?.retry || profile.installed) return '';
+  const previous = action.previous_failure || {};
+  const integrity = previous.integrity || {};
+  const expected = integrity.expected_sha256 ? integrity.expected_sha256.slice(0, 12) : '';
+  const observed = integrity.observed_sha256 ? integrity.observed_sha256.slice(0, 12) : '';
+  const digestPair = expected && observed ? ` · expected ${expected}… / received ${observed}…` : '';
+  return `<div class="model-install-feedback retry ollama-install-feedback">
+    <b>Previous attempt failed · ${escapeHtml((previous.failure_code || previous.stage || 'Ollama download').replaceAll('-', ' '))}</b>
+    <span>${escapeHtml(action.reason)}</span>
+    <small>Next action · ${escapeHtml(action.changes?.[0] || 'Retry this selected model only')}${escapeHtml(digestPair)}</small>
+  </div>`;
+}
+
 function renderModelReadiness() {
   const readiness = state.modelReadiness; if (!readiness) return;
   const ollama = readiness.ollama;
@@ -2136,8 +2166,9 @@ function renderModelReadiness() {
     ? `Ollama ${ollama.version || ''} is responding at ${ollama.endpoint}. Downloads stay on that Ollama host.`
     : `No Ollama service responded at ${ollama.endpoint}. Install and start Ollama, then check again.`;
   $('#ollamaProfileReadiness').innerHTML = ollama.profiles.map(profile => `
-    <div class="profile-ready-row"><span><i class="model-status ${profile.loaded ? 'active' : profile.installed ? 'ok' : ''}"></i><b>${escapeHtml(profile.label)}</b><small>${escapeHtml(profile.model)}</small></span>
-    ${profile.loaded ? '<em>Loaded</em>' : profile.installed ? `<button type="button" data-activate-model="${escapeHtml(profile.id)}">Activate</button>` : `<button type="button" data-pull-profile="${escapeHtml(profile.id)}" ${ollama.ok ? '' : 'disabled'}>Download</button>`}</div>`).join('');
+    <div class="profile-ready-row model-install-row"><span><i class="model-status ${profile.loaded ? 'active' : profile.installed ? 'ok' : ''}"></i><b>${escapeHtml(profile.label)}</b><small>${escapeHtml(profile.model)}</small></span>
+    ${profile.loaded ? '<em>Loaded</em>' : profile.installed ? `<button type="button" data-activate-model="${escapeHtml(profile.id)}">Activate</button>` : ollamaInstallButton(profile.id, ollama.ok)}
+    ${ollamaInstallFeedback(profile)}</div>`).join('');
 
   const local = readiness.local_transformers;
   const installedLocal = local.profiles.filter(profile => profile.installed).length;
@@ -2195,6 +2226,7 @@ function modelSetupAttemptCard(attempt) {
   const publicRetry = attempt.public_retry || {};
   const sourcePolicy = attempt.source_policy || {};
   const tlsTrust = attempt.tls_trust || {};
+  const retry = attempt.retry_action || {};
   const proofItems = Object.entries(proof).map(([key,value]) => `<span><b>${escapeHtml(key.replaceAll('_',' '))}</b> ${escapeHtml(String(value))}</span>`).join('');
   const failureDetail = failure.code ? `<details><summary>Why this failed · ${escapeHtml(failure.code.replaceAll('-',' '))}</summary><p>${escapeHtml(failure.detail || '')}</p>${attempt.diagnostic_tail ? `<pre>${escapeHtml(attempt.diagnostic_tail)}</pre>` : ''}</details>` : '';
   return `<article class="model-setup-attempt ${escapeHtml(attempt.status || 'queued')}">
@@ -2203,7 +2235,8 @@ function modelSetupAttemptCard(attempt) {
     ${sourcePolicy.mode ? `<div class="model-setup-public-retry"><b>Model source · ${escapeHtml(sourcePolicy.mode.replaceAll('-',' '))}</b><span>${escapeHtml(sourcePolicy.source || '')} · credentials sent: ${sourcePolicy.credentials_sent ? 'yes' : 'no'} · first attempt</span></div>` : ''}
     ${tlsTrust.mode ? `<div class="model-setup-public-retry"><b>HTTPS trust · ${escapeHtml(tlsTrust.active ? 'native system store' : 'Python fallback')}</b><span>Certificate verification on${tlsTrust.environment_bundle ? ` · approved bundle ${tlsTrust.environment_bundle_exists ? 'found' : 'missing'}` : ''}</span></div>` : ''}
     ${publicRetry.attempted ? `<div class="model-setup-public-retry"><b>Public-only retry ${publicRetry.succeeded ? 'succeeded' : 'attempted'}</b><span>${escapeHtml(publicRetry.source || '')} · credentials sent: no</span></div>` : ''}
-    ${proofItems ? `<div class="model-setup-proof">${proofItems}</div>` : ''}${failureDetail}</div></article>`;
+    ${proofItems ? `<div class="model-setup-proof">${proofItems}</div>` : ''}${failureDetail}
+    ${retry.retry ? `<div class="model-setup-attempt-action"><button class="button primary small" type="button" data-pull-profile="${escapeHtml(attempt.profile_id)}" title="${escapeHtml(`${retry.title || 'Retry'}. ${retry.reason || ''}`)}">${escapeHtml(retry.label || 'Retry')}</button><span>${escapeHtml(retry.changes?.[0] || 'Retry this selected model only.')}</span></div>` : ''}</div></article>`;
 }
 
 function renderModelSetupDoctor() {
@@ -3308,8 +3341,7 @@ async function scanSplunkModels() {
 }
 
 async function pullModel(profileId, button) {
-  const originalLabel = button.textContent;
-  const selectedAction = localInstallAction(profileId);
+  const selectedAction = modelInstallAction(profileId);
   const strategy = button.dataset.installStrategy || selectedAction?.strategy || 'auto';
   let job = null;
   button.disabled = true; button.textContent = 'Starting…';
@@ -3331,13 +3363,15 @@ async function pullModel(profileId, button) {
   } catch (error) {
     const retry = job?.retry_action;
     button.disabled = false;
-    button.textContent = retry?.label || (job?.kind === 'local-transformers' ? 'Retry' : originalLabel);
+    button.textContent = retry?.label || 'Retry';
     if (retry?.strategy) button.dataset.installStrategy = retry.strategy;
     const changedMethod = retry?.changes?.[0]
-      ? ` Retry is ready and will use a different method: ${retry.changes[0]}`
+      ? job?.kind === 'local-transformers'
+        ? ` Retry is ready and will use a different method: ${retry.changes[0]}`
+        : ` Retry is ready for this model only: ${retry.changes[0]}`
       : '';
     toast(`${job?.failure?.summary || error.message}.${changedMethod}`, changedMethod ? 8000 : 4200);
-    if (job?.kind === 'local-transformers') await loadModelReadiness();
+    await loadModelReadiness();
   }
 }
 
@@ -3547,7 +3581,7 @@ function renderModels() {
       <h3>${escapeHtml(model.label)}</h3><div class="model-id">${escapeHtml(model.model)}</div>
       <p>${escapeHtml(model.description)}</p><div class="tags"><span>${escapeHtml(model.provenance || 'Operator supplied')}</span><span>${Number(model.context_window).toLocaleString()} ctx</span>${stagedCandidate ? '<span class="candidate-model-tag">NON-ROUTED</span>' : ''}${readiness?.loaded ? '<span class="active-model-tag">LOADED IN OLLAMA</span>' : ''}${isLocalSpecialist && readiness?.installed ? '<span class="active-model-tag">LOCAL · NO CLOUD INFERENCE</span>' : ''}</div>
       ${update ? `<div class="model-update ${escapeHtml(update.status)}"><b>${escapeHtml(updateLabels[update.status] || update.status)}</b><span>${escapeHtml(update.detail || '')}</span>${update.last_modified ? `<time>Source updated ${escapeHtml(new Date(update.last_modified).toLocaleDateString())}</time>` : ''}</div>` : ''}
-      <footer><span>${stagedCandidate ? 'STAGED · NOT ROUTED' : model.enabled ? 'ENABLED' : 'DISABLED'}</span><div class="model-actions">${model.provider === 'ollama' && readiness?.installed && !readiness?.loaded ? `<button data-activate-model="${escapeHtml(model.id)}">Activate</button>` : ''}${model.provider === 'ollama' && !readiness?.installed && !stagedCandidate ? `<button data-pull-profile="${escapeHtml(model.id)}">Download</button>` : ''}${isLocalSpecialist && !readiness?.installed ? localInstallButton(model.id) : ''}${update && ['update-available','untracked','check-unavailable'].includes(update.status) && readiness?.installed ? `<button data-pull-profile="${escapeHtml(model.id)}">Refresh explicitly</button>` : ''}<button data-test-model="${escapeHtml(model.id)}">${capabilityLabel}</button></div></footer>
+      <footer><span>${stagedCandidate ? 'STAGED · NOT ROUTED' : model.enabled ? 'ENABLED' : 'DISABLED'}</span><div class="model-actions">${model.provider === 'ollama' && readiness?.installed && !readiness?.loaded ? `<button data-activate-model="${escapeHtml(model.id)}">Activate</button>` : ''}${model.provider === 'ollama' && !readiness?.installed && !stagedCandidate ? ollamaInstallButton(model.id, state.modelReadiness?.ollama?.ok !== false) : ''}${isLocalSpecialist && !readiness?.installed ? localInstallButton(model.id) : ''}${update && ['update-available','untracked','check-unavailable'].includes(update.status) && readiness?.installed ? `<button data-pull-profile="${escapeHtml(model.id)}">Refresh explicitly</button>` : ''}<button data-test-model="${escapeHtml(model.id)}">${capabilityLabel}</button></div></footer>
     </article>`;
   }).join('');
   renderModelCatalog(); renderCandidateStaging(); renderModelLifecycle();

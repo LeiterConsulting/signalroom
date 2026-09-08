@@ -186,7 +186,12 @@ def test_guided_model_setup_explains_mutation_public_retry_and_safe_report() -> 
     assert "Retry is ready and will use a different method" in APP_JS
     assert "data-install-strategy" in APP_JS
     assert "function localInstallFeedback(profile)" in APP_JS
+    assert "function ollamaInstallFeedback(profile)" in APP_JS
+    assert "function modelInstallAction(profileId)" in APP_JS
+    assert "Previous attempt failed" in APP_JS
+    assert "data-pull-profile" in APP_JS
     assert ".model-install-feedback.retry" in STYLES_CSS
+    assert ".model-setup-attempt-action" in STYLES_CSS
     assert "Model source" in APP_JS
     assert "signalroom.model-setup-troubleshooting.v2" in APP_JS
 

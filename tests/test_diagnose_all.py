@@ -50,6 +50,46 @@ def test_model_matching_accepts_ollama_latest_alias_only() -> None:
     assert not model_matches("llama3.1:8b", "llama3.1:latest")
 
 
+def test_readiness_summary_preserves_safe_ollama_integrity_retry() -> None:
+    expected = "a" * 64
+    observed = "b" * 64
+    summary = DiagnoseAll._readiness_summary(
+        {
+            "ollama": {
+                "ok": True,
+                "endpoint": "http://localhost:11434",
+                "profiles": [
+                    {
+                        "id": "foundation-sec",
+                        "model": "publisher/model:Q4",
+                        "installed": False,
+                        "loaded": False,
+                        "install_action": {
+                            "label": "Retry",
+                            "retry": True,
+                            "title": "Retry verified Ollama download",
+                            "reason": "The previous transfer failed integrity verification.",
+                            "integrity_failures": 1,
+                            "previous_failure": {
+                                "failure_code": "ollama-digest-mismatch",
+                                "integrity": {
+                                    "expected_sha256": expected,
+                                    "observed_sha256": observed,
+                                },
+                            },
+                        },
+                    }
+                ],
+            }
+        }
+    )
+
+    action = summary["ollama"]["profiles"][0]["install_action"]
+    assert action["label"] == "Retry"
+    assert action["integrity_failures"] == 1
+    assert action["previous_failure"]["integrity"]["expected_sha256"] == expected
+
+
 def test_offline_diagnostic_writes_secret_free_failure_log(tmp_path: Path) -> None:
     (tmp_path / "install.sh").write_text("#!/usr/bin/env bash\n", encoding="utf-8")
     (tmp_path / "pyproject.toml").write_text("[project]\nname='test'\n", encoding="utf-8")

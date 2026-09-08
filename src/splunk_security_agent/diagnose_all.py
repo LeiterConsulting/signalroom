@@ -514,6 +514,28 @@ print(json.dumps(result, sort_keys=True))
                 "models": ollama.get("models") or [],
                 "loaded_models": ollama.get("loaded_models") or [],
                 "error": ollama.get("error"),
+                "profiles": [
+                    {
+                        "id": item.get("id"),
+                        "model": item.get("model"),
+                        "installed": item.get("installed"),
+                        "loaded": item.get("loaded"),
+                        "install_action": {
+                            "label": (item.get("install_action") or {}).get("label"),
+                            "retry": (item.get("install_action") or {}).get("retry"),
+                            "title": (item.get("install_action") or {}).get("title"),
+                            "reason": (item.get("install_action") or {}).get("reason"),
+                            "integrity_failures": (item.get("install_action") or {}).get(
+                                "integrity_failures"
+                            ),
+                            "previous_failure": (item.get("install_action") or {}).get(
+                                "previous_failure"
+                            ),
+                        },
+                    }
+                    for item in ollama.get("profiles") or []
+                    if isinstance(item, dict)
+                ],
             },
             "local_transformers": {
                 "runtime_installed": local.get("runtime_installed"),

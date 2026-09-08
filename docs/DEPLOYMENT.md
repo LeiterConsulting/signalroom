@@ -59,6 +59,15 @@ notification explain the change before the user clicks again. Attempt metadata i
 `data/model_install_attempts.json`; credentials, raw pip output, and model content are not. Page load never
 installs packages or model weights.
 
+Missing Ollama profiles also retain a model-scoped install receipt. A SHA-256/digest mismatch is reported as an
+Ollama download-integrity failure with the expected and observed digest, not as an unclassified installer error.
+The affected model action becomes **Retry** across restarts. Retry reissues only that selected pull; SignalRoom
+does not delete the shared Ollama cache or any other installed model. Two or more integrity failures for the same
+profile trigger an explicit warning to update Ollama and inspect VPN, proxy, content-filter, or TLS-inspection
+handling before spending another full download. This distinction matters because the Ollama project has observed
+[intermittent digest failures](https://github.com/ollama/ollama/issues/941) and incorrect HTTP Range handling that
+can assemble invalid content ([issue 10267](https://github.com/ollama/ollama/issues/10267)).
+
 For an opaque or host-specific failure, run **Settings → Models → Guided installation troubleshooting**.
 After explicit confirmation it tests one selected Ollama profile and one selected local Transformers specialist,
 installs either only when missing, and executes synthetic local capability probes. It checks both paths even when
