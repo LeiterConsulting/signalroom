@@ -1,5 +1,6 @@
 import json
 import os
+import ssl
 import subprocess
 from pathlib import Path
 
@@ -218,9 +219,10 @@ def test_artifact_probe_follows_delivery_path_without_retaining_content(monkeypa
         def geturl(self) -> str:
             return "https://cdn.example.test/model.safetensors?signature=must-not-log"
 
-    def fake_urlopen(request, *, timeout: int):
+    def fake_urlopen(request, *, timeout: int, context):
         captured["range"] = request.get_header("Range")
         captured["timeout"] = timeout
+        captured["tls_context"] = context
         return Response()
 
     monkeypatch.setattr(diagnose_module, "urlopen", fake_urlopen)
@@ -229,7 +231,10 @@ def test_artifact_probe_follows_delivery_path_without_retaining_content(monkeypa
         "https://huggingface.co/publisher/model/resolve/revision/model.safetensors"
     )
 
-    assert captured == {"range": "bytes=0-0", "timeout": 20, "read": 1}
+    assert captured["range"] == "bytes=0-0"
+    assert captured["timeout"] == 20
+    assert captured["read"] == 1
+    assert isinstance(captured["tls_context"], ssl.SSLContext)
     assert result["status"] == 206
     assert result["bytes_read"] == 1
     assert result["redirect_target"] == "https://cdn.example.test/model.safetensors"

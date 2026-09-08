@@ -15,6 +15,7 @@ from splunk_security_agent.model_setup import (
     _candidate_runtime_installed,
     _huggingface_repo,
     _model_installed,
+    _next_local_install_strategy,
     _safe_setup_detail,
     _setup_failure,
     _should_retry_public_source,
@@ -119,6 +120,17 @@ def test_public_source_retry_is_limited_to_resolution_failures():
         {"system": "Darwin", "architecture_ok": True},
     )
     assert ollama_failure["code"] == "ollama-inference-failed"
+
+
+def test_local_install_retry_strategy_changes_with_failure_and_prior_attempts():
+    assert _next_local_install_strategy("tls-trust", ["auto"]) == "direct-http"
+    assert _next_local_install_strategy("model-artifact-invalid", ["auto"]) == (
+        "clean-download"
+    )
+    assert _next_local_install_strategy(
+        "network",
+        ["auto", "direct-http", "clean-download"],
+    ) == "public-only"
 
 
 def test_macos_tls_failure_distinguishes_native_keychain_from_missing_runtime_support():
@@ -531,6 +543,54 @@ def test_pull_accepts_securebert_as_local_transformers_install(monkeypatch, tmp_
     )
 
 
+def test_pull_accepts_explicit_local_recovery_strategy(monkeypatch, tmp_path):
+    service = ModelSetupService(ConfigStore(tmp_path))
+
+    def capture(coroutine):
+        coroutine.close()
+        return None
+
+    monkeypatch.setattr("splunk_security_agent.model_setup.asyncio.create_task", capture)
+    job = service.start_pull("securebert-ner", "direct-http")
+
+    assert job["strategy"] == "direct-http"
+    assert "disable the accelerated Xet" in job["strategy_plan"]["change"]
+
+
+@pytest.mark.asyncio
+async def test_readiness_persists_failure_and_offers_different_retry(monkeypatch, tmp_path):
+    monkeypatch.setattr("splunk_security_agent.model_setup.httpx.AsyncClient", FakeClient)
+    monkeypatch.setattr(
+        "splunk_security_agent.model_setup.local_runtime_available", lambda: True
+    )
+    service = ModelSetupService(ConfigStore(tmp_path))
+    service._record_install_outcome(
+        {
+            "profile_id": "securebert-ner",
+            "strategy": "auto",
+            "status": "error",
+            "stage": "model-download",
+            "detail": "TLS certificate validation blocked the model download",
+            "failure": {
+                "code": "tls-trust",
+                "summary": "TLS certificate validation blocked the model download",
+            },
+        }
+    )
+
+    result = await service.readiness()
+    profile = next(
+        item
+        for item in result["local_transformers"]["profiles"]
+        if item["id"] == "securebert-ner"
+    )
+
+    assert profile["install_action"]["label"] == "Retry"
+    assert profile["install_action"]["strategy"] == "direct-http"
+    assert "Retry changes method" in profile["install_action"]["reason"]
+    assert result["local_transformers"]["preflight"].startswith("Host, runtime")
+
+
 def test_guided_setup_queues_one_profile_for_each_local_runtime(monkeypatch, tmp_path):
     service = ModelSetupService(ConfigStore(tmp_path))
 
@@ -724,6 +784,62 @@ async def test_admitted_public_hub_is_credential_free_on_first_attempt(monkeypat
 
 
 @pytest.mark.asyncio
+async def test_clean_download_retry_bypasses_xet_and_removes_only_partial_model(
+    monkeypatch, tmp_path
+):
+    config = ConfigStore(tmp_path / "data")
+    service = ModelSetupService(config)
+    model_path = config.local_model_path("securebert-ner")
+    model_path.mkdir(parents=True)
+    (model_path / "incomplete.part").write_bytes(b"partial")
+    fake_hub = types.ModuleType("huggingface_hub")
+    fake_hub.constants = types.SimpleNamespace(HF_HUB_DISABLE_XET=False)
+    observed: dict[str, Any] = {}
+
+    class FakeInfo:
+        sha = "clean-revision"
+
+    class FakeApi:
+        def __init__(self, endpoint=None, token=None):
+            assert endpoint == "https://huggingface.co"
+            assert token is False
+
+        def model_info(self, _model):
+            return FakeInfo()
+
+    def fake_snapshot_download(**kwargs):
+        observed["xet"] = os.environ.get("HF_HUB_DISABLE_XET")
+        observed["force_download"] = kwargs["force_download"]
+        assert not (model_path / "incomplete.part").exists()
+        (model_path / "config.json").write_text("{}", encoding="utf-8")
+        (model_path / "model.safetensors").write_bytes(b"synthetic safe weights")
+        return str(model_path)
+
+    fake_hub.HfApi = FakeApi
+    fake_hub.snapshot_download = fake_snapshot_download
+    monkeypatch.setitem(sys.modules, "huggingface_hub", fake_hub)
+    monkeypatch.setattr(
+        "splunk_security_agent.model_setup.local_runtime_available", lambda: True
+    )
+    monkeypatch.delenv("HF_HUB_DISABLE_XET", raising=False)
+    job = {
+        "profile_id": "securebert-ner",
+        "model": "cisco-ai/SecureBERT2.0-NER",
+        "strategy": "clean-download",
+        "status": "queued",
+        "detail": "Queued",
+        "progress": 0,
+    }
+
+    await service._install_local_specialist(job)
+
+    assert job["status"] == "complete"
+    assert observed == {"xet": "1", "force_download": True}
+    assert "HF_HUB_DISABLE_XET" not in os.environ
+    assert fake_hub.constants.HF_HUB_DISABLE_XET is False
+
+
+@pytest.mark.asyncio
 async def test_pip_resolution_failure_retries_public_pypi_in_isolated_mode(
     monkeypatch, tmp_path
 ):
@@ -815,6 +931,42 @@ async def test_pip_resolution_failure_retries_public_pypi_in_isolated_mode(
     assert job["public_retry"]["credentials_sent"] is False
     assert job["public_retry"]["trigger"] == "fail-fast-source-resolution"
     assert job["public_retry"]["succeeded"] is True
+
+
+@pytest.mark.asyncio
+async def test_direct_runtime_retry_uses_isolated_pypi_and_native_truststore(
+    monkeypatch, tmp_path
+):
+    service = ModelSetupService(ConfigStore(tmp_path / "data"))
+    observed: dict[str, Any] = {}
+
+    class FakeProcess:
+        stdout = None
+
+        async def wait(self):
+            return 1
+
+    async def fake_create_subprocess_exec(*args, **kwargs):
+        observed["args"] = args
+        observed["env"] = kwargs.get("env")
+        return FakeProcess()
+
+    monkeypatch.setattr(
+        "splunk_security_agent.model_setup.asyncio.create_subprocess_exec",
+        fake_create_subprocess_exec,
+    )
+
+    await service._run_runtime_install(
+        {"detail": "Queued"},
+        public_only=True,
+        native_trust=True,
+    )
+
+    args = observed["args"]
+    assert "--isolated" in args
+    assert args[args.index("--index-url") + 1] == "https://pypi.org/simple"
+    assert args[args.index("--use-feature") + 1] == "truststore"
+    assert observed["env"]["PIP_CONFIG_FILE"] == os.devnull
 
 
 @pytest.mark.asyncio

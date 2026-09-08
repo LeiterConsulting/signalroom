@@ -21,10 +21,10 @@ from urllib.request import Request, urlopen
 
 try:
     from .source_recovery import credential_free_pip_environment, should_retry_public_source
-    from .tls_trust import activate_system_tls_trust
+    from .tls_trust import activate_system_tls_trust, system_ssl_context
 except ImportError:  # Support the documented direct-file offline invocation.
     from source_recovery import credential_free_pip_environment, should_retry_public_source
-    from tls_trust import activate_system_tls_trust
+    from tls_trust import activate_system_tls_trust, system_ssl_context
 
 RUNTIME_REQUIREMENTS = (
     "huggingface-hub>=0.27,<2",
@@ -958,7 +958,7 @@ print(json.dumps(result, sort_keys=True))
             },
         )
         try:
-            with urlopen(request, timeout=timeout) as response:
+            with urlopen(request, timeout=timeout, context=system_ssl_context()) as response:
                 content = response.read(MAX_HTTP_BYTES + 1)
         except (HTTPError, URLError, TimeoutError, OSError):
             raise
@@ -982,7 +982,7 @@ print(json.dumps(result, sort_keys=True))
             },
             method="GET",
         )
-        with urlopen(request, timeout=timeout) as response:
+        with urlopen(request, timeout=timeout, context=system_ssl_context()) as response:
             sample = response.read(1)
             return {
                 "status": getattr(response, "status", None),

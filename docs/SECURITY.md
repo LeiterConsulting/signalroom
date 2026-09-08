@@ -43,10 +43,12 @@ The local prototype defaults to localhost, opt-in demo mode, local specialist ex
 - The read-only model diagnostic may perform an isolated public-PyPI `--dry-run` after a fast configured-index
   failure. It removes inherited `PIP_*` values, ignores pip configuration, sends no index credentials, installs
   nothing, and records the configured-source miss as a warning when public wheel resolution succeeds.
-- Application-owned outbound HTTPS uses the operating system's native certificate store (`truststore`), allowing
-  macOS Keychain, Windows CryptoAPI, and Linux OpenSSL trust policy to govern model downloads. Hostname and
-  certificate verification remain enabled. The diagnostic records only the trust mode and CA-path presence—not
-  certificates or environment values—and no insecure model-download override is exposed.
+- Public package and model HTTPS clients explicitly use the operating system's native certificate store
+  (`truststore`), allowing macOS Keychain, Windows CryptoAPI, and Linux OpenSSL trust policy to govern downloads.
+  Trust is not injected process-wide; private Splunk MCP and integration clients retain their own verify/private-CA
+  contract. Hostname and certificate verification remain enabled for public downloads. The diagnostic records
+  only the trust mode and CA-path presence—not certificates or environment values—and no insecure model-download
+  override is exposed.
 - Model freshness checks are read-only. They compare recorded immutable revisions and local Ollama digests without pulling, loading, unloading, or swapping models; unprovable provenance is labeled untracked.
 - Model artifact trust defaults to non-blocking audit mode. Exact publisher, immutable revision, runtime, and local content digest identities can receive an explicit operator approval signed with a persistent local Ed25519 key. Enforced mode requires trusted active routes and fails closed for activation, accepted benchmark baselines, tournament promotion, and rollback; artifact drift requires re-evaluation and re-approval.
 - Splunk MLTK scans use only `listmodels`, retain local definition fingerprints, and perform zero model writes. Dependency comparisons are explicitly scoped to SignalRoom's configured Ollama endpoint.

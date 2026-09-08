@@ -7,6 +7,7 @@ import json
 import os
 import platform
 import re
+import shutil
 import subprocess
 import sys
 import sysconfig
@@ -30,7 +31,11 @@ from .rag import EvidenceStore
 from .schemas import ModelProfile
 from .source_recovery import credential_free_pip_environment
 from .source_recovery import should_retry_public_source as _should_retry_public_source
-from .tls_trust import system_tls_trust_state
+from .tls_trust import (
+    configure_huggingface_system_tls,
+    system_ssl_context,
+    system_tls_trust_state,
+)
 
 OLLAMA_DOWNLOAD_URL = "https://ollama.com/download"
 HF_TOKEN_URL = "https://huggingface.co/settings/tokens"
@@ -40,6 +45,63 @@ LOCAL_RUNTIME_PACKAGES = (
     "torch>=2.5",
     "transformers>=4.48,<6",
 )
+
+LOCAL_INSTALL_STRATEGIES = (
+    "auto",
+    "public-only",
+    "direct-http",
+    "clean-download",
+)
+
+LOCAL_INSTALL_STRATEGY_DETAILS: dict[str, dict[str, str]] = {
+    "auto": {
+        "title": "Standard verified installation",
+        "change": (
+            "Use SignalRoom's verified installer and preserve any valid files already downloaded."
+        ),
+    },
+    "public-only": {
+        "title": "Public-source installation",
+        "change": (
+            "Ignore configured package indexes, use isolated public PyPI for the runtime, and "
+            "use the admitted public Hugging Face repository without credentials."
+        ),
+    },
+    "direct-http": {
+        "title": "Verified direct-download installation",
+        "change": (
+            "Keep public-only sources, disable the accelerated Xet transfer path, and use "
+            "verified native-system HTTPS for the model download."
+        ),
+    },
+    "clean-download": {
+        "title": "Clean verified installation",
+        "change": (
+            "Remove only this model's incomplete local directory, disable Xet transfer, and "
+            "fetch a fresh immutable snapshot over verified native-system HTTPS."
+        ),
+    },
+}
+
+
+def _next_local_install_strategy(
+    failure_code: str,
+    attempted: list[str],
+) -> str:
+    """Choose a materially different next attempt for one local specialist."""
+    if failure_code in {"model-artifact-invalid"}:
+        order = ["clean-download", "direct-http", "public-only", "auto"]
+    elif failure_code in {"tls-trust", "tls-ca-bundle-missing", "network", "source-authorization"}:
+        order = ["direct-http", "clean-download", "public-only", "auto"]
+    elif failure_code in {"binary-wheel-unavailable", "macos-rosetta-python"}:
+        order = ["public-only", "direct-http", "clean-download", "auto"]
+    else:
+        order = ["public-only", "direct-http", "clean-download", "auto"]
+    for strategy in order:
+        if strategy not in attempted:
+            return strategy
+    last = attempted[-1] if attempted else "auto"
+    return next((strategy for strategy in order if strategy != last), order[0])
 
 MODEL_CATALOG_REVIEW: dict[str, Any] = {
     "reviewed_at": "2026-09-05",
@@ -823,6 +885,210 @@ class ModelSetupService:
         self.context_index_job: dict[str, Any] = {"status": "idle"}
         self.revision_state_path = self.config.root / "model_revisions.json"
         self.intake_queue_path = self.config.root / "model_intake.json"
+        self.install_history_path = self.config.root / "model_install_attempts.json"
+        self._local_install_lock = asyncio.Lock()
+        self._source_probe_cache: dict[str, dict[str, Any]] = {}
+
+    def _load_install_history(self) -> dict[str, Any]:
+        if not self.install_history_path.exists():
+            return {"version": 1, "profiles": {}}
+        try:
+            value = json.loads(self.install_history_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {"version": 1, "profiles": {}}
+        if not isinstance(value, dict) or not isinstance(value.get("profiles"), dict):
+            return {"version": 1, "profiles": {}}
+        return value
+
+    def _save_install_history(self, value: dict[str, Any]) -> None:
+        temporary = self.install_history_path.with_suffix(".tmp")
+        temporary.write_text(json.dumps(value, indent=2), encoding="utf-8")
+        os.replace(temporary, self.install_history_path)
+
+    def _record_install_outcome(self, job: dict[str, Any]) -> None:
+        """Retain safe recovery metadata, never package output, credentials, or model content."""
+        history = self._load_install_history()
+        profiles = history.setdefault("profiles", {})
+        values = profiles.setdefault(str(job["profile_id"]), [])
+        failure = job.get("failure") if isinstance(job.get("failure"), dict) else {}
+        values.append(
+            {
+                "strategy": str(job.get("strategy") or "auto"),
+                "status": str(job.get("status") or "error"),
+                "stage": str(job.get("stage") or "installation"),
+                "failure_code": str(failure.get("code") or ""),
+                "summary": _safe_setup_detail(
+                    failure.get("summary") or job.get("detail") or "Installation attempt ended",
+                    300,
+                ),
+                "recorded_at": datetime.now(UTC).isoformat(),
+            }
+        )
+        profiles[str(job["profile_id"])] = values[-8:]
+        self._save_install_history(history)
+
+    def _install_action(
+        self,
+        profile: ModelProfile,
+        *,
+        installed: bool,
+        runtime_installed: bool,
+        host: dict[str, Any],
+        source_probe: dict[str, Any],
+        partial_download: bool,
+        free_bytes: int | None,
+    ) -> dict[str, Any]:
+        history = self._load_install_history().get("profiles", {}).get(profile.id, [])
+        last_success = max(
+            (index for index, item in enumerate(history) if item.get("status") == "complete"),
+            default=-1,
+        )
+        failures = [
+            item for item in history[last_success + 1 :] if item.get("status") == "error"
+        ]
+        latest = failures[-1] if failures else None
+        if installed:
+            return {
+                "label": "Installed",
+                "strategy": "auto",
+                "retry": False,
+                "ready": True,
+                "title": "Local model ready",
+                "reason": "The model has a validated local manifest and weight files.",
+                "changes": [],
+                "blocking": False,
+            }
+
+        attempted = [
+            str(item.get("strategy"))
+            for item in failures
+            if item.get("strategy") in LOCAL_INSTALL_STRATEGIES
+        ]
+        failure_code = str(latest.get("failure_code") or "") if latest else ""
+        if latest:
+            strategy = _next_local_install_strategy(failure_code, attempted)
+        elif partial_download:
+            strategy = "clean-download"
+        elif not runtime_installed:
+            strategy = "public-only"
+        elif source_probe.get("status") == "unreachable":
+            strategy = "direct-http"
+        else:
+            strategy = "auto"
+
+        detail = LOCAL_INSTALL_STRATEGY_DETAILS[strategy]
+        storage_low = free_bytes is not None and free_bytes < 2 * 1024**3
+        blocking = not bool(host.get("architecture_ok", True)) or storage_low
+        if latest:
+            reason = (
+                f"Previous attempt stopped at {latest.get('stage') or 'installation'}: "
+                f"{latest.get('summary') or 'the installer did not complete'}. "
+                f"Retry changes method: {detail['change']}"
+            )
+        elif blocking:
+            if storage_low:
+                reason = (
+                    "Less than 2 GB is free in local model storage. Free space is recommended "
+                    f"before installation; the available action will {detail['change'][0].lower()}"
+                    f"{detail['change'][1:]}"
+                )
+            else:
+                reason = (
+                    "This Mac appears to be using Intel Python on Apple Silicon. Repair the native "
+                    f"Python environment first; if you retry now, SignalRoom will "
+                    f"{detail['change'][0].lower()}{detail['change'][1:]}"
+                )
+        elif partial_download:
+            reason = (
+                "An incomplete local model directory was found. "
+                f"This attempt will {detail['change'][0].lower()}{detail['change'][1:]}"
+            )
+        elif source_probe.get("status") == "unreachable":
+            reason = (
+                "The quick source check could not reach this model's public publisher endpoint. "
+                f"The install remains available and will {detail['change'][0].lower()}"
+                f"{detail['change'][1:]}"
+            )
+        elif not runtime_installed:
+            reason = (
+                "The local Transformers runtime is not installed. "
+                f"This attempt will {detail['change'][0].lower()}{detail['change'][1:]}"
+            )
+        else:
+            reason = (
+                "The runtime and public model source passed the quick preflight. "
+                f"This attempt will {detail['change'][0].lower()}{detail['change'][1:]}"
+            )
+        return {
+            "label": "Retry" if latest else "Install locally",
+            "strategy": strategy,
+            "retry": bool(latest),
+            "ready": False,
+            "title": detail["title"],
+            "reason": reason,
+            "changes": [detail["change"]],
+            "blocking": blocking,
+            "previous_failure": latest,
+            "source_probe": source_probe,
+            "free_bytes": free_bytes,
+        }
+
+    async def _probe_public_model_sources(
+        self,
+        profiles: list[ModelProfile],
+    ) -> dict[str, dict[str, Any]]:
+        """Perform a short credential-free publisher metadata check for missing local models."""
+        now = time.monotonic()
+        results: dict[str, dict[str, Any]] = {}
+        pending: list[ModelProfile] = []
+        for profile in profiles:
+            cached = self._source_probe_cache.get(profile.model)
+            if cached and now - float(cached.get("cached_at") or 0) < 90:
+                results[profile.id] = dict(cached["result"])
+            else:
+                pending.append(profile)
+
+        async def probe(client: httpx.AsyncClient, profile: ModelProfile) -> tuple[str, dict[str, Any]]:
+            reviewed = REVIEWED_PUBLISHER_MODELS.get(profile.model, {})
+            if not reviewed or reviewed.get("gated"):
+                return profile.id, {
+                    "status": "policy-required",
+                    "checked_at": datetime.now(UTC).isoformat(),
+                    "detail": "This repository requires configured access policy.",
+                }
+            try:
+                response = await client.get(
+                    f"https://huggingface.co/api/models/{profile.model}",
+                    headers={},
+                )
+                response.raise_for_status()
+                metadata = response.json()
+                result = {
+                    "status": "reachable",
+                    "checked_at": datetime.now(UTC).isoformat(),
+                    "revision": str(metadata.get("sha") or ""),
+                    "credentials_sent": False,
+                }
+            except Exception as exc:  # A readiness probe must not block the settings workspace.
+                result = {
+                    "status": "unreachable",
+                    "checked_at": datetime.now(UTC).isoformat(),
+                    "detail": _safe_setup_detail(f"{type(exc).__name__}: {exc}", 300),
+                    "credentials_sent": False,
+                }
+            return profile.id, result
+
+        if pending:
+            async with httpx.AsyncClient(verify=system_ssl_context(), timeout=4) as client:
+                checked = await asyncio.gather(*(probe(client, profile) for profile in pending))
+            for profile_id, result in checked:
+                results[profile_id] = result
+                profile = next(item for item in pending if item.id == profile_id)
+                self._source_probe_cache[profile.model] = {
+                    "cached_at": now,
+                    "result": dict(result),
+                }
+        return results
 
     def catalog(self) -> dict[str, Any]:
         """Describe shipped capabilities and researched candidates without overstating support."""
@@ -870,7 +1136,7 @@ class ModelSetupService:
         if publisher not in PUBLISHER_CATALOGS:
             raise ValueError("Only monitored Cisco and Foundation AI publishers can be staged")
         try:
-            async with httpx.AsyncClient(timeout=12) as client:
+            async with httpx.AsyncClient(verify=system_ssl_context(), timeout=12) as client:
                 metadata = await self._hub_metadata(client, model)
         except (httpx.HTTPError, ValueError) as exc:
             raise RuntimeError(f"The first-party model source could not be observed: {exc}") from exc
@@ -938,7 +1204,7 @@ class ModelSetupService:
             qualifier = "already staged" if existing.lifecycle == "candidate" else "already configured"
             raise ValueError(f"{model} is {qualifier} as {existing.id}")
         try:
-            async with httpx.AsyncClient(timeout=8) as client:
+            async with httpx.AsyncClient(verify=system_ssl_context(), timeout=8) as client:
                 response = await client.get(f"{selected_endpoint}/api/tags")
                 response.raise_for_status()
             values = [
@@ -1171,7 +1437,7 @@ class ModelSetupService:
         publisher_errors: dict[str, str] = {}
         publisher_incomplete: set[str] = set()
 
-        async with httpx.AsyncClient(timeout=12) as client:
+        async with httpx.AsyncClient(verify=system_ssl_context(), timeout=12) as client:
             async def load_tags(endpoint: str) -> None:
                 try:
                     response = await client.get(f"{endpoint}/api/tags")
@@ -1492,7 +1758,7 @@ class ModelSetupService:
         if not repo:
             return {"tracked": False, "reason": "No explicit Hugging Face source repository."}
         endpoint = _ollama_base(profile)
-        async with httpx.AsyncClient(timeout=12) as client:
+        async with httpx.AsyncClient(verify=system_ssl_context(), timeout=12) as client:
             tags_response, remote = await asyncio.gather(
                 client.get(f"{endpoint}/api/tags"),
                 self._hub_metadata(client, repo),
@@ -1540,7 +1806,7 @@ class ModelSetupService:
         installed: list[str] = []
         loaded: list[str] = []
         try:
-            async with httpx.AsyncClient(timeout=5) as client:
+            async with httpx.AsyncClient(verify=system_ssl_context(), timeout=5) as client:
                 tags_response, version_response = await asyncio.gather(
                     client.get(f"{endpoint}/api/tags"),
                     client.get(f"{endpoint}/api/version"),
@@ -1577,9 +1843,35 @@ class ModelSetupService:
             for profile in ollama_profiles
         ]
 
+        runtime_installed = local_runtime_available()
+        host = _model_host_context()
+        install_states: dict[str, dict[str, Any]] = {}
+        missing_profiles: list[ModelProfile] = []
+        for profile in hf_profiles:
+            model_path = self.config.local_model_path(profile.id)
+            installed_locally = local_model_installed(model_path)
+            try:
+                partial_download = (
+                    model_path.exists() and any(model_path.iterdir()) and not installed_locally
+                )
+            except OSError:
+                partial_download = False
+            install_states[profile.id] = {
+                "installed": installed_locally,
+                "partial_download": partial_download,
+            }
+            if not installed_locally:
+                missing_profiles.append(profile)
+        source_probes = await self._probe_public_model_sources(missing_profiles)
+        try:
+            free_bytes: int | None = shutil.disk_usage(self.config.local_models_root).free
+        except OSError:
+            free_bytes = None
+
         local_profiles: list[dict[str, Any]] = []
         for profile in hf_profiles:
             model_path = self.config.local_model_path(profile.id)
+            install_state = install_states[profile.id]
             manifest_path = model_path / ".signalroom-model.json"
             manifest: dict[str, Any] = {}
             if manifest_path.exists():
@@ -1593,7 +1885,7 @@ class ModelSetupService:
                     "label": profile.label,
                     "model": profile.model,
                     "task": profile.task,
-                    "installed": local_model_installed(model_path),
+                    "installed": install_state["installed"],
                     "path": str(model_path),
                     "bytes": int(manifest.get("bytes") or 0),
                     "downloaded_at": manifest.get("downloaded_at"),
@@ -1603,17 +1895,40 @@ class ModelSetupService:
                         if self.evidence is not None and profile.task == "embedding"
                         else None
                     ),
+                    "install_action": self._install_action(
+                        profile,
+                        installed=install_state["installed"],
+                        runtime_installed=runtime_installed,
+                        host=host,
+                        source_probe=source_probes.get(
+                            profile.id,
+                            {
+                                "status": (
+                                    "installed" if install_state["installed"] else "unknown"
+                                ),
+                                "checked_at": datetime.now(UTC).isoformat(),
+                            },
+                        ),
+                        partial_download=install_state["partial_download"],
+                        free_bytes=free_bytes,
+                    ),
                 }
             )
         local_transformers: dict[str, Any] = {
             "selected": settings.specialist_runtime == "local",
-            "runtime_installed": local_runtime_available(),
+            "runtime_installed": runtime_installed,
             "model_root": str(self.config.local_models_root),
             "profiles": local_profiles,
             "network_inference": False,
             "device": "available after runtime install",
             "device_id": None,
             "index_job": self.context_index_job,
+            "host": host,
+            "free_bytes": free_bytes,
+            "preflight": (
+                "Host, runtime, storage, partial-download state, publisher reachability, and "
+                "previous attempts were evaluated without downloading a model."
+            ),
         }
         if local_transformers["runtime_installed"]:
             try:
@@ -1640,7 +1955,7 @@ class ModelSetupService:
         if token and hf_enabled:
             headers = {"Authorization": f"Bearer {token}"}
             try:
-                async with httpx.AsyncClient(timeout=8) as client:
+                async with httpx.AsyncClient(verify=system_ssl_context(), timeout=8) as client:
                     whoami = await client.get("https://huggingface.co/api/whoami-v2", headers=headers)
                     whoami.raise_for_status()
                 huggingface["token_valid"] = True
@@ -1657,7 +1972,7 @@ class ModelSetupService:
             }
             if token and hf_enabled:
                 try:
-                    async with httpx.AsyncClient(timeout=8) as client:
+                    async with httpx.AsyncClient(verify=system_ssl_context(), timeout=8) as client:
                         response = await client.get(
                             f"https://huggingface.co/api/models/{profile.model}"
                             "?expand=inferenceProviderMapping",
@@ -1914,7 +2229,7 @@ class ModelSetupService:
         if attempt["provider"] == "ollama":
             endpoint = _ollama_base(profile)
             try:
-                async with httpx.AsyncClient(timeout=8) as client:
+                async with httpx.AsyncClient(verify=system_ssl_context(), timeout=8) as client:
                     response = await client.get(f"{endpoint}/api/tags")
                     response.raise_for_status()
                 installed = [
@@ -1975,7 +2290,7 @@ class ModelSetupService:
         )
         if attempt["provider"] == "ollama":
             endpoint = _ollama_base(profile)
-            async with httpx.AsyncClient(timeout=8) as client:
+            async with httpx.AsyncClient(verify=system_ssl_context(), timeout=8) as client:
                 response = await client.get(f"{endpoint}/api/tags")
                 response.raise_for_status()
             installed = [
@@ -2005,7 +2320,7 @@ class ModelSetupService:
         """Run a bounded synthetic generation and retain no response content."""
         endpoint = _ollama_base(profile)
         timeout = httpx.Timeout(connect=10, read=300, write=30, pool=10)
-        async with httpx.AsyncClient(timeout=timeout) as client:
+        async with httpx.AsyncClient(verify=system_ssl_context(), timeout=timeout) as client:
             response = await client.post(
                 f"{endpoint}/api/chat",
                 json={
@@ -2098,7 +2413,7 @@ class ModelSetupService:
         endpoint = _ollama_base(profile)
         timeout = httpx.Timeout(connect=10, read=180, write=30, pool=10)
         unloaded: list[str] = []
-        async with httpx.AsyncClient(timeout=timeout) as client:
+        async with httpx.AsyncClient(verify=system_ssl_context(), timeout=timeout) as client:
             tags_response = await client.get(f"{endpoint}/api/tags")
             tags_response.raise_for_status()
             installed = [
@@ -2171,7 +2486,9 @@ class ModelSetupService:
             "trust": trust,
         }
 
-    def start_pull(self, profile_id: str) -> dict[str, Any]:
+    def start_pull(self, profile_id: str, strategy: str = "auto") -> dict[str, Any]:
+        if strategy not in LOCAL_INSTALL_STRATEGIES:
+            raise ValueError(f"Unsupported local model install strategy: {strategy}")
         profile = next(
             (
                 candidate
@@ -2194,6 +2511,8 @@ class ModelSetupService:
             "classification",
         }:
             raise KeyError(f"Profile cannot be installed as a local specialist: {profile_id}")
+        if profile.provider == "ollama" and strategy != "auto":
+            raise ValueError("Alternative installation strategies apply only to local specialists")
         existing = next(
             (
                 job
@@ -2222,6 +2541,8 @@ class ModelSetupService:
             "progress": 0,
             "created_at": datetime.now(UTC).isoformat(),
             "source_trust": source_trust,
+            "strategy": strategy,
+            "strategy_plan": LOCAL_INSTALL_STRATEGY_DETAILS[strategy],
         }
         self.jobs[job_id] = job
         asyncio.create_task(self._pull(job_id))
@@ -2235,12 +2556,41 @@ class ModelSetupService:
     async def _pull(self, job_id: str) -> None:
         job = self.jobs[job_id]
         if job["kind"] == "local-transformers":
-            await self._install_local_specialist(job)
+            async with self._local_install_lock:
+                await self._install_local_specialist(job)
+            try:
+                self._record_install_outcome(job)
+            except OSError as exc:
+                job["history_warning"] = _safe_setup_detail(exc, 300)
+            if job.get("status") == "error":
+                profile = next(
+                    item for item in self.config.load().models if item.id == job["profile_id"]
+                )
+                model_path = self.config.local_model_path(profile.id)
+                try:
+                    partial_download = model_path.exists() and any(model_path.iterdir())
+                except OSError:
+                    partial_download = False
+                try:
+                    free_bytes: int | None = shutil.disk_usage(
+                        self.config.local_models_root
+                    ).free
+                except OSError:
+                    free_bytes = None
+                job["retry_action"] = self._install_action(
+                    profile,
+                    installed=False,
+                    runtime_installed=local_runtime_available(),
+                    host=_model_host_context(),
+                    source_probe={"status": "not-rechecked"},
+                    partial_download=partial_download,
+                    free_bytes=free_bytes,
+                )
             return
         job.update(status="pulling", stage="ollama-service", detail="Contacting Ollama")
         try:
             timeout = httpx.Timeout(connect=10, read=None, write=30, pool=10)
-            async with httpx.AsyncClient(timeout=timeout) as client:
+            async with httpx.AsyncClient(verify=system_ssl_context(), timeout=timeout) as client:
                 async with client.stream(
                     "POST",
                     f"{job['endpoint']}/api/pull",
@@ -2288,60 +2638,112 @@ class ModelSetupService:
                 failure=failure,
             )
 
+    async def _run_runtime_install(
+        self,
+        job: dict[str, Any],
+        *,
+        public_only: bool,
+        native_trust: bool = False,
+    ) -> tuple[int, list[str], float]:
+        creationflags = 0x08000000 if os.name == "nt" else 0
+        command = [
+            sys.executable,
+            "-m",
+            "pip",
+            "install",
+        ]
+        options: dict[str, Any] = {
+            "stdout": asyncio.subprocess.PIPE,
+            "stderr": asyncio.subprocess.STDOUT,
+            "creationflags": creationflags,
+        }
+        if public_only:
+            command.extend(
+                [
+                    "--isolated",
+                    "--index-url",
+                    "https://pypi.org/simple",
+                    "--no-cache-dir",
+                ]
+            )
+            options["env"] = credential_free_pip_environment()
+        if native_trust:
+            command.extend(["--use-feature", "truststore"])
+        command.extend(
+            [
+                "--no-input",
+                "--disable-pip-version-check",
+                "--retries",
+                "1",
+                "--timeout",
+                "20",
+                *LOCAL_RUNTIME_PACKAGES,
+            ]
+        )
+        started = time.monotonic()
+        process = await asyncio.create_subprocess_exec(*command, **options)
+        diagnostic_lines: list[str] = []
+        if process.stdout:
+            async for line in process.stdout:
+                detail = line.decode("utf-8", errors="replace").strip()
+                if detail:
+                    safe_detail = _safe_setup_detail(detail, 400)
+                    diagnostic_lines.append(safe_detail)
+                    diagnostic_lines = diagnostic_lines[-12:]
+                    job["detail"] = safe_detail[-240:]
+        return_code = await process.wait()
+        importlib.invalidate_caches()
+        return return_code, diagnostic_lines, time.monotonic() - started
+
     async def _install_local_specialist(self, job: dict[str, Any]) -> None:
         job["tls_trust"] = system_tls_trust_state()
+        strategy = str(job.get("strategy") or "auto")
         job.update(
             status="pulling",
             stage="runtime-check",
             detail="Checking the local Transformers runtime",
             progress=5,
         )
-        diagnostic_lines: list[str] = []
         try:
             if not local_runtime_available():
+                public_first = strategy in {"public-only", "direct-http", "clean-download"}
+                native_trust = strategy in {"direct-http", "clean-download"}
                 job.update(
                     stage="runtime-install",
-                    detail="Installing the local inference runtime",
+                    detail=(
+                        "Installing the local inference runtime from isolated public PyPI"
+                        if public_first
+                        else "Installing the local inference runtime"
+                    ),
                     progress=10,
                 )
-                creationflags = 0x08000000 if os.name == "nt" else 0
-                initial_install_started = time.monotonic()
-                process = await asyncio.create_subprocess_exec(
-                    sys.executable,
-                    "-m",
-                    "pip",
-                    "install",
-                    *LOCAL_RUNTIME_PACKAGES,
-                    "--disable-pip-version-check",
-                    "--no-input",
-                    "--retries",
-                    "1",
-                    "--timeout",
-                    "20",
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.STDOUT,
-                    creationflags=creationflags,
+                return_code, diagnostic_lines, initial_install_seconds = (
+                    await self._run_runtime_install(
+                        job,
+                        public_only=public_first,
+                        native_trust=native_trust,
+                    )
                 )
-                if process.stdout:
-                    async for line in process.stdout:
-                        detail = line.decode("utf-8", errors="replace").strip()
-                        if detail:
-                            safe_detail = _safe_setup_detail(detail, 400)
-                            diagnostic_lines.append(safe_detail)
-                            diagnostic_lines = diagnostic_lines[-12:]
-                            job["detail"] = safe_detail[-240:]
-                return_code = await process.wait()
-                importlib.invalidate_caches()
                 initial_tail = "\n".join(diagnostic_lines)
-                initial_install_seconds = time.monotonic() - initial_install_started
+                if public_first:
+                    job["public_retry"] = {
+                        "attempted": True,
+                        "source": "https://pypi.org/simple",
+                        "credentials_sent": False,
+                        "trigger": f"selected-{strategy}",
+                        "first_attempt": True,
+                        "native_trust_requested": native_trust,
+                        "initial_failure_seconds": round(initial_install_seconds, 2),
+                        "succeeded": return_code == 0 and local_runtime_available(),
+                    }
                 if (
                     return_code != 0
+                    and not public_first
                     and _should_retry_public_source(
                         initial_tail,
                         elapsed_seconds=initial_install_seconds,
                     )
                 ):
-                    public_pip_env = credential_free_pip_environment()
                     job.update(
                         stage="runtime-install-public-retry",
                         detail=(
@@ -2358,38 +2760,10 @@ class ModelSetupService:
                             "initial_failure_seconds": round(initial_install_seconds, 2),
                         },
                     )
-                    diagnostic_lines = []
-                    process = await asyncio.create_subprocess_exec(
-                        sys.executable,
-                        "-m",
-                        "pip",
-                        "install",
-                        "--isolated",
-                        "--index-url",
-                        "https://pypi.org/simple",
-                        "--no-cache-dir",
-                        "--no-input",
-                        "--disable-pip-version-check",
-                        "--retries",
-                        "1",
-                        "--timeout",
-                        "20",
-                        *LOCAL_RUNTIME_PACKAGES,
-                        stdout=asyncio.subprocess.PIPE,
-                        stderr=asyncio.subprocess.STDOUT,
-                        creationflags=creationflags,
-                        env=public_pip_env,
+                    return_code, diagnostic_lines, _ = await self._run_runtime_install(
+                        job,
+                        public_only=True,
                     )
-                    if process.stdout:
-                        async for line in process.stdout:
-                            detail = line.decode("utf-8", errors="replace").strip()
-                            if detail:
-                                safe_detail = _safe_setup_detail(detail, 400)
-                                diagnostic_lines.append(safe_detail)
-                                diagnostic_lines = diagnostic_lines[-12:]
-                                job["detail"] = safe_detail[-240:]
-                    return_code = await process.wait()
-                    importlib.invalidate_caches()
                     job["public_retry"]["succeeded"] = (
                         return_code == 0 and local_runtime_available()
                     )
@@ -2418,6 +2792,19 @@ class ModelSetupService:
                 if profile.id == job["profile_id"]
             )
             model_path = self.config.local_model_path(profile.id)
+            direct_http = strategy in {"direct-http", "clean-download"}
+            clean_download = strategy == "clean-download"
+            if clean_download and model_path.exists() and not local_model_installed(model_path):
+                model_root = self.config.local_models_root.resolve()
+                resolved_model_path = model_path.resolve()
+                if resolved_model_path == model_root or model_root not in resolved_model_path.parents:
+                    raise RuntimeError("Refusing to clean a model path outside local model storage")
+                job.update(
+                    stage="model-cleanup",
+                    detail="Removing this model's incomplete local download before retry",
+                    progress=24,
+                )
+                shutil.rmtree(resolved_model_path)
             model_path.mkdir(parents=True, exist_ok=True)
             token = self.config.secret("huggingface_token") or None
             reviewed = REVIEWED_PUBLISHER_MODELS.get(profile.model, {})
@@ -2427,6 +2814,9 @@ class ModelSetupService:
                 "source": "https://huggingface.co" if public_source else "configured Hugging Face",
                 "credentials_sent": False if public_source else bool(token),
                 "first_attempt": True,
+                "install_strategy": strategy,
+                "xet_transfer": "disabled" if direct_http else "default",
+                "tls": "verified-native-system",
                 "reason": (
                     "The admitted publisher revision is public, so SignalRoom bypassed saved "
                     "credentials and alternate Hub endpoints."
@@ -2436,29 +2826,50 @@ class ModelSetupService:
             }
 
             def download(*, public_only: bool = False) -> tuple[str, str]:
-                from huggingface_hub import HfApi, snapshot_download
+                previous_disable_xet = os.environ.get("HF_HUB_DISABLE_XET")
+                previous_constant: bool | None = None
+                try:
+                    if direct_http:
+                        os.environ["HF_HUB_DISABLE_XET"] = "1"
+                    configure_huggingface_system_tls()
+                    import huggingface_hub
+                    from huggingface_hub import HfApi, snapshot_download
 
-                selected_token: str | bool | None = False if public_only else token
-                endpoint = "https://huggingface.co" if public_only else None
-                revision = HfApi(endpoint=endpoint, token=selected_token).model_info(
-                    profile.model
-                ).sha
+                    constants = getattr(huggingface_hub, "constants", None)
+                    if direct_http and constants is not None and hasattr(
+                        constants, "HF_HUB_DISABLE_XET"
+                    ):
+                        previous_constant = bool(constants.HF_HUB_DISABLE_XET)
+                        constants.HF_HUB_DISABLE_XET = True
+                    selected_token: str | bool | None = False if public_only else token
+                    endpoint = "https://huggingface.co" if public_only else None
+                    revision = HfApi(endpoint=endpoint, token=selected_token).model_info(
+                        profile.model
+                    ).sha
 
-                snapshot = snapshot_download(
-                    repo_id=profile.model,
-                    revision=revision,
-                    local_dir=model_path,
-                    token=selected_token,
-                    endpoint=endpoint,
-                    ignore_patterns=[
-                        "*.bin",
-                        "*.h5",
-                        "*.msgpack",
-                        "*.onnx",
-                        "*.ot",
-                    ],
-                )
-                return snapshot, revision
+                    snapshot = snapshot_download(
+                        repo_id=profile.model,
+                        revision=revision,
+                        local_dir=model_path,
+                        token=selected_token,
+                        endpoint=endpoint,
+                        force_download=clean_download,
+                        ignore_patterns=[
+                            "*.bin",
+                            "*.h5",
+                            "*.msgpack",
+                            "*.onnx",
+                            "*.ot",
+                        ],
+                    )
+                    return snapshot, revision
+                finally:
+                    if previous_disable_xet is None:
+                        os.environ.pop("HF_HUB_DISABLE_XET", None)
+                    else:
+                        os.environ["HF_HUB_DISABLE_XET"] = previous_disable_xet
+                    if previous_constant is not None:
+                        constants.HF_HUB_DISABLE_XET = previous_constant
 
             download_task = asyncio.create_task(
                 asyncio.to_thread(download, public_only=public_source)

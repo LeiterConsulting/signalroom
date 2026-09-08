@@ -190,8 +190,8 @@ from .workload import (
     WorkloadStore,
 )
 
-# SignalRoom owns this application process. Apply operating-system trust before services create
-# any outbound HTTP clients; certificate verification remains mandatory.
+# Prepare native trust for explicitly scoped public clients. Private connections retain their
+# saved verify/private-CA policy and are never affected process-wide.
 OUTBOUND_TLS_TRUST = activate_system_tls_trust()
 ROOT = Path(os.getenv("SIGNALROOM_ROOT", Path.cwd())).resolve()
 STATIC = Path(__file__).resolve().parent / "static"
@@ -3246,7 +3246,7 @@ async def revoke_model_artifact(attestation_id: str) -> dict[str, Any]:
 @app.post("/api/model-setup/pull", status_code=202)
 async def pull_model(request: ModelPullRequest) -> dict[str, Any]:
     try:
-        return services.model_setup.start_pull(request.profile_id)
+        return services.model_setup.start_pull(request.profile_id, request.strategy)
     except KeyError as exc:
         raise HTTPException(404, str(exc)) from exc
     except (PermissionError, ValueError) as exc:

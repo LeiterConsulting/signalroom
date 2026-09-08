@@ -9,22 +9,41 @@ from splunk_security_agent.splunk import SplunkMCPClient
 def test_mcp_client_can_disable_tls_verification():
     client = SplunkMCPClient("https://splunk-lab.example/services/mcp", verify_ssl=False)
     assert client.verify_ssl is False
+    assert client._ssl_context.check_hostname is False
+    assert client._ssl_context.verify_mode == 0
 
 
-def test_mcp_client_accepts_private_ca_bundle():
+def test_mcp_client_accepts_private_ca_bundle(monkeypatch):
+    marker = object()
+    captured = {}
+
+    def context_factory(*, verify, ca_bundle):
+        captured.update({"verify": verify, "ca_bundle": ca_bundle})
+        return marker
+
+    monkeypatch.setattr(
+        "splunk_security_agent.splunk.mcp_client.connection_ssl_context",
+        context_factory,
+    )
     client = SplunkMCPClient(
         "https://splunk.example/services/mcp",
         verify_ssl=True,
         ca_bundle="/etc/ssl/certs/organization-ca.pem",
     )
     assert client.verify_ssl == "/etc/ssl/certs/organization-ca.pem"
+    assert client._ssl_context is marker
+    assert captured == {
+        "verify": True,
+        "ca_bundle": "/etc/ssl/certs/organization-ca.pem",
+    }
 
 
 class FakeMCPTransport:
     calls: list[dict[str, Any]] = []
+    init_kwargs: list[dict[str, Any]] = []
 
     def __init__(self, *args: Any, **kwargs: Any):
-        pass
+        self.init_kwargs.append(kwargs)
 
     async def __aenter__(self):
         return self
@@ -61,6 +80,7 @@ class FakeMCPTransport:
 @pytest.mark.asyncio
 async def test_mcp_client_initializes_and_reuses_session(monkeypatch):
     FakeMCPTransport.calls = []
+    FakeMCPTransport.init_kwargs = []
     monkeypatch.setattr("splunk_security_agent.splunk.mcp_client.httpx.AsyncClient", FakeMCPTransport)
     client = SplunkMCPClient("https://splunk.example:8089/services/mcp", token="encrypted")
 
@@ -74,6 +94,8 @@ async def test_mcp_client_initializes_and_reuses_session(monkeypatch):
     ]
     assert FakeMCPTransport.calls[1]["headers"]["Mcp-Session-Id"] == "session-123"
     assert result["server"]["name"] == "splunk-mcp"
+    assert all("verify" in kwargs for kwargs in FakeMCPTransport.init_kwargs)
+    assert all(hasattr(kwargs["verify"], "wrap_bio") for kwargs in FakeMCPTransport.init_kwargs)
 
 
 class MethodNotAllowedTransport(FakeMCPTransport):

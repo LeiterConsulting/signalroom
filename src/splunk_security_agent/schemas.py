@@ -323,6 +323,7 @@ class ConnectionTestRequest(BaseModel):
 
 class ModelPullRequest(BaseModel):
     profile_id: str
+    strategy: Literal["auto", "public-only", "direct-http", "clean-download"] = "auto"
 
 
 class ModelSetupTroubleshootRequest(BaseModel):

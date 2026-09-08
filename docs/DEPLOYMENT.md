@@ -34,7 +34,7 @@ An automatic installer preflight writes a content-addressed receipt before stopp
 **Settings → Models** contains independent readiness panels for three execution paths:
 
 - **Ollama:** detects the configured service, lists installed profiles, and starts an explicit background download with progress. The default security profile pulls the official Foundation-Sec Q4_K_M GGUF directly from Hugging Face through Ollama.
-- **Local Transformers (recommended):** installs the runtime and SecureBERT snapshots only after an explicit click. The completed snapshot is pinned to the resolved publisher revision and stored under `data/models`; inference then stays on the SignalRoom host.
+- **Local Transformers (recommended):** performs a short read-only per-model preflight, then installs the runtime and SecureBERT snapshots only after an explicit click. The completed snapshot is pinned to the resolved publisher revision and stored under `data/models`; inference then stays on the SignalRoom host.
 - **Hugging Face cloud (optional):** validates the encrypted token only when cloud is selected and policy permits it, then distinguishes Hub access from hosted inference availability.
 
 For a terminal-driven deployment:
@@ -51,6 +51,14 @@ For a terminal-driven deployment:
 
 External installation and model downloads are always opt-in. Local SecureBERT installation is initiated from Settings so the operator sees the exact profile, purpose, and progress. On macOS, `--install-ollama` opens the signed app download; finish the app installation and rerun with `--pull-models`.
 
+Each missing local specialist receives an install action selected from host architecture, runtime state, free
+storage, incomplete model files, public publisher reachability, and prior safe attempt receipts. A failed action
+becomes **Retry** and advances to a different method: isolated public PyPI, verified direct Hugging Face HTTPS
+with Xet disabled, or a clean download scoped only to that model directory. The model row and browser
+notification explain the change before the user clicks again. Attempt metadata is retained in
+`data/model_install_attempts.json`; credentials, raw pip output, and model content are not. Page load never
+installs packages or model weights.
+
 For an opaque or host-specific failure, run **Settings → Models → Guided installation troubleshooting**.
 After explicit confirmation it tests one selected Ollama profile and one selected local Transformers specialist,
 installs either only when missing, and executes synthetic local capability probes. It checks both paths even when
@@ -60,17 +68,20 @@ change routing, trust enforcement, or cloud-inference policy.
 Admitted public SecureBERT repositories use official Hugging Face without saved credentials on the first attempt;
 that public-only decision is visible in the receipt. When a configured package source fails with a fast resolution,
 connectivity, or authorization signature, the guided action retries once against isolated public PyPI without
-sending configured index credentials. Repeated requests do not apply to TLS trust, disk, or filesystem-permission
-errors, and certificate verification remains enabled.
+sending configured index credentials. Automatic repeated requests do not apply to TLS trust, disk, or
+filesystem-permission errors. An explicit per-model **Retry** can choose a different verified transport or a clean
+model-scoped download after failure, and certificate verification remains enabled.
 The same rule applies to an explicitly requested individual local specialist install; readiness and diagnostic
 reads never trigger package or model retrieval.
 
-SignalRoom uses native operating-system certificate trust for outbound package and model HTTPS. On macOS this
-allows the local Transformers installer to honor roots administered in Keychain Access without disabling TLS
-verification. A remaining `CERTIFICATE_VERIFY_FAILED` with `native-system` active means the issuer is not trusted
-by macOS or the remote/intercepted certificate chain is incomplete. Repair the approved root/chain in Keychain,
-restart SignalRoom, and retry. For an organization-managed PEM bundle, export `SSL_CERT_FILE` with the absolute
-bundle path before starting SignalRoom; do not use an unverified-download workaround.
+SignalRoom explicitly uses native operating-system certificate trust for public package and model HTTPS. On
+macOS this allows the local Transformers installer to honor roots administered in Keychain Access without
+disabling TLS verification. It does not patch Python's TLS implementation process-wide: Splunk MCP and other
+private connections retain their saved verification and private-CA policies. A remaining
+`CERTIFICATE_VERIFY_FAILED` with `native-system` active means the public download issuer is not trusted by macOS
+or the remote/intercepted certificate chain is incomplete. Repair the approved root/chain in Keychain, restart
+SignalRoom, and retry. For an organization-managed PEM bundle, export `SSL_CERT_FILE` with the absolute bundle
+path before starting SignalRoom; do not use an unverified-download workaround.
 
 For a non-mutating model-preparation audit on Linux or macOS, run:
 

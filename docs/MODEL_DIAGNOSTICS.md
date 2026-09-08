@@ -21,6 +21,18 @@ does not change what this diagnostic collects.
 
 ## Guided installation troubleshooting
 
+Before using the two-runtime drill below, each missing non-Ollama model in **Settings → Models** exposes its own
+adaptive action. Loading the page performs a bounded, credential-free preflight of architecture, runtime, free
+storage, partial model state, and public publisher metadata. It does not install anything. SignalRoom stores only
+safe attempt metadata in `data/model_install_attempts.json`; package output, tokens, and model content are not
+retained there.
+
+The first action is selected from that preflight. If it fails, the button is relabeled **Retry** and the model row
+plus browser notification explain what failed and how the next attempt differs. The recovery ladder can isolate
+runtime resolution to public PyPI, disable Hugging Face Xet in favor of verified native-system HTTPS, and finally
+remove only the selected model's incomplete directory before a clean immutable snapshot download. Each retry is
+explicit. TLS and hostname verification remain enabled throughout.
+
 **Settings → Models → Guided installation troubleshooting** is the mutating companion to the read-only
 collector. An administrator selects one Ollama profile and one local Transformers specialist, confirms the
 potentially multi-gigabyte operation, and SignalRoom then:
@@ -44,15 +56,17 @@ development index or mirror, the drill makes one bounded public-only retry:
 
 The receipt identifies the source, states that no credential was sent, and records success or failure. TLS
 verification is never disabled. Certificate failures, storage failures, and filesystem-permission failures do
-not trigger a repeated request to the same source. The same guarded package retry and public-first model policy
-are used by an explicit one-profile local specialist installation;
-opening Settings and running readiness never invoke it. `--diagnose_all` may use the same source decision for a
+not trigger an automatic repeated request to the same source. The per-model **Retry** action may explicitly
+select a materially different verified transfer method after one of those failures. The same guarded package
+retry and public-first model policy are used by an explicit one-profile local specialist installation;
+opening Settings and running readiness never install packages or retrieve model weights. `--diagnose_all` may use the same source decision for a
 second `--dry-run`: it strips all `PIP_*` settings, ignores pip configuration, sends no credentials, and resolves
 against public PyPI without installing or caching anything.
 
-SignalRoom activates the native operating-system certificate store for application-owned HTTPS. On macOS,
-Hugging Face downloads therefore use the same Keychain-managed trust decisions as the host instead of being
-limited to a Python-specific CA bundle. The result card and copied report identify `native-system` or
+SignalRoom gives public package and Hugging Face clients an explicit native operating-system TLS context. On
+macOS, downloads therefore use the same Keychain-managed trust decisions as the host instead of being limited to
+a Python-specific CA bundle. This is scoped rather than process-wide: it cannot override a Splunk MCP
+connection's verify-TLS or private-CA policy. The result card and copied report identify `native-system` or
 `python-default`; neither mode disables certificate or hostname verification. If native trust is active and the
 request still fails, the issuer (often an organization TLS-inspection root) is not trusted or the served chain is
 incomplete. Repair that trust in Keychain Access, restart SignalRoom, and retry. Where policy distributes a PEM

@@ -183,7 +183,10 @@ def test_guided_model_setup_explains_mutation_public_retry_and_safe_report() -> 
     assert ".model-setup-public-retry" in STYLES_CSS
     assert "HTTPS trust" in APP_JS
     assert "native system store" in APP_JS
-    assert "credential-free public source was already used" in APP_JS
+    assert "Retry is ready and will use a different method" in APP_JS
+    assert "data-install-strategy" in APP_JS
+    assert "function localInstallFeedback(profile)" in APP_JS
+    assert ".model-install-feedback.retry" in STYLES_CSS
     assert "Model source" in APP_JS
     assert "signalroom.model-setup-troubleshooting.v2" in APP_JS
 

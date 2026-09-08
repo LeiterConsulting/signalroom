@@ -9,6 +9,8 @@ from uuid import uuid4
 
 import httpx
 
+from ..tls_trust import connection_ssl_context
+
 
 class SplunkMCPError(RuntimeError):
     pass
@@ -61,6 +63,7 @@ class SplunkMCPClient:
         self.url = url.rstrip("/")
         self.token = token
         self.verify_ssl = ca_bundle if verify_ssl and ca_bundle else verify_ssl
+        self._ssl_context = connection_ssl_context(verify=verify_ssl, ca_bundle=ca_bundle)
         self._tools: list[dict[str, Any]] | None = None
         self._initialized = False
         self._session_id = ""
@@ -116,7 +119,7 @@ class SplunkMCPClient:
         if not self.url:
             raise SplunkMCPError("Splunk MCP URL is not configured")
         try:
-            async with httpx.AsyncClient(verify=self.verify_ssl, timeout=self.timeout) as client:
+            async with httpx.AsyncClient(verify=self._ssl_context, timeout=self.timeout) as client:
                 response = await client.post(self.url, headers=self._headers(), json=payload)
                 response.raise_for_status()
                 session_id = response.headers.get("Mcp-Session-Id")

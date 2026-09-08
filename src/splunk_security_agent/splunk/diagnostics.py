@@ -4,7 +4,6 @@ import asyncio
 import json
 import socket
 import sqlite3
-import ssl
 import time
 from datetime import UTC, datetime
 from pathlib import Path
@@ -17,6 +16,7 @@ from cryptography import x509
 
 from ..progress import ProgressCallback, report_progress
 from ..schemas import SplunkConnection
+from ..tls_trust import connection_ssl_context
 from .demo import DemoSplunkClient
 from .mcp_client import TOOL_ALIASES, SplunkMCPClient
 
@@ -432,12 +432,10 @@ class SplunkConnectionDiagnostics:
     async def _tls_stage(self, connection: SplunkConnection, host: str, port: int) -> dict[str, Any]:
         started = time.monotonic()
         try:
-            if connection.verify_ssl:
-                context = ssl.create_default_context(cafile=connection.ca_bundle or None)
-            else:
-                context = ssl.create_default_context()
-                context.check_hostname = False
-                context.verify_mode = ssl.CERT_NONE
+            context = connection_ssl_context(
+                verify=connection.verify_ssl,
+                ca_bundle=connection.ca_bundle,
+            )
             reader, writer = await asyncio.wait_for(
                 asyncio.open_connection(host, port, ssl=context, server_hostname=host), timeout=8
             )

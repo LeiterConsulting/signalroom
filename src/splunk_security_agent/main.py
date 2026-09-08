@@ -65,8 +65,8 @@ def _write_runtime_file(path: str, host: str, port: int) -> None:
 
 
 def run() -> None:
-    # Apply OS-managed certificate trust before Uvicorn imports the application and its HTTP
-    # clients. This preserves certificate validation while making macOS Keychain roots usable.
+    # Detect OS-managed certificate trust before Uvicorn imports the application. Public clients
+    # opt into it explicitly; private connection policies remain isolated.
     from .tls_trust import activate_system_tls_trust
 
     activate_system_tls_trust()

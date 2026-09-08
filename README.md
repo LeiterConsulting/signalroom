@@ -294,6 +294,14 @@ Model identifiers are configuration, not hard-coded trust decisions. Review each
 The easiest path is **Settings → Models**. SignalRoom detects Ollama and the local Transformers runtime, shows every profile as ready or missing, and downloads only after an explicit action. Installing a SecureBERT profile adds the local runtime when necessary, resolves an immutable publisher revision, downloads safetensor assets into `data/models`, and records a local manifest. Opening Settings never starts a model download.
 On Apple Silicon, local Transformers automatically use PyTorch's Metal Performance Shaders (MPS) backend when it is built and available; Settings reports the selected execution device. CUDA remains preferred on supported hosts, with CPU as the safe fallback.
 
+Every missing local specialist now has an adaptive install action. On page load, a short read-only preflight checks
+host architecture, runtime availability, free model storage, incomplete files, admitted public publisher
+reachability, and the last safe installation receipt. A first click uses the best applicable method. After a
+failure the button becomes **Retry**, survives a page or service restart, and explains the different method it
+will attempt next: isolated public PyPI, verified direct Hugging Face HTTPS with Xet disabled, or a clean fetch
+that removes only that model's incomplete directory. The browser notification repeats both the failure and the
+next method. None of these paths disables TLS verification or downloads a model until the operator clicks.
+
 When one of those installs fails without a useful explanation, **Guided installation troubleshooting** proves
 one selected Ollama path and one selected local Transformers path in the same host-side run. It continues to the
 second path after a first-path failure, runs only synthetic capability checks, and returns stage-specific
@@ -304,15 +312,17 @@ the explicitly confirmed drill retries once with isolated public PyPI. The repor
 confirms no credentials were sent; TLS verification is not relaxed. The drill never changes active routing, model
 trust, or cloud policy.
 
-Outbound package and model HTTPS uses the operating system's native certificate trust store. On macOS this
-means roots administered through Keychain Access are available to Python and Hugging Face downloads while
-hostname and certificate validation remain enabled. A TLS failure now reports whether native Keychain trust was
-active. If it was active, repair the issuer chain in Keychain; if policy supplies a PEM bundle instead, start
-SignalRoom with `SSL_CERT_FILE` pointing to that approved bundle. SignalRoom never offers an insecure-download
-mode.
+Public package and model HTTPS clients explicitly use the operating system's native certificate trust store. On
+macOS this means roots administered through Keychain Access are available to Python and Hugging Face downloads
+while hostname and certificate validation remain enabled. Native trust is scoped to those public clients; it is
+never injected process-wide, so each Splunk MCP connection continues to honor its own verify-TLS toggle and
+private CA bundle. A model-download TLS failure reports whether native Keychain trust was active. If it was,
+repair the issuer chain in Keychain; if policy supplies a PEM bundle instead, start SignalRoom with
+`SSL_CERT_FILE` pointing to that approved bundle. SignalRoom never offers an insecure-download mode.
 
 An explicit one-profile local specialist install uses the same fail-fast public-source recovery. Merely opening
-Models or checking readiness never invokes the fallback. `--diagnose_all` remains read-only, but if its configured
+Models or checking readiness never installs packages, downloads weights, or invokes a fallback; readiness only
+performs the short credential-free publisher metadata preflight described above. `--diagnose_all` remains read-only, but if its configured
 package-index dry run fails quickly with a narrow-source signature, it performs a second credential-free,
 no-install resolution against public PyPI. This proves whether the host can obtain compatible wheels without
 changing the environment.

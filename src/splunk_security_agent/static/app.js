@@ -191,9 +191,9 @@ function renderMarkdown(value = '') {
   return text.split(/\n{2,}/).map(block => /^<(pre|ul|h)/.test(block) ? block : `<p>${block.replace(/\n/g, '<br>')}</p>`).join('');
 }
 
-function toast(message) {
+function toast(message, duration = 2600) {
   const node = $('#toast'); node.textContent = message; node.classList.add('show');
-  clearTimeout(node._timer); node._timer = setTimeout(() => node.classList.remove('show'), 2600);
+  clearTimeout(node._timer); node._timer = setTimeout(() => node.classList.remove('show'), duration);
 }
 
 function showLogin() {
@@ -2100,6 +2100,33 @@ function contextIndexLabel(profile) {
   return ` · Context ${Number(index.indexed_chunks).toLocaleString()}/${Number(index.total_chunks).toLocaleString()}`;
 }
 
+function localInstallAction(profileId) {
+  return state.modelReadiness?.local_transformers?.profiles?.find(profile => profile.id === profileId)?.install_action || null;
+}
+
+function localInstallButton(profileId, fallbackLabel = 'Install locally') {
+  const action = localInstallAction(profileId);
+  const label = action?.label || fallbackLabel;
+  const strategy = action?.strategy || 'auto';
+  const title = action ? `${action.title}. ${action.reason}` : 'Install this specialist into SignalRoom local storage.';
+  return `<button type="button" data-pull-profile="${escapeHtml(profileId)}" data-install-strategy="${escapeHtml(strategy)}" title="${escapeHtml(title)}">${escapeHtml(label)}</button>`;
+}
+
+function localInstallFeedback(profile) {
+  const action = profile.install_action; if (!action || profile.installed) return '';
+  const source = action.source_probe || {};
+  const sourceLabel = source.status === 'reachable'
+    ? 'Public model source reachable'
+    : source.status === 'unreachable'
+      ? 'Public model source was not reachable during preflight'
+      : 'Publisher access evaluated';
+  return `<div class="model-install-feedback ${action.retry ? 'retry' : ''}">
+    <b>${escapeHtml(action.retry ? `Previous attempt failed · ${action.previous_failure?.stage || 'installation'}` : action.title)}</b>
+    <span>${escapeHtml(action.reason)}</span>
+    <small>Next method · ${escapeHtml(action.title)} · ${escapeHtml(sourceLabel)}</small>
+  </div>`;
+}
+
 function renderModelReadiness() {
   const readiness = state.modelReadiness; if (!readiness) return;
   const ollama = readiness.ollama;
@@ -2126,8 +2153,9 @@ function renderModelReadiness() {
     ? `The local runtime is ready on ${local.device}. Install either specialist below from Hugging Face.`
     : 'Install a specialist below to add the local runtime and download its model files in one guided operation.';
   $('#localProfileReadiness').innerHTML = local.profiles.map(profile => `
-    <div class="profile-ready-row" data-local-profile="${escapeHtml(profile.id)}"><span><i class="model-status ${profile.installed ? 'ok' : ''}"></i><b>${escapeHtml(profile.label)}</b><small>${escapeHtml(profile.model + contextIndexLabel(profile))}</small></span>
-    ${profile.installed ? `<em title="Revision ${escapeHtml(profile.revision || 'recorded locally')}">Local${profile.bytes ? ` · ${escapeHtml(formatBytes(profile.bytes))}` : ''}</em>` : `<button type="button" data-pull-profile="${escapeHtml(profile.id)}">Install locally</button>`}</div>`).join('');
+    <div class="profile-ready-row local-install-row" data-local-profile="${escapeHtml(profile.id)}"><span><i class="model-status ${profile.installed ? 'ok' : ''}"></i><b>${escapeHtml(profile.label)}</b><small>${escapeHtml(profile.model + contextIndexLabel(profile))}</small></span>
+    ${profile.installed ? `<em title="Revision ${escapeHtml(profile.revision || 'recorded locally')}">Local${profile.bytes ? ` · ${escapeHtml(formatBytes(profile.bytes))}` : ''}</em>` : localInstallButton(profile.id)}
+    ${localInstallFeedback(profile)}</div>`).join('');
 
   const hf = readiness.huggingface;
   const hfOkay = hf.token_configured && hf.token_valid === true;
@@ -3280,9 +3308,13 @@ async function scanSplunkModels() {
 }
 
 async function pullModel(profileId, button) {
+  const originalLabel = button.textContent;
+  const selectedAction = localInstallAction(profileId);
+  const strategy = button.dataset.installStrategy || selectedAction?.strategy || 'auto';
+  let job = null;
   button.disabled = true; button.textContent = 'Starting…';
   try {
-    let job = await api('/api/model-setup/pull', { method:'POST', body:JSON.stringify({ profile_id:profileId }) });
+    job = await api('/api/model-setup/pull', { method:'POST', body:JSON.stringify({ profile_id:profileId, strategy }) });
     while (['queued', 'pulling'].includes(job.status)) {
       button.textContent = job.context_chunks
         ? `Indexing ${job.indexed_chunks || 0}/${job.context_chunks}`
@@ -3292,12 +3324,21 @@ async function pullModel(profileId, button) {
       job = await api(`/api/model-setup/pull/${job.id}`);
     }
     if (job.status !== 'complete') {
-      const publicSourceUsed = job.source_policy?.mode === 'credential-free-public' ? ' · credential-free public source was already used' : '';
-      throw new Error(`${job.detail || 'Model download failed'}${publicSourceUsed}`);
+      throw new Error(job.detail || 'Model download failed');
     }
     const publicSourceNote = job.source_policy?.mode === 'credential-free-public' ? ' · downloaded credential-free from the admitted public repository' : '';
     toast(job.kind === 'local-transformers' ? `Local specialist installed${publicSourceNote} · approve its exact artifact after evaluation` : 'Model is ready in Ollama · approve its exact artifact after evaluation'); await Promise.all([loadModelReadiness(), loadModelTrust(true)]); renderModels();
-  } catch (error) { button.disabled = false; button.textContent = 'Retry'; toast(error.message); }
+  } catch (error) {
+    const retry = job?.retry_action;
+    button.disabled = false;
+    button.textContent = retry?.label || (job?.kind === 'local-transformers' ? 'Retry' : originalLabel);
+    if (retry?.strategy) button.dataset.installStrategy = retry.strategy;
+    const changedMethod = retry?.changes?.[0]
+      ? ` Retry is ready and will use a different method: ${retry.changes[0]}`
+      : '';
+    toast(`${job?.failure?.summary || error.message}.${changedMethod}`, changedMethod ? 8000 : 4200);
+    if (job?.kind === 'local-transformers') await loadModelReadiness();
+  }
 }
 
 async function activateModel(profileId, button) {
@@ -3506,7 +3547,7 @@ function renderModels() {
       <h3>${escapeHtml(model.label)}</h3><div class="model-id">${escapeHtml(model.model)}</div>
       <p>${escapeHtml(model.description)}</p><div class="tags"><span>${escapeHtml(model.provenance || 'Operator supplied')}</span><span>${Number(model.context_window).toLocaleString()} ctx</span>${stagedCandidate ? '<span class="candidate-model-tag">NON-ROUTED</span>' : ''}${readiness?.loaded ? '<span class="active-model-tag">LOADED IN OLLAMA</span>' : ''}${isLocalSpecialist && readiness?.installed ? '<span class="active-model-tag">LOCAL · NO CLOUD INFERENCE</span>' : ''}</div>
       ${update ? `<div class="model-update ${escapeHtml(update.status)}"><b>${escapeHtml(updateLabels[update.status] || update.status)}</b><span>${escapeHtml(update.detail || '')}</span>${update.last_modified ? `<time>Source updated ${escapeHtml(new Date(update.last_modified).toLocaleDateString())}</time>` : ''}</div>` : ''}
-      <footer><span>${stagedCandidate ? 'STAGED · NOT ROUTED' : model.enabled ? 'ENABLED' : 'DISABLED'}</span><div class="model-actions">${model.provider === 'ollama' && readiness?.installed && !readiness?.loaded ? `<button data-activate-model="${escapeHtml(model.id)}">Activate</button>` : ''}${model.provider === 'ollama' && !readiness?.installed && !stagedCandidate ? `<button data-pull-profile="${escapeHtml(model.id)}">Download</button>` : ''}${isLocalSpecialist && !readiness?.installed ? `<button data-pull-profile="${escapeHtml(model.id)}">Install locally</button>` : ''}${update && ['update-available','untracked','check-unavailable'].includes(update.status) && readiness?.installed ? `<button data-pull-profile="${escapeHtml(model.id)}">Refresh explicitly</button>` : ''}<button data-test-model="${escapeHtml(model.id)}">${capabilityLabel}</button></div></footer>
+      <footer><span>${stagedCandidate ? 'STAGED · NOT ROUTED' : model.enabled ? 'ENABLED' : 'DISABLED'}</span><div class="model-actions">${model.provider === 'ollama' && readiness?.installed && !readiness?.loaded ? `<button data-activate-model="${escapeHtml(model.id)}">Activate</button>` : ''}${model.provider === 'ollama' && !readiness?.installed && !stagedCandidate ? `<button data-pull-profile="${escapeHtml(model.id)}">Download</button>` : ''}${isLocalSpecialist && !readiness?.installed ? localInstallButton(model.id) : ''}${update && ['update-available','untracked','check-unavailable'].includes(update.status) && readiness?.installed ? `<button data-pull-profile="${escapeHtml(model.id)}">Refresh explicitly</button>` : ''}<button data-test-model="${escapeHtml(model.id)}">${capabilityLabel}</button></div></footer>
     </article>`;
   }).join('');
   renderModelCatalog(); renderCandidateStaging(); renderModelLifecycle();
@@ -6551,7 +6592,10 @@ async function testConnection(kind, profileId, output) {
     }
     const result = await api('/api/test-connection', { method:'POST', body:JSON.stringify(payload) });
     if (kind === 'splunk') {
-      output.textContent = result.ready ? `${result.demo ? 'Demo client' : 'Splunk MCP'} ready · ${result.tool_count || 0} tools` : `Blocked at ${String(result.blocking_stage || 'preflight').replaceAll('-', ' ')}`;
+      const failedStage = (result.stages || []).find(stage => stage.status === 'error');
+      output.textContent = result.ready
+        ? `${result.demo ? 'Demo client' : 'Splunk MCP'} ready · ${result.tool_count || 0} tools`
+        : `${failedStage?.label || `Blocked at ${String(result.blocking_stage || 'preflight').replaceAll('-', ' ')}`}: ${failedStage?.detail || 'The connection preflight did not pass.'}${failedStage?.remediation ? ` Next: ${failedStage.remediation}` : ''}`;
       output.className = `test-result ${result.ready ? 'ok' : 'error'}`;
       renderConnectionDiagnostics(result, { setup:true });
       return result;

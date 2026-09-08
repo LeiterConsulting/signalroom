@@ -4,6 +4,7 @@ from typing import Any
 
 import httpx
 
+from ..tls_trust import system_ssl_context
 from .base import BaseModelProvider, ModelProviderError
 
 
@@ -33,7 +34,7 @@ class HuggingFaceProvider(BaseModelProvider):
         if tools:
             payload["tools"] = tools
         try:
-            async with httpx.AsyncClient(timeout=180) as client:
+            async with httpx.AsyncClient(verify=system_ssl_context(), timeout=180) as client:
                 response = await client.post(
                     f"{endpoint}/chat/completions", headers=self._headers(), json=payload
                 )
@@ -51,7 +52,7 @@ class HuggingFaceProvider(BaseModelProvider):
 
     async def embeddings(self, texts: list[str]) -> list[list[float]]:
         try:
-            async with httpx.AsyncClient(timeout=180) as client:
+            async with httpx.AsyncClient(verify=system_ssl_context(), timeout=180) as client:
                 response = await client.post(
                     self.inference_url,
                     headers=self._headers(),
@@ -65,7 +66,7 @@ class HuggingFaceProvider(BaseModelProvider):
 
     async def entities(self, text: str) -> list[dict[str, Any]]:
         try:
-            async with httpx.AsyncClient(timeout=120) as client:
+            async with httpx.AsyncClient(verify=system_ssl_context(), timeout=120) as client:
                 response = await client.post(
                     self.inference_url,
                     headers=self._headers(),
@@ -81,7 +82,7 @@ class HuggingFaceProvider(BaseModelProvider):
         if not sentences:
             return []
         try:
-            async with httpx.AsyncClient(timeout=180) as client:
+            async with httpx.AsyncClient(verify=system_ssl_context(), timeout=180) as client:
                 response = await client.post(
                     self.inference_url,
                     headers=self._headers(),
@@ -105,7 +106,7 @@ class HuggingFaceProvider(BaseModelProvider):
         if not self.token:
             return {"ok": False, "error": "No Hugging Face token configured", "model": self.profile.model}
         try:
-            async with httpx.AsyncClient(timeout=10) as client:
+            async with httpx.AsyncClient(verify=system_ssl_context(), timeout=10) as client:
                 response = await client.get(
                     f"https://huggingface.co/api/models/{self.profile.model}", headers=self._headers()
                 )
