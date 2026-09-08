@@ -25,6 +25,37 @@ def local_model_installed(path: Path) -> bool:
     )
 
 
+def _select_torch_device(torch_module: Any) -> str:
+    """Prefer a supported local accelerator without making it a hard requirement."""
+    if torch_module.cuda.is_available():
+        return "cuda"
+    mps = getattr(getattr(torch_module, "backends", None), "mps", None)
+    if (
+        mps is not None
+        and callable(getattr(mps, "is_built", None))
+        and callable(getattr(mps, "is_available", None))
+        and mps.is_built()
+        and mps.is_available()
+    ):
+        return "mps"
+    return "cpu"
+
+
+def local_transformers_device() -> str:
+    import torch
+
+    return _select_torch_device(torch)
+
+
+def local_transformers_device_label(device: str | None = None) -> str:
+    selected = device or local_transformers_device()
+    return {
+        "cuda": "CUDA GPU",
+        "mps": "Apple MPS",
+        "cpu": "CPU",
+    }.get(selected, selected.upper())
+
+
 class LocalTransformersProvider(BaseModelProvider):
     """Runs downloaded Hugging Face specialists without making inference network calls."""
 
@@ -47,9 +78,15 @@ class LocalTransformersProvider(BaseModelProvider):
 
     @staticmethod
     def _device() -> str:
-        import torch
+        return local_transformers_device()
 
-        return "cuda" if torch.cuda.is_available() else "cpu"
+    @staticmethod
+    def _pipeline_device(device: str) -> int | str:
+        if device == "cuda":
+            return 0
+        if device == "mps":
+            return "mps"
+        return -1
 
     def _embedding_model(self) -> Any:
         self._require_ready()
@@ -83,12 +120,13 @@ class LocalTransformersProvider(BaseModelProvider):
                 model = AutoModelForTokenClassification.from_pretrained(
                     self.model_path, local_files_only=True, trust_remote_code=False
                 )
+                device = self._device()
                 self._models[cache_key] = pipeline(
                     "token-classification",
                     model=model,
                     tokenizer=tokenizer,
                     aggregation_strategy="simple",
-                    device=0 if self._device() == "cuda" else -1,
+                    device=self._pipeline_device(device),
                 )
             return self._models[cache_key]
 
@@ -125,11 +163,12 @@ class LocalTransformersProvider(BaseModelProvider):
                 model = AutoModelForSequenceClassification.from_pretrained(
                     self.model_path, local_files_only=True, trust_remote_code=False
                 )
+                device = self._device()
                 self._models[cache_key] = pipeline(
                     "text-classification",
                     model=model,
                     tokenizer=tokenizer,
-                    device=0 if self._device() == "cuda" else -1,
+                    device=self._pipeline_device(device),
                 )
             return self._models[cache_key]
 

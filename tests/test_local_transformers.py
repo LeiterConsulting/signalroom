@@ -1,10 +1,14 @@
+from types import SimpleNamespace
+
 import pytest
 
 from splunk_security_agent.config import ConfigStore
 from splunk_security_agent.providers.huggingface import HuggingFaceProvider
 from splunk_security_agent.providers.local_transformers import (
     LocalTransformersProvider,
+    _select_torch_device,
     local_model_installed,
+    local_transformers_device_label,
 )
 from splunk_security_agent.providers.router import ModelRouter
 
@@ -28,6 +32,30 @@ def test_local_model_requires_completed_manifest_config_and_weights(tmp_path):
 
     (model_path / ".signalroom-model.json").write_text("{}", encoding="utf-8")
     assert local_model_installed(model_path) is True
+
+
+def test_local_transformers_device_prefers_cuda_then_apple_mps():
+    def fake_torch(*, cuda: bool, mps_built: bool, mps_available: bool):
+        return SimpleNamespace(
+            cuda=SimpleNamespace(is_available=lambda: cuda),
+            backends=SimpleNamespace(
+                mps=SimpleNamespace(
+                    is_built=lambda: mps_built,
+                    is_available=lambda: mps_available,
+                )
+            ),
+        )
+
+    assert _select_torch_device(fake_torch(cuda=True, mps_built=True, mps_available=True)) == "cuda"
+    assert _select_torch_device(fake_torch(cuda=False, mps_built=True, mps_available=True)) == "mps"
+    assert _select_torch_device(fake_torch(cuda=False, mps_built=True, mps_available=False)) == "cpu"
+    assert local_transformers_device_label("mps") == "Apple MPS"
+
+
+def test_transformers_pipeline_device_maps_apple_mps_without_cpu_fallback():
+    assert LocalTransformersProvider._pipeline_device("cuda") == 0
+    assert LocalTransformersProvider._pipeline_device("mps") == "mps"
+    assert LocalTransformersProvider._pipeline_device("cpu") == -1
 
 
 def test_router_prefers_local_transformers_and_allows_explicit_cloud(tmp_path):

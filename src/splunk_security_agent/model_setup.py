@@ -23,6 +23,8 @@ from .providers.local_transformers import (
     LocalTransformersProvider,
     local_model_installed,
     local_runtime_available,
+    local_transformers_device,
+    local_transformers_device_label,
 )
 from .rag import EvidenceStore
 from .schemas import ModelProfile
@@ -1610,15 +1612,17 @@ class ModelSetupService:
             "profiles": local_profiles,
             "network_inference": False,
             "device": "available after runtime install",
+            "device_id": None,
             "index_job": self.context_index_job,
         }
         if local_transformers["runtime_installed"]:
             try:
-                import torch
-
-                local_transformers["device"] = "CUDA GPU" if torch.cuda.is_available() else "CPU"
+                device = local_transformers_device()
+                local_transformers["device"] = local_transformers_device_label(device)
+                local_transformers["device_id"] = device
             except Exception:
                 local_transformers["device"] = "CPU"
+                local_transformers["device_id"] = "cpu"
 
         token = self.config.secret("huggingface_token")
         huggingface: dict[str, Any] = {

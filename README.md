@@ -292,6 +292,7 @@ general and security-reasoning defaults; the additional profiles remain explicit
 Model identifiers are configuration, not hard-coded trust decisions. Review each model card and license, pin an approved revision, and use your organization’s model intake process before production deployment. The app works with lexical FTS retrieval when the optional embedding model is unavailable.
 
 The easiest path is **Settings → Models**. SignalRoom detects Ollama and the local Transformers runtime, shows every profile as ready or missing, and downloads only after an explicit action. Installing a SecureBERT profile adds the local runtime when necessary, resolves an immutable publisher revision, downloads safetensor assets into `data/models`, and records a local manifest. Opening Settings never starts a model download.
+On Apple Silicon, local Transformers automatically use PyTorch's Metal Performance Shaders (MPS) backend when it is built and available; Settings reports the selected execution device. CUDA remains preferred on supported hosts, with CPU as the safe fallback.
 
 When one of those installs fails without a useful explanation, **Guided installation troubleshooting** proves
 one selected Ollama path and one selected local Transformers path in the same host-side run. It continues to the

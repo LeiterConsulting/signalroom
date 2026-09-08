@@ -330,6 +330,11 @@ SignalRoom checks the physical Mac architecture independently from the architect
 shell. When Apple Silicon hardware is using Intel `x86_64` Python through Rosetta, current PyTorch releases
 cannot supply the macOS wheel required by the local Transformers and SecureBERT runtime.
 
+With a native Apple Silicon Python and an MPS-capable PyTorch build, SignalRoom automatically routes local
+SecureBERT embeddings, reranking, entity extraction, and classification through Apple Metal. **Settings →
+Models** reports `Apple MPS` when the accelerator is active. CUDA remains the first choice on supported hosts;
+SignalRoom falls back to CPU when neither accelerator is available.
+
 During an interactive install, SignalRoom explains the limitation and asks:
 
 ```text

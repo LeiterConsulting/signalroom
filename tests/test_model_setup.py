@@ -191,6 +191,22 @@ async def test_readiness_reports_each_ollama_profile(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_readiness_reports_apple_mps_for_local_transformers(monkeypatch, tmp_path):
+    monkeypatch.setattr("splunk_security_agent.model_setup.httpx.AsyncClient", FakeClient)
+    monkeypatch.setattr(
+        "splunk_security_agent.model_setup.local_runtime_available", lambda: True
+    )
+    monkeypatch.setattr(
+        "splunk_security_agent.model_setup.local_transformers_device", lambda: "mps"
+    )
+
+    result = await ModelSetupService(ConfigStore(tmp_path)).readiness()
+
+    assert result["local_transformers"]["device"] == "Apple MPS"
+    assert result["local_transformers"]["device_id"] == "mps"
+
+
+@pytest.mark.asyncio
 async def test_readiness_reports_offline_ollama_profiles_without_crashing(
     monkeypatch, tmp_path
 ):
